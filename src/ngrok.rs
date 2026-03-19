@@ -71,7 +71,10 @@ async fn fetch_ngrok_url() -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    let tunnels = body.get("tunnels").and_then(|t| t.as_array()).ok_or("No tunnels")?;
+    let tunnels = body
+        .get("tunnels")
+        .and_then(|t| t.as_array())
+        .ok_or("No tunnels")?;
     for tunnel in tunnels {
         if let Some(url) = tunnel.get("public_url").and_then(|u| u.as_str()) {
             if url.starts_with("https://") {

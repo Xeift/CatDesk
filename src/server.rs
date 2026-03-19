@@ -6,11 +6,12 @@ use axum::{
     response::Json,
     routing::{delete, get, post},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, Session};
 use crate::state::SharedState;
 
@@ -20,13 +21,15 @@ type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 struct ServerState {
     sessions: Sessions,
     app: SharedState,
+    devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
 }
 
 /// Build the axum router.
-pub fn router(app_state: SharedState) -> Router {
+pub fn router(app_state: SharedState, devtools: Option<Arc<Mutex<DevtoolsBridge>>>) -> Router {
     let state = ServerState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         app: app_state,
+        devtools,
     };
     Router::new()
         .route("/", get(health))
@@ -36,8 +39,12 @@ pub fn router(app_state: SharedState) -> Router {
         .with_state(state)
 }
 
-/// Wrap a JSON-RPC error as an SSE event with text/event-stream Content-Type.
-fn sse_error_response(status: StatusCode, code: i64, msg: &str, session_id: Option<&str>) -> Response<Body> {
+fn sse_error_response(
+    status: StatusCode,
+    code: i64,
+    msg: &str,
+    session_id: Option<&str>,
+) -> Response<Body> {
     let error_json = serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "error": {"code": code, "message": msg}
@@ -60,24 +67,20 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
     let app = s.app.lock().await;
     Json(json!({
         "status": "ok",
-        "name": "XeduckV4 MCP Server (Rust)",
-        "description": "Minimal MCP server with a single run_command tool",
+        "name": "MCP3000",
+        "description": "MCP Tools for ChatGPT to control your computer and browser",
+        "mode": app.mode.label(),
         "workspace": app.workspace_root,
-        "tools": ["run_command"],
     }))
 }
 
 // ── POST /mcp ───────────────────────────────────────────────
-//
-// Accept raw bytes to avoid axum's Json extractor returning application/json
-// rejection errors that violate the MCP client's expectation.
 
 async fn post_mcp(
     State(s): State<ServerState>,
     headers: HeaderMap,
     body_bytes: Bytes,
 ) -> Response<Body> {
-    // Parse body ourselves so we control the error Content-Type
     let body: Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
@@ -90,18 +93,16 @@ async fn post_mcp(
         }
     };
 
-    // Increment request count
     {
         let mut app = s.app.lock().await;
         app.request_count += 1;
     }
 
-    let workspace_root = {
+    let (workspace_root, mode) = {
         let app = s.app.lock().await;
-        app.workspace_root.clone()
+        (app.workspace_root.clone(), app.mode)
     };
 
-    // Support both single request and batch
     let requests: Vec<Value> = if body.is_array() {
         body.as_array().unwrap().clone()
     } else {
@@ -113,17 +114,11 @@ async fn post_mcp(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // Check if batch contains an initialize request
     let has_initialize = requests
         .iter()
         .any(|r| r.get("method").and_then(|m| m.as_str()) == Some("initialize"));
-
-    // Check if any message is a JSON-RPC request (has "id")
     let has_any_request = requests.iter().any(|r| r.get("id").is_some());
 
-    // Session lookup/creation per MCP spec:
-    // - initialize → create new session
-    // - other → session-id MUST be present and valid; if not found → 404
     let mut sessions = s.sessions.lock().await;
 
     let session_id: String;
@@ -131,7 +126,6 @@ async fn post_mcp(
         let new_session = Session::new();
         session_id = new_session.id.clone();
         sessions.insert(session_id.clone(), new_session);
-        // Mark remote as connected
         let mut app = s.app.lock().await;
         app.remote_connected = true;
     } else if let Some(ref sid) = session_id_header {
@@ -160,7 +154,6 @@ async fn post_mcp(
         );
     }
 
-    // Process all messages
     let mut responses: Vec<Value> = Vec::new();
 
     for req_val in &requests {
@@ -180,12 +173,13 @@ async fn post_mcp(
         };
 
         let session = sessions.get_mut(&session_id).unwrap();
-        if let Some(resp) = mcp::handle_request(&req, session, &workspace_root).await {
+        if let Some(resp) =
+            mcp::handle_request(&req, session, &workspace_root, mode, &s.devtools).await
+        {
             responses.push(serde_json::to_value(resp).unwrap());
         }
     }
 
-    // Update session count + log
     {
         let mut app = s.app.lock().await;
         app.session_count = sessions.len();
@@ -201,9 +195,6 @@ async fn post_mcp(
 
     drop(sessions);
 
-    // MCP spec response rules:
-    // - Pure notifications → 202 Accepted, empty body
-    // - Has requests → SSE stream with event: message + data: JSON-RPC response
     if !has_any_request {
         return Response::builder()
             .status(StatusCode::ACCEPTED)
@@ -212,7 +203,6 @@ async fn post_mcp(
             .unwrap();
     }
 
-    // Build SSE response body
     let mut sse_body = String::new();
     for resp in &responses {
         sse_body.push_str("event: message\n");
@@ -231,12 +221,9 @@ async fn post_mcp(
         .unwrap()
 }
 
-// ── GET /mcp — SSE for server-initiated messages ────────────
+// ── GET /mcp — SSE ──────────────────────────────────────────
 
-async fn get_mcp(
-    State(s): State<ServerState>,
-    headers: HeaderMap,
-) -> Response<Body> {
+async fn get_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<Body> {
     let session_id = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
@@ -260,15 +247,11 @@ async fn get_mcp(
     let sid = session_id.unwrap();
     drop(sessions);
 
-    // Channel-based SSE stream that stays open
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, std::convert::Infallible>>(16);
-
-    // Send initial endpoint event
     let _ = tx
         .send(Ok("event: endpoint\ndata: /mcp\n\n".to_string()))
         .await;
 
-    // Keep connection alive with periodic comments
     let sid_clone = sid.clone();
     let app_state = s.app.clone();
     tokio::spawn(async move {
@@ -289,24 +272,19 @@ async fn get_mcp(
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
-
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache, no-transform")
         .header(header::CONNECTION, "keep-alive")
         .header("mcp-session-id", &sid)
-        .body(body)
+        .body(Body::from_stream(stream))
         .unwrap()
 }
 
 // ── DELETE /mcp ─────────────────────────────────────────────
 
-async fn delete_mcp(
-    State(s): State<ServerState>,
-    headers: HeaderMap,
-) -> Response<Body> {
+async fn delete_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<Body> {
     let session_id = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
