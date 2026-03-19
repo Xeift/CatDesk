@@ -37,10 +37,38 @@ impl Mode {
     }
 }
 
+/// Which local toolset to expose in MCP.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ToolMode {
+    OneTool,    // only run_command
+    MultiTools, // codex/claude-style workspace tools
+}
+
+impl ToolMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolMode::OneTool => "1-tool",
+            ToolMode::MultiTools => "multi-tools",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            ToolMode::OneTool => ToolMode::MultiTools,
+            ToolMode::MultiTools => ToolMode::OneTool,
+        }
+    }
+
+    pub fn multi_enabled(self) -> bool {
+        matches!(self, ToolMode::MultiTools)
+    }
+}
+
 /// Shared application state across server, ngrok, and TUI.
 pub struct AppState {
     pub theme: String,
     pub mode: Mode,
+    pub tool_mode: ToolMode,
     pub server_running: bool,
     pub ngrok_running: bool,
     pub ngrok_url: Option<String>,
@@ -66,6 +94,7 @@ impl AppState {
         Self {
             theme: theme::DEFAULT_THEME_ID.to_string(),
             mode: Mode::Both,
+            tool_mode: ToolMode::OneTool,
             server_running: false,
             ngrok_running: false,
             ngrok_url: None,

@@ -70,6 +70,7 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
         "name": "MCP3000",
         "description": "MCP Tools for ChatGPT to control your computer and browser",
         "mode": app.mode.label(),
+        "tool_mode": app.tool_mode.label(),
         "workspace": app.workspace_root,
     }))
 }
@@ -98,9 +99,9 @@ async fn post_mcp(
         app.request_count += 1;
     }
 
-    let (workspace_root, mode) = {
+    let (workspace_root, mode, tool_mode) = {
         let app = s.app.lock().await;
-        (app.workspace_root.clone(), app.mode)
+        (app.workspace_root.clone(), app.mode, app.tool_mode)
     };
 
     let requests: Vec<Value> = if body.is_array() {
@@ -174,7 +175,7 @@ async fn post_mcp(
 
         let session = sessions.get_mut(&session_id).unwrap();
         if let Some(resp) =
-            mcp::handle_request(&req, session, &workspace_root, mode, &s.devtools).await
+            mcp::handle_request(&req, session, &workspace_root, mode, tool_mode, &s.devtools).await
         {
             responses.push(serde_json::to_value(resp).unwrap());
         }

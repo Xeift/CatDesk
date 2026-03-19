@@ -6,6 +6,7 @@ mod ngrok;
 mod server;
 mod state;
 mod theme;
+mod workspace_tools;
 
 use crossterm::{
     ExecutableCommand,
@@ -20,7 +21,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
-use state::{AppState, Mode, SharedState};
+use state::{AppState, Mode, SharedState, ToolMode};
 use std::io::{Write, stdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -175,11 +176,11 @@ async fn run_app(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Draw mode selection screen
     loop {
-        let current_theme = {
+        let (current_theme, current_tool_mode) = {
             let app = state.lock().await;
-            app.current_theme()
+            (app.current_theme(), app.tool_mode)
         };
-        terminal.draw(|f| draw_mode_select(f, current_theme))?;
+        terminal.draw(|f| draw_mode_select(f, current_theme, current_tool_mode))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -193,6 +194,13 @@ async fn run_app(
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('s') => {
                         run_theme_settings(terminal, state.clone()).await?;
+                        continue;
+                    }
+                    KeyCode::Char('t') => {
+                        let mut app = state.lock().await;
+                        app.tool_mode = app.tool_mode.next();
+                        let tool_mode_label = app.tool_mode.label();
+                        app.log("INFO", format!("Tool mode: {tool_mode_label}"));
                         continue;
                     }
                     _ => continue,
@@ -221,7 +229,7 @@ async fn run_app(
     run_tui(terminal, state, devtools_bridge).await
 }
 
-fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef) {
+fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode) {
     let palette = theme.palette;
     let area = f.area();
 
@@ -229,7 +237,7 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // Header
-            Constraint::Length(14), // Mode selection
+            Constraint::Length(16), // Mode selection
             Constraint::Min(0),     // Spacer
         ])
         .split(area);
@@ -306,6 +314,19 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef) {
             Span::styled("Settings", Style::default().fg(palette.primary_fg)),
             Span::styled(
                 format!(" (theme: {})", theme.label),
+                Style::default().fg(palette.muted_fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  [t] ",
+                Style::default()
+                    .fg(palette.key_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Tool mode", Style::default().fg(palette.primary_fg)),
+            Span::styled(
+                format!(" ({})", tool_mode.label()),
                 Style::default().fg(palette.muted_fg),
             ),
         ]),
@@ -1236,7 +1257,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
     let both_running = app.server_running && app.ngrok_running;
     let has_url = app.ngrok_url.is_some();
     let show_guide = both_running && has_url && !app.remote_connected;
-    let status_height = if show_guide { 23 } else { 16 };
+    let status_height = if show_guide { 24 } else { 17 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1266,6 +1287,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
 
     // ── Status ──
     let mode_label = app.mode.label();
+    let tool_mode_label = app.tool_mode.label();
     let server_status = if app.server_running {
         format!("RUNNING (port {})", app.port)
     } else {
@@ -1318,6 +1340,20 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             ),
             Span::styled(
                 mode_label,
+                Style::default()
+                    .fg(palette.secondary_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Tool mode:        ",
+                Style::default()
+                    .fg(palette.primary_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                tool_mode_label,
                 Style::default()
                     .fg(palette.secondary_fg)
                     .add_modifier(Modifier::BOLD),
