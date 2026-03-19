@@ -3,6 +3,7 @@ use std::time::SystemTime;
 use tokio::sync::Mutex;
 
 use crate::browser::DetectedBrowser;
+use crate::theme;
 
 /// Log entry displayed in the TUI.
 #[derive(Clone)]
@@ -38,6 +39,7 @@ impl Mode {
 
 /// Shared application state across server, ngrok, and TUI.
 pub struct AppState {
+    pub theme: String,
     pub mode: Mode,
     pub server_running: bool,
     pub ngrok_running: bool,
@@ -62,6 +64,7 @@ pub type SharedState = Arc<Mutex<AppState>>;
 impl AppState {
     pub fn new(port: u16, workspace_root: String) -> Self {
         Self {
+            theme: theme::DEFAULT_THEME_ID.to_string(),
             mode: Mode::Both,
             server_running: false,
             ngrok_running: false,
@@ -80,6 +83,10 @@ impl AppState {
             remote_browser_child: None,
             devtools_child: None,
         }
+    }
+
+    pub fn current_theme(&self) -> &'static theme::ThemeDef {
+        theme::resolve(&self.theme)
     }
 
     pub fn log(&mut self, level: &'static str, message: String) {

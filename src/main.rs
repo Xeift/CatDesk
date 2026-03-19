@@ -5,6 +5,7 @@ mod mcp;
 mod ngrok;
 mod server;
 mod state;
+mod theme;
 
 use crossterm::{
     ExecutableCommand,
@@ -174,7 +175,11 @@ async fn run_app(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Draw mode selection screen
     loop {
-        terminal.draw(|f| draw_mode_select(f))?;
+        let current_theme = {
+            let app = state.lock().await;
+            app.current_theme()
+        };
+        terminal.draw(|f| draw_mode_select(f, current_theme))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -186,6 +191,10 @@ async fn run_app(
                     KeyCode::Char('2') => Mode::Browser,
                     KeyCode::Char('3') => Mode::Both,
                     KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('s') => {
+                        run_theme_settings(terminal, state.clone()).await?;
+                        continue;
+                    }
                     _ => continue,
                 };
                 {
@@ -212,14 +221,15 @@ async fn run_app(
     run_tui(terminal, state, devtools_bridge).await
 }
 
-fn draw_mode_select(f: &mut Frame) {
+fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef) {
+    let palette = theme.palette;
     let area = f.area();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // Header
-            Constraint::Length(12), // Mode selection
+            Constraint::Length(14), // Mode selection
             Constraint::Min(0),     // Spacer
         ])
         .split(area);
@@ -228,13 +238,13 @@ fn draw_mode_select(f: &mut Frame) {
         Paragraph::new("  MCP3000 - MCP Tools for ChatGPT to control your computer and browser")
             .style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.header_fg)
                     .add_modifier(Modifier::BOLD),
             )
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(palette.border_fg)),
             );
     f.render_widget(header, chunks[0]);
 
@@ -243,7 +253,7 @@ fn draw_mode_select(f: &mut Frame) {
         Line::from(Span::styled(
             "  Select mode:",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(palette.title_fg)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -251,38 +261,57 @@ fn draw_mode_select(f: &mut Frame) {
             Span::styled(
                 "  [1] ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.key_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Control Computer   ", Style::default().fg(Color::White)),
-            Span::styled("(run_command)", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Control Computer   ",
+                Style::default().fg(palette.primary_fg),
+            ),
+            Span::styled("(run_command)", Style::default().fg(palette.muted_fg)),
         ]),
         Line::from(vec![
             Span::styled(
                 "  [2] ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.key_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Control Browser    ", Style::default().fg(Color::White)),
+            Span::styled(
+                "Control Browser    ",
+                Style::default().fg(palette.primary_fg),
+            ),
             Span::styled(
                 "(chrome-devtools-mcp)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 "  [3] ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.key_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Both", Style::default().fg(Color::White)),
+            Span::styled("Both", Style::default().fg(palette.primary_fg)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  [s] ",
+                Style::default()
+                    .fg(palette.key_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Settings", Style::default().fg(palette.primary_fg)),
+            Span::styled(
+                format!(" (theme: {})", theme.label),
+                Style::default().fg(palette.muted_fg),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  [q] ", Style::default().fg(Color::Red)),
-            Span::styled("Quit", Style::default().fg(Color::DarkGray)),
+            Span::styled("  [q] ", Style::default().fg(palette.danger_fg)),
+            Span::styled("Quit", Style::default().fg(palette.muted_fg)),
         ]),
     ];
 
@@ -290,9 +319,144 @@ fn draw_mode_select(f: &mut Frame) {
         Block::default()
             .title(" Mode ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(select, chunks[1]);
+}
+
+async fn run_theme_settings(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    state: SharedState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let themes = theme::all();
+    let mut selected_idx = {
+        let app = state.lock().await;
+        themes.iter().position(|t| t.id == app.theme).unwrap_or(0)
+    };
+
+    loop {
+        let current_theme = {
+            let app = state.lock().await;
+            app.current_theme()
+        };
+        terminal.draw(|f| draw_theme_settings(f, current_theme, selected_idx))?;
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Up => selected_idx = selected_idx.saturating_sub(1),
+                    KeyCode::Down => {
+                        if selected_idx + 1 < themes.len() {
+                            selected_idx += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let picked = themes[selected_idx];
+                        let mut app = state.lock().await;
+                        app.theme = picked.id.to_string();
+                        app.log("INFO", format!("Theme changed to {}", picked.label));
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn draw_theme_settings(f: &mut Frame, current_theme: &theme::ThemeDef, selected_idx: usize) {
+    let themes = theme::all();
+    let palette = current_theme.palette;
+    let area = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let header = Paragraph::new("  Settings - Theme")
+        .style(
+            Style::default()
+                .fg(palette.header_fg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border_fg)),
+        );
+    f.render_widget(header, chunks[0]);
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Choose a theme:",
+            Style::default()
+                .fg(palette.title_fg)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    for (idx, theme) in themes.iter().enumerate() {
+        let selected = idx == selected_idx;
+        let marker = if selected { ">" } else { " " };
+        let name_style = if selected {
+            Style::default()
+                .fg(palette.key_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.primary_fg)
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            format!(" {} [{}] {}", marker, idx + 1, theme.label),
+            name_style,
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("     {}", theme.description),
+            Style::default().fg(palette.muted_fg),
+        )]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Current: ", Style::default().fg(palette.muted_fg)),
+        Span::styled(
+            current_theme.label,
+            Style::default()
+                .fg(palette.secondary_fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    let body = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Theme ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.border_fg)),
+    );
+    f.render_widget(body, chunks[1]);
+
+    let keys = Paragraph::new(Line::from(vec![
+        Span::styled("  [Up/Down]", Style::default().fg(palette.key_fg)),
+        Span::raw(" Select  "),
+        Span::styled("[Enter]", Style::default().fg(palette.success_fg)),
+        Span::raw(" Apply  "),
+        Span::styled("[q/Esc]", Style::default().fg(palette.danger_fg)),
+        Span::raw(" Back"),
+    ]))
+    .block(
+        Block::default()
+            .title(" Keys ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.border_fg)),
+    );
+    f.render_widget(keys, chunks[2]);
 }
 
 async fn mode_is_browser_enabled(state: SharedState) -> bool {
@@ -325,8 +489,18 @@ async fn run_browser_select(
             selected_supported_idx = 0;
         }
 
+        let current_theme = {
+            let app = state.lock().await;
+            app.current_theme()
+        };
         terminal.draw(|f| {
-            draw_browser_select(f, &browsers, &supported_indices, selected_supported_idx)
+            draw_browser_select(
+                f,
+                &browsers,
+                &supported_indices,
+                selected_supported_idx,
+                current_theme,
+            )
         })?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -402,7 +576,9 @@ fn draw_browser_select(
     browsers: &[browser::DetectedBrowser],
     supported_indices: &[usize],
     selected_supported_idx: usize,
+    theme: &theme::ThemeDef,
 ) {
+    let palette = theme.palette;
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -416,13 +592,13 @@ fn draw_browser_select(
     let header = Paragraph::new("  Select Browser - Installed and Remote Debugging Status")
         .style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette.header_fg)
                 .add_modifier(Modifier::BOLD),
         )
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(palette.border_fg)),
         );
     f.render_widget(header, chunks[0]);
 
@@ -431,31 +607,31 @@ fn draw_browser_select(
         Line::from(vec![
             Span::styled(
                 "  Installed browsers: ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             ),
             Span::styled(
                 browsers.len().to_string(),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(palette.title_fg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 "  Remote debugging active: ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             ),
-            Span::styled(active_summary, Style::default().fg(Color::Green)),
+            Span::styled(active_summary, Style::default().fg(palette.success_fg)),
         ]),
         Line::from(vec![
             Span::styled(
                 "  Selectable (Chromium): ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             ),
             Span::styled(
                 supported_indices.len().to_string(),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.key_fg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -465,22 +641,22 @@ fn draw_browser_select(
     if browsers.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No browser found in PATH. Press [r] to rescan, [q] to quit.",
-            Style::default().fg(Color::Red),
+            Style::default().fg(palette.danger_fg),
         )));
     } else if supported_indices.is_empty() {
         lines.push(Line::from(Span::styled(
             "  Only unsupported browsers found (e.g. Firefox). Chromium browsers are required.",
-            Style::default().fg(Color::Red),
+            Style::default().fg(palette.danger_fg),
         )));
         lines.push(Line::from(""));
         for browser in browsers {
             lines.push(Line::from(vec![Span::styled(
                 format!("   [x] {} ({})", browser.name, browser.binary),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             )]));
             lines.push(Line::from(vec![Span::styled(
                 format!("     status: {}", browser.support_note),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(palette.warning_fg),
             )]));
             lines.push(Line::from(""));
         }
@@ -497,13 +673,13 @@ fn draw_browser_select(
                 .position(|candidate_idx| *candidate_idx == idx)
                 .map(|v| v + 1);
             let title_style = if !browser.mcp_supported {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(palette.muted_fg)
             } else if selected {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.key_fg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(palette.primary_fg)
             };
             if let Some(num) = quick_pick_num {
                 lines.push(Line::from(vec![Span::styled(
@@ -521,20 +697,20 @@ fn draw_browser_select(
             }
             lines.push(Line::from(vec![Span::styled(
                 format!("     path: {}", browser.path),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             )]));
             lines.push(Line::from(vec![Span::styled(
                 format!("     status: {}", browser.support_note),
                 Style::default().fg(if browser.mcp_supported {
-                    Color::Green
+                    palette.success_fg
                 } else {
-                    Color::Yellow
+                    palette.warning_fg
                 }),
             )]));
             if !browser.mcp_supported {
                 lines.push(Line::from(vec![Span::styled(
                     "     remote debugging integration: not supported yet",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(palette.warning_fg),
                 )]));
             } else if browser.remote_debug_active {
                 let target = browser.remote_debug_target.as_deref().unwrap_or("unknown");
@@ -544,7 +720,7 @@ fn draw_browser_select(
                     .unwrap_or_else(|| "--".into());
                 lines.push(Line::from(vec![Span::styled(
                     format!("     remote debugging: ACTIVE at {target} (pid {pid})"),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(palette.success_fg),
                 )]));
             } else {
                 lines.push(Line::from(vec![Span::styled(
@@ -552,7 +728,7 @@ fn draw_browser_select(
                         "     remote debugging: not active (supported flag: {})",
                         browser.remote_debug_hint
                     ),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(palette.warning_fg),
                 )]));
             }
             lines.push(Line::from(""));
@@ -563,27 +739,27 @@ fn draw_browser_select(
         Block::default()
             .title(" Browser List ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(body, chunks[1]);
 
     let keys = Paragraph::new(Line::from(vec![
-        Span::styled("  [Up/Down]", Style::default().fg(Color::Cyan)),
+        Span::styled("  [Up/Down]", Style::default().fg(palette.key_fg)),
         Span::raw(" Select  "),
-        Span::styled("[1-9]", Style::default().fg(Color::Cyan)),
+        Span::styled("[1-9]", Style::default().fg(palette.key_fg)),
         Span::raw(" Quick select (Chromium only)  "),
-        Span::styled("[Enter]", Style::default().fg(Color::Green)),
+        Span::styled("[Enter]", Style::default().fg(palette.success_fg)),
         Span::raw(" Confirm  "),
-        Span::styled("[r]", Style::default().fg(Color::Yellow)),
+        Span::styled("[r]", Style::default().fg(palette.warning_fg)),
         Span::raw(" Rescan  "),
-        Span::styled("[q]", Style::default().fg(Color::Red)),
+        Span::styled("[q]", Style::default().fg(palette.danger_fg)),
         Span::raw(" Quit"),
     ]))
     .block(
         Block::default()
             .title(" Keys ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(keys, chunks[2]);
 }
@@ -932,6 +1108,7 @@ async fn run_tui(
                 draw_ui(f, &app, log_scroll, toast_ref);
 
                 if let Some(((c0, r0), (c1, r1))) = selection.range() {
+                    let palette = app.current_theme().palette;
                     let area = f.area();
                     for row in r0..=r1 {
                         if row >= area.height {
@@ -949,7 +1126,9 @@ async fn run_tui(
                             }
                             if let Some(cell) = f.buffer_mut().cell_mut((col, row)) {
                                 cell.set_style(
-                                    Style::default().bg(Color::DarkGray).fg(Color::White),
+                                    Style::default()
+                                        .bg(palette.selection_bg)
+                                        .fg(palette.selection_fg),
                                 );
                             }
                         }
@@ -1043,6 +1222,7 @@ async fn run_tui(
 // ── Draw main UI ────────────────────────────────────────────
 
 fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str, (u16, u16))>) {
+    let palette = app.current_theme().palette;
     let area = f.area();
 
     let both_running = app.server_running && app.ngrok_running;
@@ -1065,13 +1245,13 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         Paragraph::new("  MCP3000 - MCP Tools for ChatGPT to control your computer and browser")
             .style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.header_fg)
                     .add_modifier(Modifier::BOLD),
             )
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(palette.border_fg)),
             );
     f.render_widget(header, chunks[0]);
 
@@ -1124,13 +1304,13 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  Mode:             ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 mode_label,
                 Style::default()
-                    .fg(Color::Magenta)
+                    .fg(palette.secondary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -1138,15 +1318,15 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  Server:           ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 &server_status,
                 Style::default().fg(if app.server_running {
-                    Color::Green
+                    palette.success_fg
                 } else {
-                    Color::Red
+                    palette.danger_fg
                 }),
             ),
         ]),
@@ -1154,15 +1334,15 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  ngrok:            ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 ngrok_status,
                 Style::default().fg(if app.ngrok_running {
-                    Color::Green
+                    palette.success_fg
                 } else {
-                    Color::Red
+                    palette.danger_fg
                 }),
             ),
         ]),
@@ -1170,15 +1350,15 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  DevTools:         ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 devtools_status,
                 Style::default().fg(if app.devtools_running {
-                    Color::Green
+                    palette.success_fg
                 } else {
-                    Color::DarkGray
+                    palette.muted_fg
                 }),
             ),
         ]),
@@ -1186,15 +1366,15 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  MCP Server URL:   ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 &mcp_url,
                 Style::default().fg(if has_url {
-                    Color::Cyan
+                    palette.info_fg
                 } else {
-                    Color::DarkGray
+                    palette.muted_fg
                 }),
             ),
         ]),
@@ -1202,20 +1382,22 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             let mut spans = vec![Span::styled(
                 "  Remote connected: ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             )];
             if app.remote_connected {
                 spans.push(Span::styled(
                     "V",
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(palette.success_fg)
                         .add_modifier(Modifier::BOLD),
                 ));
             } else {
                 spans.push(Span::styled(
                     "X",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(palette.danger_fg)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             Line::from(spans)
@@ -1224,49 +1406,55 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  Local browsers:   ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(browser_summary, Style::default().fg(Color::Yellow)),
+            Span::styled(browser_summary, Style::default().fg(palette.title_fg)),
         ]),
         Line::from(vec![
             Span::styled(
                 "  Remote dbg support:",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(remote_support_summary, Style::default().fg(Color::Cyan)),
+            Span::styled(remote_support_summary, Style::default().fg(palette.info_fg)),
         ]),
         Line::from(vec![
             Span::styled(
                 "  Remote dbg active: ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(remote_active_summary, Style::default().fg(Color::Green)),
+            Span::styled(
+                remote_active_summary,
+                Style::default().fg(palette.success_fg),
+            ),
         ]),
         Line::from(vec![
             Span::styled(
                 "  Selected browser: ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 selected_browser_summary,
-                Style::default().fg(Color::Magenta),
+                Style::default().fg(palette.secondary_fg),
             ),
         ]),
         Line::from(vec![
             Span::styled(
                 "  Selected target:  ",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(selected_target_summary, Style::default().fg(Color::Cyan)),
+            Span::styled(
+                selected_target_summary,
+                Style::default().fg(palette.info_fg),
+            ),
         ]),
     ];
 
@@ -1275,24 +1463,24 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         status_lines.push(Line::from(Span::styled(
             "  What to do next?",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(palette.title_fg)
                 .add_modifier(Modifier::BOLD),
         )));
         status_lines.push(Line::from(vec![
             Span::styled(
                 "  1. ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(palette.title_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Open connector settings: ",
-                Style::default().fg(Color::White),
+                Style::default().fg(palette.primary_fg),
             ),
             Span::styled(
                 "https://chatgpt.com/apps#settings/Connectors",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.info_fg)
                     .add_modifier(Modifier::UNDERLINED),
             ),
         ]));
@@ -1300,14 +1488,14 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  2. ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(palette.title_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Click ", Style::default().fg(Color::White)),
+            Span::styled("Click ", Style::default().fg(palette.primary_fg)),
             Span::styled(
                 "Create app",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -1315,48 +1503,48 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  3. ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(palette.title_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Fill in the form:", Style::default().fg(Color::White)),
+            Span::styled("Fill in the form:", Style::default().fg(palette.primary_fg)),
         ]));
         status_lines.push(Line::from(vec![
             Span::styled(
                 "       Name:           ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             ),
             Span::styled(
                 "MCP3000",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "  (or any name you like)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             ),
         ]));
         status_lines.push(Line::from(vec![
             Span::styled(
                 "       MCP Server URL: ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             ),
             Span::styled(
                 &mcp_url,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.info_fg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
         status_lines.push(Line::from(vec![
             Span::styled(
                 "       Authentication: ",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette.muted_fg),
             ),
             Span::styled(
                 "None",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -1364,14 +1552,14 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  4. ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(palette.title_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Click ", Style::default().fg(Color::White)),
+            Span::styled("Click ", Style::default().fg(palette.primary_fg)),
             Span::styled(
                 "\"I understand and want to continue\"",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -1379,33 +1567,36 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Span::styled(
                 "  5. ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(palette.title_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Click ", Style::default().fg(Color::White)),
+            Span::styled("Click ", Style::default().fg(palette.primary_fg)),
             Span::styled(
                 "Create",
                 Style::default()
-                    .fg(Color::White)
+                    .fg(palette.primary_fg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
     } else {
         status_lines.push(Line::from(""));
         status_lines.push(Line::from(vec![
-            Span::styled("  Workspace: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&*app.workspace_root, Style::default().fg(Color::White)),
+            Span::styled("  Workspace: ", Style::default().fg(palette.muted_fg)),
+            Span::styled(
+                &*app.workspace_root,
+                Style::default().fg(palette.primary_fg),
+            ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled("  Sessions:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Sessions:  ", Style::default().fg(palette.muted_fg)),
             Span::styled(
                 app.session_count.to_string(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(palette.title_fg),
             ),
-            Span::styled("    Requests: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("    Requests: ", Style::default().fg(palette.muted_fg)),
             Span::styled(
                 app.request_count.to_string(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(palette.title_fg),
             ),
         ]));
     }
@@ -1414,22 +1605,22 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         Block::default()
             .title(" Status ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(status, chunks[1]);
 
     // ── Keys ──
     let key_spans = vec![
-        Span::styled("  [q]", Style::default().fg(Color::Red)),
+        Span::styled("  [q]", Style::default().fg(palette.danger_fg)),
         Span::raw(" Quit  "),
-        Span::styled("[Up/Down]", Style::default().fg(Color::DarkGray)),
+        Span::styled("[Up/Down]", Style::default().fg(palette.key_fg)),
         Span::raw(" Scroll logs"),
     ];
     let keys = Paragraph::new(Line::from(key_spans)).block(
         Block::default()
             .title(" Keys ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(keys, chunks[2]);
 
@@ -1439,17 +1630,17 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         .iter()
         .map(|entry| {
             let color = match entry.level {
-                "ERROR" => Color::Red,
-                "WARN" => Color::Yellow,
-                _ => Color::Gray,
+                "ERROR" => palette.danger_fg,
+                "WARN" => palette.warning_fg,
+                _ => palette.muted_fg,
             };
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!(" {} ", entry.time),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(palette.muted_fg),
                 ),
                 Span::styled(format!("{:5} ", entry.level), Style::default().fg(color)),
-                Span::styled(&*entry.message, Style::default().fg(Color::White)),
+                Span::styled(&*entry.message, Style::default().fg(palette.primary_fg)),
             ]))
         })
         .collect();
@@ -1467,7 +1658,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         Block::default()
             .title(" Logs ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(logs, chunks[3]);
 
@@ -1480,8 +1671,8 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         let toast_area = Rect::new(x, y, w, 1);
         let toast_widget = Paragraph::new(label).style(
             Style::default()
-                .bg(Color::Green)
-                .fg(Color::Black)
+                .bg(palette.toast_bg)
+                .fg(palette.toast_fg)
                 .add_modifier(Modifier::BOLD),
         );
         f.render_widget(toast_widget, toast_area);
