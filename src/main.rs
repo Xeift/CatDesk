@@ -1,28 +1,31 @@
+mod browser;
 mod command;
+mod devtools;
 mod mcp;
 mod ngrok;
 mod server;
 mod state;
 
 use crossterm::{
+    ExecutableCommand,
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
         MouseEventKind,
     },
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use devtools::DevtoolsBridge;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
-use state::{AppState, SharedState};
-use std::io::{stdout, Write};
+use state::{AppState, Mode, SharedState};
+use std::io::{Write, stdout};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-// ── Selection state ─────────────────────────────────────────
+// ── Selection ───────────────────────────────────────────────
 
 struct Selection {
     start: Option<(u16, u16)>,
@@ -32,16 +35,17 @@ struct Selection {
 
 impl Selection {
     fn new() -> Self {
-        Self { start: None, end: None, dragging: false }
+        Self {
+            start: None,
+            end: None,
+            dragging: false,
+        }
     }
-
     fn clear(&mut self) {
         self.start = None;
         self.end = None;
         self.dragging = false;
     }
-
-    /// Get normalized (top-left, bottom-right) range
     fn range(&self) -> Option<((u16, u16), (u16, u16))> {
         match (self.start, self.end) {
             (Some(s), Some(e)) => {
@@ -57,25 +61,23 @@ impl Selection {
     }
 }
 
-/// Extract selected text from screen line snapshots.
-fn extract_from_screen(
-    lines: &[String],
-    start: (u16, u16),
-    end: (u16, u16),
-) -> String {
+fn extract_from_screen(lines: &[String], start: (u16, u16), end: (u16, u16)) -> String {
     let (c0, r0) = start;
     let (c1, r1) = end;
     let mut result = String::new();
-
     for row in r0..=r1 {
-        let row_idx = row as usize;
-        if row_idx >= lines.len() {
+        let idx = row as usize;
+        if idx >= lines.len() {
             break;
         }
-        let line: Vec<char> = lines[row_idx].chars().collect();
-        let col_start = if row == r0 { c0 as usize } else { 0 };
-        let col_end = if row == r1 { (c1 as usize).min(line.len().saturating_sub(1)) } else { line.len().saturating_sub(1) };
-        for col in col_start..=col_end {
+        let line: Vec<char> = lines[idx].chars().collect();
+        let cs = if row == r0 { c0 as usize } else { 0 };
+        let ce = if row == r1 {
+            (c1 as usize).min(line.len().saturating_sub(1))
+        } else {
+            line.len().saturating_sub(1)
+        };
+        for col in cs..=ce {
             if col < line.len() {
                 result.push(line[col]);
             }
@@ -84,7 +86,6 @@ fn extract_from_screen(
             result.push('\n');
         }
     }
-
     result
         .lines()
         .map(|l| l.trim_end())
@@ -92,57 +93,32 @@ fn extract_from_screen(
         .join("\n")
 }
 
-/// Copy text to clipboard: OSC 52 + native fallback (xclip/xsel/wl-copy).
 fn clipboard_copy(text: &str) {
-    // OSC 52
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let seq = format!("\x1b]52;c;{encoded}\x07");
     let _ = stdout().write_all(seq.as_bytes());
     let _ = stdout().flush();
-
-    // Native fallback (fire and forget)
     let text_owned = text.to_string();
     std::thread::spawn(move || {
-        // Try wl-copy (Wayland)
-        if let Ok(mut child) = std::process::Command::new("wl-copy")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(ref mut stdin) = child.stdin {
-                let _ = stdin.write_all(text_owned.as_bytes());
+        for (cmd, args) in [
+            ("wl-copy", vec![]),
+            ("xclip", vec!["-selection", "clipboard"]),
+            ("xsel", vec!["--clipboard", "--input"]),
+        ] {
+            if let Ok(mut child) = std::process::Command::new(cmd)
+                .args(&args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                if let Some(ref mut stdin) = child.stdin {
+                    let _ = stdin.write_all(text_owned.as_bytes());
+                }
+                let _ = child.wait();
+                return;
             }
-            let _ = child.wait();
-            return;
-        }
-        // Try xclip
-        if let Ok(mut child) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(ref mut stdin) = child.stdin {
-                let _ = stdin.write_all(text_owned.as_bytes());
-            }
-            let _ = child.wait();
-            return;
-        }
-        // Try xsel
-        if let Ok(mut child) = std::process::Command::new("xsel")
-            .args(["--clipboard", "--input"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(ref mut stdin) = child.stdin {
-                let _ = stdin.write_all(text_owned.as_bytes());
-            }
-            let _ = child.wait();
         }
     });
 }
@@ -155,7 +131,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3200);
-
     let workspace_root = std::env::var("WORKSPACE_ROOT")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| "/tmp".into());
@@ -168,15 +143,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_tui(&mut terminal, state.clone()).await;
+    let result = run_app(&mut terminal, state.clone()).await;
 
     stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
+    // Cleanup
     {
         let mut app = state.lock().await;
         if let Some(ref mut child) = app.ngrok_child {
+            let _ = child.kill().await;
+        }
+        if let Some(ref mut child) = app.remote_browser_child {
+            let _ = child.kill().await;
+        }
+        if let Some(ref mut child) = app.devtools_child {
             let _ = child.kill().await;
         }
     }
@@ -184,9 +166,752 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
+// ── Phase 1: Mode selection ─────────────────────────────────
+
+async fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    state: SharedState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Draw mode selection screen
+    loop {
+        terminal.draw(|f| draw_mode_select(f))?;
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                let mode = match key.code {
+                    KeyCode::Char('1') => Mode::Computer,
+                    KeyCode::Char('2') => Mode::Browser,
+                    KeyCode::Char('3') => Mode::Both,
+                    KeyCode::Char('q') => return Ok(()),
+                    _ => continue,
+                };
+                {
+                    let mut app = state.lock().await;
+                    app.mode = mode;
+                    app.log("INFO", format!("Mode: {}", mode.label()));
+                }
+                break;
+            }
+        }
+    }
+
+    if mode_is_browser_enabled(state.clone()).await {
+        let continue_run = run_browser_select(terminal, state.clone()).await?;
+        if !continue_run {
+            return Ok(());
+        }
+    }
+
+    // Start services
+    let devtools_bridge = start_services(state.clone()).await;
+
+    // Phase 2: main TUI loop
+    run_tui(terminal, state, devtools_bridge).await
+}
+
+fn draw_mode_select(f: &mut Frame) {
+    let area = f.area();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // Header
+            Constraint::Length(12), // Mode selection
+            Constraint::Min(0),     // Spacer
+        ])
+        .split(area);
+
+    let header =
+        Paragraph::new("  MCP3000 - MCP Tools for ChatGPT to control your computer and browser")
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            );
+    f.render_widget(header, chunks[0]);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Select mode:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  [1] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Control Computer   ", Style::default().fg(Color::White)),
+            Span::styled("(run_command)", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  [2] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Control Browser    ", Style::default().fg(Color::White)),
+            Span::styled(
+                "(chrome-devtools-mcp)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  [3] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Both", Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [q] ", Style::default().fg(Color::Red)),
+            Span::styled("Quit", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let select = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Mode ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(select, chunks[1]);
+}
+
+async fn mode_is_browser_enabled(state: SharedState) -> bool {
+    state.lock().await.mode.browser_enabled()
+}
+
+async fn run_browser_select(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    state: SharedState,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut browsers = browser::detect_browsers();
+    {
+        let mut app = state.lock().await;
+        app.detected_browsers = browsers.clone();
+        app.selected_browser = None;
+    }
+
+    let mut selected_supported_idx: usize = 0;
+    loop {
+        let supported_indices: Vec<usize> = browsers
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.mcp_supported)
+            .map(|(idx, _)| idx)
+            .collect();
+        if !supported_indices.is_empty() {
+            selected_supported_idx =
+                selected_supported_idx.min(supported_indices.len().saturating_sub(1));
+        } else {
+            selected_supported_idx = 0;
+        }
+
+        terminal.draw(|f| {
+            draw_browser_select(f, &browsers, &supported_indices, selected_supported_idx)
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('q') => return Ok(false),
+                    KeyCode::Char('r') => {
+                        browsers = browser::detect_browsers();
+                        let mut app = state.lock().await;
+                        app.detected_browsers = browsers.clone();
+                    }
+                    KeyCode::Up => {
+                        selected_supported_idx = selected_supported_idx.saturating_sub(1)
+                    }
+                    KeyCode::Down => {
+                        if selected_supported_idx + 1 < supported_indices.len() {
+                            selected_supported_idx += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(selected_idx) = supported_indices.get(selected_supported_idx) {
+                            if let Some(selected) = browsers.get(*selected_idx).cloned() {
+                                persist_selected_browser(state.clone(), selected).await;
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        let index = c.to_digit(10).unwrap_or(0) as usize;
+                        if index == 0 {
+                            continue;
+                        }
+                        let target_idx = index - 1;
+                        if let Some(browser_idx) = supported_indices.get(target_idx) {
+                            if let Some(selected) = browsers.get(*browser_idx).cloned() {
+                                persist_selected_browser(state.clone(), selected).await;
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn persist_selected_browser(state: SharedState, selected: browser::DetectedBrowser) {
+    let remote_info = selected
+        .remote_debug_target
+        .as_deref()
+        .unwrap_or("not active");
+    let mut app = state.lock().await;
+    app.selected_browser = Some(selected.clone());
+    app.log(
+        "INFO",
+        format!(
+            "Selected browser: {} ({}, {})",
+            selected.name, selected.binary, selected.path
+        ),
+    );
+    app.log(
+        "INFO",
+        format!("Selected browser remote debugging: {remote_info}"),
+    );
+}
+
+fn draw_browser_select(
+    f: &mut Frame,
+    browsers: &[browser::DetectedBrowser],
+    supported_indices: &[usize],
+    selected_supported_idx: usize,
+) {
+    let area = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let header = Paragraph::new("  Select Browser - Installed and Remote Debugging Status")
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+    f.render_widget(header, chunks[0]);
+
+    let active_summary = browser::format_active_remote_debug_names(browsers);
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(
+                "  Installed browsers: ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                browsers.len().to_string(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Remote debugging active: ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(active_summary, Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Selectable (Chromium): ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                supported_indices.len().to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    if browsers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No browser found in PATH. Press [r] to rescan, [q] to quit.",
+            Style::default().fg(Color::Red),
+        )));
+    } else if supported_indices.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Only unsupported browsers found (e.g. Firefox). Chromium browsers are required.",
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::from(""));
+        for browser in browsers {
+            lines.push(Line::from(vec![Span::styled(
+                format!("   [x] {} ({})", browser.name, browser.binary),
+                Style::default().fg(Color::DarkGray),
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("     status: {}", browser.support_note),
+                Style::default().fg(Color::Yellow),
+            )]));
+            lines.push(Line::from(""));
+        }
+    } else {
+        let selected_browser_index = supported_indices
+            .get(selected_supported_idx)
+            .copied()
+            .unwrap_or(supported_indices[0]);
+        for (idx, browser) in browsers.iter().enumerate() {
+            let selected = idx == selected_browser_index;
+            let prefix = if selected { ">" } else { " " };
+            let quick_pick_num = supported_indices
+                .iter()
+                .position(|candidate_idx| *candidate_idx == idx)
+                .map(|v| v + 1);
+            let title_style = if !browser.mcp_supported {
+                Style::default().fg(Color::DarkGray)
+            } else if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            if let Some(num) = quick_pick_num {
+                lines.push(Line::from(vec![Span::styled(
+                    format!(
+                        " {} [{}] {} ({})",
+                        prefix, num, browser.name, browser.binary
+                    ),
+                    title_style,
+                )]));
+            } else {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("   [x] {} ({})", browser.name, browser.binary),
+                    title_style,
+                )]));
+            }
+            lines.push(Line::from(vec![Span::styled(
+                format!("     path: {}", browser.path),
+                Style::default().fg(Color::DarkGray),
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("     status: {}", browser.support_note),
+                Style::default().fg(if browser.mcp_supported {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                }),
+            )]));
+            if !browser.mcp_supported {
+                lines.push(Line::from(vec![Span::styled(
+                    "     remote debugging integration: not supported yet",
+                    Style::default().fg(Color::Yellow),
+                )]));
+            } else if browser.remote_debug_active {
+                let target = browser.remote_debug_target.as_deref().unwrap_or("unknown");
+                let pid = browser
+                    .remote_debug_pid
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "--".into());
+                lines.push(Line::from(vec![Span::styled(
+                    format!("     remote debugging: ACTIVE at {target} (pid {pid})"),
+                    Style::default().fg(Color::Green),
+                )]));
+            } else {
+                lines.push(Line::from(vec![Span::styled(
+                    format!(
+                        "     remote debugging: not active (supported flag: {})",
+                        browser.remote_debug_hint
+                    ),
+                    Style::default().fg(Color::Yellow),
+                )]));
+            }
+            lines.push(Line::from(""));
+        }
+    }
+
+    let body = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Browser List ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(body, chunks[1]);
+
+    let keys = Paragraph::new(Line::from(vec![
+        Span::styled("  [Up/Down]", Style::default().fg(Color::Cyan)),
+        Span::raw(" Select  "),
+        Span::styled("[1-9]", Style::default().fg(Color::Cyan)),
+        Span::raw(" Quick select (Chromium only)  "),
+        Span::styled("[Enter]", Style::default().fg(Color::Green)),
+        Span::raw(" Confirm  "),
+        Span::styled("[r]", Style::default().fg(Color::Yellow)),
+        Span::raw(" Rescan  "),
+        Span::styled("[q]", Style::default().fg(Color::Red)),
+        Span::raw(" Quit"),
+    ]))
+    .block(
+        Block::default()
+            .title(" Keys ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(keys, chunks[2]);
+}
+
+fn find_available_remote_debug_port(start: u16, end: u16) -> Option<u16> {
+    (start..=end).find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
+}
+
+fn sanitize_for_filename(input: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if sanitized.is_empty() {
+        "browser".into()
+    } else {
+        sanitized
+    }
+}
+
+async fn wait_remote_debug_ready(port: u16, timeout: Duration) -> bool {
+    let client = reqwest::Client::new();
+    let endpoint = format!("http://127.0.0.1:{port}/json/version");
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        let result = client
+            .get(&endpoint)
+            .timeout(Duration::from_millis(600))
+            .send()
+            .await;
+        if let Ok(response) = result {
+            if response.status().is_success() {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    false
+}
+
+async fn ensure_selected_browser_remote_debugging(
+    state: SharedState,
+    selected_browser: Option<browser::DetectedBrowser>,
+) -> Option<browser::DetectedBrowser> {
+    let Some(mut selected) = selected_browser else {
+        return None;
+    };
+    if !selected.mcp_supported {
+        state.lock().await.log(
+            "ERROR",
+            format!(
+                "Selected browser {} is not supported yet for chrome-devtools-mcp",
+                selected.name
+            ),
+        );
+        return None;
+    }
+    if selected.remote_debug_active && selected.remote_debug_target.is_some() {
+        return Some(selected);
+    }
+
+    let Some(port) = find_available_remote_debug_port(9222, 9322) else {
+        state.lock().await.log(
+            "ERROR",
+            "No available local port in range 9222-9322 for remote debugging".into(),
+        );
+        return Some(selected);
+    };
+
+    let user_data_dir = format!(
+        "/tmp/mcp3000-remote-debug-{}",
+        sanitize_for_filename(&selected.binary)
+    );
+    if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
+        state.lock().await.log(
+            "WARN",
+            format!("Failed to create user data dir {user_data_dir}: {e}"),
+        );
+    }
+
+    let mut command = tokio::process::Command::new(&selected.path);
+    command
+        .arg(format!("--remote-debugging-port={port}"))
+        .arg("--remote-debugging-address=127.0.0.1")
+        .arg(format!("--user-data-dir={user_data_dir}"))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            state.lock().await.log(
+                "ERROR",
+                format!(
+                    "Failed to launch {} with remote debugging: {}",
+                    selected.name, e
+                ),
+            );
+            return Some(selected);
+        }
+    };
+    let launched_pid = child.id();
+
+    let existing_child = {
+        let mut app = state.lock().await;
+        app.remote_browser_child.take()
+    };
+    if let Some(mut old_child) = existing_child {
+        let _ = old_child.kill().await;
+    }
+
+    {
+        let mut app = state.lock().await;
+        app.remote_browser_child = Some(child);
+        app.log(
+            "INFO",
+            format!(
+                "Launched {} with remote debugging on 127.0.0.1:{}",
+                selected.name, port
+            ),
+        );
+    }
+
+    if wait_remote_debug_ready(port, Duration::from_secs(10)).await {
+        selected.remote_debug_active = true;
+        selected.remote_debug_target = Some(format!("127.0.0.1:{port}"));
+        selected.remote_debug_pid = launched_pid;
+        {
+            let mut app = state.lock().await;
+            app.selected_browser = Some(selected.clone());
+            app.log(
+                "INFO",
+                format!(
+                    "Remote debugging ready for {} at 127.0.0.1:{}",
+                    selected.name, port
+                ),
+            );
+        }
+        Some(selected)
+    } else {
+        state.lock().await.log(
+            "WARN",
+            format!(
+                "Remote debugging endpoint for {} did not become ready in time",
+                selected.name
+            ),
+        );
+        Some(selected)
+    }
+}
+
+// ── Start services ──────────────────────────────────────────
+
+async fn start_services(state: SharedState) -> Option<Arc<Mutex<DevtoolsBridge>>> {
+    let (port, mode, mut detected_browsers, mut selected_browser) = {
+        let app = state.lock().await;
+        (
+            app.port,
+            app.mode,
+            app.detected_browsers.clone(),
+            app.selected_browser.clone(),
+        )
+    };
+
+    if mode.browser_enabled() && detected_browsers.is_empty() {
+        detected_browsers = browser::detect_browsers();
+    }
+    if mode.browser_enabled() {
+        selected_browser =
+            ensure_selected_browser_remote_debugging(state.clone(), selected_browser).await;
+        detected_browsers = browser::detect_browsers();
+        if let Some(selected) = &selected_browser {
+            if let Some(refreshed) = detected_browsers
+                .iter()
+                .find(|b| b.path == selected.path && b.binary == selected.binary)
+                .cloned()
+            {
+                selected_browser = Some(refreshed);
+            }
+        }
+        let mut app = state.lock().await;
+        app.detected_browsers = detected_browsers.clone();
+        app.selected_browser = selected_browser.clone();
+    }
+
+    let browser_summary = browser::format_browser_names(&detected_browsers);
+    let remote_support_summary = browser::format_remote_debug_names(&detected_browsers);
+    let remote_active_summary = browser::format_active_remote_debug_names(&detected_browsers);
+    let browser_details: Vec<String> = detected_browsers
+        .iter()
+        .map(|b| {
+            format!(
+                "Browser: {} (binary: {}, path: {}, support: {}, remote debug flag: {}, remote debug active: {}, pid: {})",
+                b.name,
+                b.binary,
+                b.path,
+                b.support_note,
+                b.remote_debug_hint,
+                b.remote_debug_target.as_deref().unwrap_or("no"),
+                b.remote_debug_pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "--".into())
+            )
+        })
+        .collect();
+    {
+        let mut app = state.lock().await;
+        app.detected_browsers = detected_browsers;
+        if browser_summary == "--" {
+            app.log("WARN", "No local browser found in PATH".into());
+        } else {
+            app.log("INFO", format!("Local browsers: {browser_summary}"));
+        }
+        if remote_support_summary == "--" {
+            app.log(
+                "WARN",
+                "No detected browser supports remote debugging".into(),
+            );
+        } else {
+            app.log(
+                "INFO",
+                format!("Remote debugging supported: {remote_support_summary}"),
+            );
+        }
+        if remote_active_summary == "--" {
+            app.log(
+                "WARN",
+                "No browser currently runs with remote debugging".into(),
+            );
+        } else {
+            app.log(
+                "INFO",
+                format!("Remote debugging active: {remote_active_summary}"),
+            );
+        }
+        if mode.browser_enabled() {
+            if let Some(selected) = &selected_browser {
+                let target = selected
+                    .remote_debug_target
+                    .as_deref()
+                    .unwrap_or("launch new browser instance");
+                app.log(
+                    "INFO",
+                    format!(
+                        "Using browser: {} ({}) -> {}",
+                        selected.name, selected.path, target
+                    ),
+                );
+            } else {
+                app.log("WARN", "No browser was selected before startup".into());
+            }
+        }
+        for detail in browser_details {
+            app.log("INFO", detail);
+        }
+    }
+
+    // Start MCP HTTP server
+    let devtools_bridge = if mode.browser_enabled() {
+        if selected_browser.is_none() {
+            state.lock().await.log(
+                "ERROR",
+                "Browser mode requires selecting a supported Chromium browser".into(),
+            );
+            None
+        } else {
+            state
+                .lock()
+                .await
+                .log("INFO", "Starting chrome-devtools-mcp...".into());
+            match DevtoolsBridge::start(selected_browser.as_ref()).await {
+                Ok(bridge) => {
+                    let mut app = state.lock().await;
+                    app.devtools_running = true;
+                    app.log("INFO", "chrome-devtools-mcp started".into());
+                    Some(bridge)
+                }
+                Err(e) => {
+                    let mut app = state.lock().await;
+                    app.log("ERROR", format!("chrome-devtools-mcp: {e}"));
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    let router = server::router(state.clone(), devtools_bridge.clone());
+    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+        Ok(l) => l,
+        Err(e) => {
+            state
+                .lock()
+                .await
+                .log("ERROR", format!("Failed to bind port {port}: {e}"));
+            return devtools_bridge;
+        }
+    };
+
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    {
+        let mut app = state.lock().await;
+        app.server_running = true;
+        app.server_handle = Some(handle);
+        app.log("INFO", format!("MCP Server started on port {port}"));
+    }
+
+    // Start ngrok
+    if let Err(e) = ngrok::start(state.clone()).await {
+        state.lock().await.log("ERROR", format!("ngrok: {e}"));
+    }
+
+    devtools_bridge
+}
+
+// ── Phase 2: Main TUI ──────────────────────────────────────
+
 async fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: SharedState,
+    _devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut log_scroll: usize = 0;
     let mut selection = Selection::new();
@@ -206,30 +931,37 @@ async fn run_tui(
             terminal.draw(|f| {
                 draw_ui(f, &app, log_scroll, toast_ref);
 
-                // Render selection highlight overlay
                 if let Some(((c0, r0), (c1, r1))) = selection.range() {
                     let area = f.area();
                     for row in r0..=r1 {
-                        if row >= area.height { break; }
+                        if row >= area.height {
+                            break;
+                        }
                         let cs = if row == r0 { c0 } else { 0 };
-                        let ce = if row == r1 { c1 } else { area.width.saturating_sub(1) };
+                        let ce = if row == r1 {
+                            c1
+                        } else {
+                            area.width.saturating_sub(1)
+                        };
                         for col in cs..=ce {
-                            if col >= area.width { break; }
+                            if col >= area.width {
+                                break;
+                            }
                             if let Some(cell) = f.buffer_mut().cell_mut((col, row)) {
-                                cell.set_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+                                cell.set_style(
+                                    Style::default().bg(Color::DarkGray).fg(Color::White),
+                                );
                             }
                         }
                     }
                 }
 
-                // Snapshot all screen text from the buffer
                 let area = f.area();
                 let buf = f.buffer_mut();
                 for row in 0..area.height {
                     let mut line = String::new();
                     for col in 0..area.width {
-                        let cell = &buf[(col, row)];
-                        line.push_str(cell.symbol());
+                        line.push_str(buf[(col, row)].symbol());
                     }
                     new_lines.push(line);
                 }
@@ -237,7 +969,6 @@ async fn run_tui(
             screen_lines = new_lines;
         }
 
-        // Clear expired toast
         if let Some((_, _, t)) = &toast {
             if t.elapsed().as_secs() >= 2 {
                 toast = None;
@@ -253,10 +984,6 @@ async fn run_tui(
                     selection.clear();
                     match key.code {
                         KeyCode::Char('q') => break,
-                        KeyCode::Char('s') => toggle_server(state.clone()).await,
-                        KeyCode::Char('n') => toggle_ngrok(state.clone()).await,
-                        KeyCode::Char('b') => start_both(state.clone()).await,
-                        KeyCode::Char('x') => stop_both(state.clone()).await,
                         KeyCode::Up => log_scroll = log_scroll.saturating_sub(1),
                         KeyCode::Down => log_scroll = log_scroll.saturating_add(1),
                         _ => {}
@@ -277,14 +1004,16 @@ async fn run_tui(
                         if selection.dragging {
                             selection.end = Some((mouse.column, mouse.row));
                             selection.dragging = false;
-
                             if let Some((start, end)) = selection.range() {
                                 if start != end {
                                     let text = extract_from_screen(&screen_lines, start, end);
                                     if !text.is_empty() {
                                         clipboard_copy(&text);
-                                        // Toast at mouse release position
-                                        toast = Some(("Copied!", (mouse.column, mouse.row), Instant::now()));
+                                        toast = Some((
+                                            "Copied!",
+                                            (mouse.column, mouse.row),
+                                            Instant::now(),
+                                        ));
                                     }
                                 }
                             }
@@ -297,8 +1026,21 @@ async fn run_tui(
         }
     }
 
+    // Stop services
+    {
+        let mut app = state.lock().await;
+        if let Some(handle) = app.server_handle.take() {
+            handle.abort();
+        }
+        app.server_running = false;
+    }
+    let _ = ngrok::stop(state.clone()).await;
+    state.lock().await.remote_connected = false;
+
     Ok(())
 }
+
+// ── Draw main UI ────────────────────────────────────────────
 
 fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str, (u16, u16))>) {
     let area = f.area();
@@ -306,7 +1048,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
     let both_running = app.server_running && app.ngrok_running;
     let has_url = app.ngrok_url.is_some();
     let show_guide = both_running && has_url && !app.remote_connected;
-    let status_height = if show_guide { 16 } else { 10 };
+    let status_height = if show_guide { 23 } else { 16 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -319,90 +1061,334 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         .split(area);
 
     // ── Header ──
-    let header = Paragraph::new("  MCP3000 - MCP Tools for ChatGPT to control your computer and browser")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+    let header =
+        Paragraph::new("  MCP3000 - MCP Tools for ChatGPT to control your computer and browser")
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            );
     f.render_widget(header, chunks[0]);
 
     // ── Status ──
+    let mode_label = app.mode.label();
     let server_status = if app.server_running {
         format!("RUNNING (port {})", app.port)
     } else {
         "STOPPED".into()
     };
-
-    let ngrok_status: &str = if app.ngrok_running { "RUNNING" } else { "STOPPED" };
-
-    let mcp_url: String = app.ngrok_url.as_ref()
+    let ngrok_status: &str = if app.ngrok_running {
+        "RUNNING"
+    } else {
+        "STOPPED"
+    };
+    let devtools_status: &str = if app.devtools_running {
+        "RUNNING"
+    } else {
+        if app.mode.browser_enabled() {
+            "STOPPED"
+        } else {
+            "N/A"
+        }
+    };
+    let mcp_url: String = app
+        .ngrok_url
+        .as_ref()
         .map(|u| format!("{u}/mcp"))
+        .unwrap_or_else(|| "--".into());
+    let browser_summary = browser::format_browser_names(&app.detected_browsers);
+    let remote_support_summary = browser::format_remote_debug_names(&app.detected_browsers);
+    let remote_active_summary = browser::format_active_remote_debug_names(&app.detected_browsers);
+    let selected_browser_summary = app
+        .selected_browser
+        .as_ref()
+        .map(|b| format!("{} ({})", b.name, b.binary))
+        .unwrap_or_else(|| "--".into());
+    let selected_target_summary = app
+        .selected_browser
+        .as_ref()
+        .map(|b| {
+            b.remote_debug_target
+                .clone()
+                .unwrap_or_else(|| "launch new browser instance".into())
+        })
         .unwrap_or_else(|| "--".into());
 
     let mut status_lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::styled("  Server:           ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(&server_status, Style::default().fg(if app.server_running { Color::Green } else { Color::Red })),
+            Span::styled(
+                "  Mode:             ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                mode_label,
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("  ngrok:            ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(ngrok_status, Style::default().fg(if app.ngrok_running { Color::Green } else { Color::Red })),
+            Span::styled(
+                "  Server:           ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &server_status,
+                Style::default().fg(if app.server_running {
+                    Color::Green
+                } else {
+                    Color::Red
+                }),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("  MCP Server URL:   ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(&mcp_url, Style::default().fg(if has_url { Color::Cyan } else { Color::DarkGray })),
+            Span::styled(
+                "  ngrok:            ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                ngrok_status,
+                Style::default().fg(if app.ngrok_running {
+                    Color::Green
+                } else {
+                    Color::Red
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  DevTools:         ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                devtools_status,
+                Style::default().fg(if app.devtools_running {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  MCP Server URL:   ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &mcp_url,
+                Style::default().fg(if has_url {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                }),
+            ),
         ]),
         {
-            let mut spans = vec![Span::styled("  Remote connected: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))];
+            let mut spans = vec![Span::styled(
+                "  Remote connected: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )];
             if app.remote_connected {
-                spans.push(Span::styled("V", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    "V",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ));
             } else {
-                spans.push(Span::styled("X", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
-                if !both_running {
-                    spans.push(Span::styled("  (press b to start server)", Style::default().fg(Color::DarkGray)));
-                }
+                spans.push(Span::styled(
+                    "X",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
             }
             Line::from(spans)
         },
+        Line::from(vec![
+            Span::styled(
+                "  Local browsers:   ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(browser_summary, Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Remote dbg support:",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(remote_support_summary, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Remote dbg active: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(remote_active_summary, Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Selected browser: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                selected_browser_summary,
+                Style::default().fg(Color::Magenta),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Selected target:  ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(selected_target_summary, Style::default().fg(Color::Cyan)),
+        ]),
     ];
 
     if show_guide {
         status_lines.push(Line::from(""));
-        status_lines.push(Line::from(Span::styled("  What to do next?", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        status_lines.push(Line::from(Span::styled(
+            "  What to do next?",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
         status_lines.push(Line::from(vec![
-            Span::styled("  1. ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled("Open connector settings: ", Style::default().fg(Color::White)),
-            Span::styled("https://chatgpt.com/apps#settings/Connectors", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+            Span::styled(
+                "  1. ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Open connector settings: ",
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                "https://chatgpt.com/apps#settings/Connectors",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled("  2. ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  2. ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Click ", Style::default().fg(Color::White)),
-            Span::styled("Create app", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Create app",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled("  3. ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  3. ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Fill in the form:", Style::default().fg(Color::White)),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled("       Name:           ", Style::default().fg(Color::DarkGray)),
-            Span::styled("MCP3000", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled("  (or any name you like)", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "       Name:           ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "MCP3000",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  (or any name you like)",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled("       MCP Server URL: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&mcp_url, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "       MCP Server URL: ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                &mcp_url,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled("       Authentication: ", Style::default().fg(Color::DarkGray)),
-            Span::styled("None", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "       Authentication: ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "None",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled("  4. ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  4. ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Click ", Style::default().fg(Color::White)),
-            Span::styled("\"I understand and want to continue\"", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "\"I understand and want to continue\"",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled("  5. ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  5. ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Click ", Style::default().fg(Color::White)),
-            Span::styled("Create", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Create",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
     } else {
         status_lines.push(Line::from(""));
@@ -412,125 +1398,92 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         ]));
         status_lines.push(Line::from(vec![
             Span::styled("  Sessions:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(app.session_count.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                app.session_count.to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::styled("    Requests: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(app.request_count.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                app.request_count.to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
         ]));
     }
 
     let status = Paragraph::new(status_lines).block(
-        Block::default().title(" Status ").borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)),
+        Block::default()
+            .title(" Status ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(status, chunks[1]);
 
-    // ── Keybindings ──
+    // ── Keys ──
     let key_spans = vec![
-        Span::styled("  [s]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Server  "),
-        Span::styled("[n]", Style::default().fg(Color::Cyan)),
-        Span::raw(" ngrok  "),
-        Span::styled("[b]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Both  "),
-        Span::styled("[x]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Stop all  "),
-        Span::styled("[q]", Style::default().fg(Color::Red)),
-        Span::raw(" Quit"),
+        Span::styled("  [q]", Style::default().fg(Color::Red)),
+        Span::raw(" Quit  "),
+        Span::styled("[Up/Down]", Style::default().fg(Color::DarkGray)),
+        Span::raw(" Scroll logs"),
     ];
     let keys = Paragraph::new(Line::from(key_spans)).block(
-        Block::default().title(" Keys ").borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)),
+        Block::default()
+            .title(" Keys ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(keys, chunks[2]);
 
     // ── Logs ──
-    let log_items: Vec<ListItem> = app.logs.iter().map(|entry| {
-        let color = match entry.level {
-            "ERROR" => Color::Red,
-            "WARN" => Color::Yellow,
-            _ => Color::Gray,
-        };
-        ListItem::new(Line::from(vec![
-            Span::styled(format!(" {} ", entry.time), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:5} ", entry.level), Style::default().fg(color)),
-            Span::styled(&*entry.message, Style::default().fg(Color::White)),
-        ]))
-    }).collect();
+    let log_items: Vec<ListItem> = app
+        .logs
+        .iter()
+        .map(|entry| {
+            let color = match entry.level {
+                "ERROR" => Color::Red,
+                "WARN" => Color::Yellow,
+                _ => Color::Gray,
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", entry.time),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("{:5} ", entry.level), Style::default().fg(color)),
+                Span::styled(&*entry.message, Style::default().fg(Color::White)),
+            ]))
+        })
+        .collect();
 
     let visible_height = chunks[3].height.saturating_sub(2) as usize;
     let total = log_items.len();
     let max_scroll = total.saturating_sub(visible_height);
     let effective_scroll = log_scroll.min(max_scroll);
-
-    let visible_items: Vec<ListItem> = log_items.into_iter().skip(effective_scroll).take(visible_height).collect();
+    let visible_items: Vec<ListItem> = log_items
+        .into_iter()
+        .skip(effective_scroll)
+        .take(visible_height)
+        .collect();
     let logs = List::new(visible_items).block(
-        Block::default().title(" Logs ").borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)),
+        Block::default()
+            .title(" Logs ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(logs, chunks[3]);
 
-    // ── Floating toast at cursor position ──
+    // ── Floating toast ──
     if let Some((msg, (col, row))) = toast {
         let label = format!(" {msg} ");
         let w = label.len() as u16;
-        // Position: prefer right of cursor, clamp to screen
         let x = col.saturating_add(1).min(area.width.saturating_sub(w));
         let y = if row > 0 { row - 1 } else { row + 1 }.min(area.height.saturating_sub(1));
         let toast_area = Rect::new(x, y, w, 1);
-        let toast_widget = Paragraph::new(label)
-            .style(Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD));
+        let toast_widget = Paragraph::new(label).style(
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
         f.render_widget(toast_widget, toast_area);
     }
-}
-
-async fn toggle_server(state: SharedState) {
-    let running = { state.lock().await.server_running };
-    if running { stop_server(state).await; } else { start_server(state).await; }
-}
-
-async fn start_server(state: SharedState) {
-    if state.lock().await.server_running { return; }
-    let port = state.lock().await.port;
-
-    let router = server::router(state.clone());
-    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
-        Ok(l) => l,
-        Err(e) => {
-            state.lock().await.log("ERROR", format!("Failed to bind port {port}: {e}"));
-            return;
-        }
-    };
-
-    let handle = tokio::spawn(async move { let _ = axum::serve(listener, router).await; });
-    let mut app = state.lock().await;
-    app.server_running = true;
-    app.server_handle = Some(handle);
-    app.log("INFO", format!("MCP Server started on port {port}"));
-}
-
-async fn stop_server(state: SharedState) {
-    let mut app = state.lock().await;
-    if let Some(handle) = app.server_handle.take() { handle.abort(); }
-    app.server_running = false;
-    app.log("INFO", "MCP Server stopped".into());
-}
-
-async fn toggle_ngrok(state: SharedState) {
-    let running = { state.lock().await.ngrok_running };
-    if running {
-        let _ = ngrok::stop(state).await;
-    } else if let Err(e) = ngrok::start(state.clone()).await {
-        state.lock().await.log("ERROR", format!("ngrok: {e}"));
-    }
-}
-
-async fn start_both(state: SharedState) {
-    start_server(state.clone()).await;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    if let Err(e) = ngrok::start(state.clone()).await {
-        state.lock().await.log("ERROR", format!("ngrok: {e}"));
-    }
-}
-
-async fn stop_both(state: SharedState) {
-    let _ = ngrok::stop(state.clone()).await;
-    stop_server(state.clone()).await;
-    state.lock().await.remote_connected = false;
 }

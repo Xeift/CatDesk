@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::Mutex;
 
+use crate::browser::DetectedBrowser;
+
 /// Log entry displayed in the TUI.
 #[derive(Clone)]
 pub struct LogEntry {
@@ -10,19 +12,49 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// Which MCP backends to enable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Computer, // run_command only
+    Browser,  // chrome-devtools-mcp only
+    Both,     // both
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Computer => "Computer",
+            Mode::Browser => "Browser",
+            Mode::Both => "Both",
+        }
+    }
+    pub fn computer_enabled(self) -> bool {
+        matches!(self, Mode::Computer | Mode::Both)
+    }
+    pub fn browser_enabled(self) -> bool {
+        matches!(self, Mode::Browser | Mode::Both)
+    }
+}
+
 /// Shared application state across server, ngrok, and TUI.
 pub struct AppState {
+    pub mode: Mode,
     pub server_running: bool,
     pub ngrok_running: bool,
     pub ngrok_url: Option<String>,
     pub remote_connected: bool,
+    pub devtools_running: bool,
     pub port: u16,
     pub workspace_root: String,
+    pub detected_browsers: Vec<DetectedBrowser>,
+    pub selected_browser: Option<DetectedBrowser>,
     pub logs: Vec<LogEntry>,
     pub session_count: usize,
     pub request_count: u64,
     pub server_handle: Option<tokio::task::JoinHandle<()>>,
     pub ngrok_child: Option<tokio::process::Child>,
+    pub remote_browser_child: Option<tokio::process::Child>,
+    pub devtools_child: Option<tokio::process::Child>,
 }
 
 pub type SharedState = Arc<Mutex<AppState>>;
@@ -30,17 +62,23 @@ pub type SharedState = Arc<Mutex<AppState>>;
 impl AppState {
     pub fn new(port: u16, workspace_root: String) -> Self {
         Self {
+            mode: Mode::Both,
             server_running: false,
             ngrok_running: false,
             ngrok_url: None,
             remote_connected: false,
+            devtools_running: false,
             port,
             workspace_root,
+            detected_browsers: Vec::new(),
+            selected_browser: None,
             logs: Vec::new(),
             session_count: 0,
             request_count: 0,
             server_handle: None,
             ngrok_child: None,
+            remote_browser_child: None,
+            devtools_child: None,
         }
     }
 
@@ -58,7 +96,6 @@ impl AppState {
             level,
             message,
         });
-        // Keep last 200 entries
         if self.logs.len() > 200 {
             self.logs.remove(0);
         }
