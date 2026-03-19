@@ -1,4 +1,5 @@
 use ratatui::style::Color;
+use ratatui::widgets::BorderType;
 
 use super::{Palette, ThemeDef};
 
@@ -9,6 +10,7 @@ pub const THEME: ThemeDef = ThemeDef {
     palette: Palette {
         header_fg: Color::LightMagenta,
         border_fg: Color::Magenta,
+        border_type: BorderType::Rounded,
         title_fg: Color::LightMagenta,
         key_fg: Color::Magenta,
         primary_fg: Color::White,

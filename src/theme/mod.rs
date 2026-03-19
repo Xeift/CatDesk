@@ -2,11 +2,13 @@ mod concise;
 mod neon;
 
 use ratatui::style::Color;
+use ratatui::widgets::BorderType;
 
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub header_fg: Color,
     pub border_fg: Color,
+    pub border_type: BorderType,
     pub title_fg: Color,
     pub key_fg: Color,
     pub primary_fg: Color,

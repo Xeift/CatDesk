@@ -244,6 +244,7 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(palette.border_type)
                     .border_style(Style::default().fg(palette.border_fg)),
             );
     f.render_widget(header, chunks[0]);
@@ -319,6 +320,7 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef) {
         Block::default()
             .title(" Mode ")
             .borders(Borders::ALL)
+            .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(select, chunks[1]);
@@ -390,6 +392,7 @@ fn draw_theme_settings(f: &mut Frame, current_theme: &theme::ThemeDef, selected_
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(palette.border_type)
                 .border_style(Style::default().fg(palette.border_fg)),
         );
     f.render_widget(header, chunks[0]);
@@ -438,6 +441,7 @@ fn draw_theme_settings(f: &mut Frame, current_theme: &theme::ThemeDef, selected_
         Block::default()
             .title(" Theme ")
             .borders(Borders::ALL)
+            .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(body, chunks[1]);
@@ -454,6 +458,7 @@ fn draw_theme_settings(f: &mut Frame, current_theme: &theme::ThemeDef, selected_
         Block::default()
             .title(" Keys ")
             .borders(Borders::ALL)
+            .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(keys, chunks[2]);
@@ -598,6 +603,7 @@ fn draw_browser_select(
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(palette.border_type)
                 .border_style(Style::default().fg(palette.border_fg)),
         );
     f.render_widget(header, chunks[0]);
@@ -739,6 +745,7 @@ fn draw_browser_select(
         Block::default()
             .title(" Browser List ")
             .borders(Borders::ALL)
+            .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(body, chunks[1]);
@@ -759,6 +766,7 @@ fn draw_browser_select(
         Block::default()
             .title(" Keys ")
             .borders(Borders::ALL)
+            .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(keys, chunks[2]);
@@ -1251,6 +1259,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(palette.border_type)
                     .border_style(Style::default().fg(palette.border_fg)),
             );
     f.render_widget(header, chunks[0]);
@@ -1605,6 +1614,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         Block::default()
             .title(" Status ")
             .borders(Borders::ALL)
+            .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(status, chunks[1]);
@@ -1620,6 +1630,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         Block::default()
             .title(" Keys ")
             .borders(Borders::ALL)
+            .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(keys, chunks[2]);
@@ -1658,6 +1669,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         Block::default()
             .title(" Logs ")
             .borders(Borders::ALL)
+            .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(logs, chunks[3]);
