@@ -42,6 +42,7 @@ impl Mode {
 pub enum ToolMode {
     OneTool,    // only run_command
     MultiTools, // codex/claude-style workspace tools
+    ReadOnly,   // read-only safe tools only
 }
 
 impl ToolMode {
@@ -49,18 +50,32 @@ impl ToolMode {
         match self {
             ToolMode::OneTool => "1-tool",
             ToolMode::MultiTools => "multi-tools",
+            ToolMode::ReadOnly => "read-only",
         }
     }
 
     pub fn next(self) -> Self {
         match self {
             ToolMode::OneTool => ToolMode::MultiTools,
-            ToolMode::MultiTools => ToolMode::OneTool,
+            ToolMode::MultiTools => ToolMode::ReadOnly,
+            ToolMode::ReadOnly => ToolMode::OneTool,
         }
     }
 
-    pub fn multi_enabled(self) -> bool {
+    pub fn run_command_enabled(self) -> bool {
+        matches!(self, ToolMode::OneTool | ToolMode::MultiTools)
+    }
+
+    pub fn read_tools_enabled(self) -> bool {
+        matches!(self, ToolMode::MultiTools | ToolMode::ReadOnly)
+    }
+
+    pub fn write_tools_enabled(self) -> bool {
         matches!(self, ToolMode::MultiTools)
+    }
+
+    pub fn read_only(self) -> bool {
+        matches!(self, ToolMode::ReadOnly)
     }
 }
 

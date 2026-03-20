@@ -154,23 +154,25 @@ async fn handle_tools_list(
 
     // Computer tools
     if mode.computer_enabled() {
-        tools.push(json!({
-            "name": "run_command",
-            "title": "Run command",
-            "description": "Execute a shell command inside the workspace root. Returns stdout and stderr.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The shell command to execute" },
-                    "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it" },
-                    "timeout": { "type": "number", "description": "Timeout in milliseconds. Clamped to 120000." }
+        if tool_mode.run_command_enabled() {
+            tools.push(json!({
+                "name": "run_command",
+                "title": "Run command",
+                "description": "Execute a shell command inside the workspace root. Returns stdout and stderr.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The shell command to execute" },
+                        "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it" },
+                        "timeout": { "type": "number", "description": "Timeout in milliseconds. Clamped to 120000." }
+                    },
+                    "required": ["command"]
                 },
-                "required": ["command"]
-            },
-            "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
-        }));
+                "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+            }));
+        }
 
-        if tool_mode.multi_enabled() {
+        if tool_mode.read_tools_enabled() {
             tools.push(json!({
                 "name": "read_file",
                 "title": "Read file",
@@ -183,36 +185,6 @@ async fn handle_tools_list(
                     "required": ["path"]
                 },
                 "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
-            }));
-            tools.push(json!({
-                "name": "write_file",
-                "title": "Write file",
-                "description": "Create or overwrite a file in workspace.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "content": { "type": "string" },
-                        "create_dirs": { "type": "boolean", "description": "Create parent directories if missing" }
-                    },
-                    "required": ["path", "content"]
-                },
-                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
-            }));
-            tools.push(json!({
-                "name": "append_file",
-                "title": "Append file",
-                "description": "Append text to an existing file (or create file).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "content": { "type": "string" },
-                        "create_dirs": { "type": "boolean", "description": "Create parent directories if missing" }
-                    },
-                    "required": ["path", "content"]
-                },
-                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
             tools.push(json!({
                 "name": "list_files",
@@ -243,6 +215,39 @@ async fn handle_tools_list(
                     "required": ["query"]
                 },
                 "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+            }));
+        }
+
+        if tool_mode.write_tools_enabled() {
+            tools.push(json!({
+                "name": "write_file",
+                "title": "Write file",
+                "description": "Create or overwrite a file in workspace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" },
+                        "create_dirs": { "type": "boolean", "description": "Create parent directories if missing" }
+                    },
+                    "required": ["path", "content"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
+            }));
+            tools.push(json!({
+                "name": "append_file",
+                "title": "Append file",
+                "description": "Append text to an existing file (or create file).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" },
+                        "create_dirs": { "type": "boolean", "description": "Create parent directories if missing" }
+                    },
+                    "required": ["path", "content"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
             tools.push(json!({
                 "name": "make_directory",
@@ -310,18 +315,11 @@ async fn handle_tools_list(
     // Browser tools — get from devtools bridge
     if mode.browser_enabled() {
         if let Some(bridge) = devtools {
-            let list_req = json!({
-                "jsonrpc": "2.0",
-                "id": "dt-tools-list",
-                "method": "tools/list",
-                "params": {}
-            });
-            let mut b = bridge.lock().await;
-            if let Ok(resp) = b.request(&list_req).await {
-                if let Some(result) = resp.get("result") {
-                    if let Some(dt_tools) = result.get("tools").and_then(|t| t.as_array()) {
-                        tools.extend(dt_tools.iter().cloned());
-                    }
+            if let Some(dt_tools) = fetch_devtools_tools(bridge).await {
+                if tool_mode.read_only() {
+                    tools.extend(dt_tools.into_iter().filter(tool_is_read_only));
+                } else {
+                    tools.extend(dt_tools);
                 }
             }
         }
@@ -345,27 +343,58 @@ async fn handle_tools_call(
     // Local computer tools
     if mode.computer_enabled() {
         if tool_name == "run_command" {
-            return handle_run_command(req, workspace_root).await;
+            if tool_mode.run_command_enabled() {
+                return handle_run_command(req, workspace_root).await;
+            }
+            if tool_mode.read_only() {
+                return read_only_blocked_response(req, tool_name);
+            }
+            return JsonRpcResponse::error(
+                req.id.clone(),
+                -32602,
+                format!("Unknown tool: {tool_name}"),
+            );
         }
-        if tool_mode.multi_enabled() {
+        if tool_mode.read_tools_enabled() {
             match tool_name {
                 "read_file" => return handle_read_file(req, workspace_root),
-                "write_file" => return handle_write_file(req, workspace_root),
-                "append_file" => return handle_append_file(req, workspace_root),
                 "list_files" => return handle_list_files(req, workspace_root),
                 "search_text" => return handle_search_text(req, workspace_root),
+                _ => {}
+            }
+        }
+        if tool_mode.write_tools_enabled() {
+            match tool_name {
+                "write_file" => return handle_write_file(req, workspace_root),
+                "append_file" => return handle_append_file(req, workspace_root),
                 "make_directory" => return handle_make_directory(req, workspace_root),
                 "move_path" => return handle_move_path(req, workspace_root),
                 "delete_path" => return handle_delete_path(req, workspace_root),
                 "replace_in_file" => return handle_replace_in_file(req, workspace_root),
                 _ => {}
             }
+        } else if tool_mode.read_only() && is_local_destructive_tool(tool_name) {
+            return read_only_blocked_response(req, tool_name);
         }
     }
 
     // Everything else → forward to devtools bridge
     if mode.browser_enabled() {
         if let Some(bridge) = devtools {
+            if tool_mode.read_only() {
+                match devtools_tool_is_read_only(bridge, tool_name).await {
+                    Some(true) => {}
+                    Some(false) => return read_only_blocked_response(req, tool_name),
+                    None => {
+                        return tool_error_response(
+                            req,
+                            format!(
+                                "Tool '{tool_name}' is blocked in read-only mode (cannot verify readOnlyHint)"
+                            ),
+                        );
+                    }
+                }
+            }
             let forward_req = json!({
                 "jsonrpc": "2.0",
                 "id": req.id,
@@ -466,8 +495,63 @@ fn tool_error_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse {
     )
 }
 
+fn read_only_blocked_response(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse {
+    tool_error_response(
+        req,
+        format!("Tool '{tool_name}' is disabled in read-only mode"),
+    )
+}
+
 fn tool_arguments(req: &JsonRpcRequest) -> Value {
     req.params.get("arguments").cloned().unwrap_or(json!({}))
+}
+
+fn is_local_destructive_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "run_command"
+            | "write_file"
+            | "append_file"
+            | "make_directory"
+            | "move_path"
+            | "delete_path"
+            | "replace_in_file"
+    )
+}
+
+fn tool_is_read_only(tool: &Value) -> bool {
+    tool.get("annotations")
+        .and_then(|v| v.get("readOnlyHint"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+async fn fetch_devtools_tools(bridge: &Arc<Mutex<DevtoolsBridge>>) -> Option<Vec<Value>> {
+    let list_req = json!({
+        "jsonrpc": "2.0",
+        "id": "dt-tools-list",
+        "method": "tools/list",
+        "params": {}
+    });
+    let mut b = bridge.lock().await;
+    let resp = b.request(&list_req).await.ok()?;
+    let dt_tools = resp
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(Value::as_array)?
+        .to_vec();
+    Some(dt_tools)
+}
+
+async fn devtools_tool_is_read_only(
+    bridge: &Arc<Mutex<DevtoolsBridge>>,
+    tool_name: &str,
+) -> Option<bool> {
+    let dt_tools = fetch_devtools_tools(bridge).await?;
+    dt_tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+        .map(tool_is_read_only)
 }
 
 fn handle_read_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
