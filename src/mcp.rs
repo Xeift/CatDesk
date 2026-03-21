@@ -121,6 +121,7 @@ pub async fn handle_request(
         "tools/call" => {
             Some(handle_tools_call(req, workspace_root, mode, tool_mode, devtools).await)
         }
+        "resources/list" => Some(handle_resources_list(req)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
         _ => Some(JsonRpcResponse::error(
             req.id.clone(),
@@ -136,8 +137,21 @@ fn handle_initialize(req: &JsonRpcRequest, session: &mut Session) -> JsonRpcResp
         req.id.clone(),
         json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": { "listChanged": false } },
+            "capabilities": {
+                "tools": { "listChanged": false },
+                "resources": { "listChanged": false }
+            },
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION }
+        }),
+    )
+}
+
+fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
+    JsonRpcResponse::success(
+        req.id.clone(),
+        json!({
+            "resources": [],
+            "nextCursor": null
         }),
     )
 }

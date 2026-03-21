@@ -1,3 +1,5 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::Mutex;
@@ -104,6 +106,18 @@ pub struct AppState {
 
 pub type SharedState = Arc<Mutex<AppState>>;
 
+const LOG_FILE_PATH: &str = "log.txt";
+
+fn append_file_log(time: &str, level: &str, message: &str) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(LOG_FILE_PATH)
+    {
+        let _ = writeln!(file, "{time} {level} {message}");
+    }
+}
+
 impl AppState {
     pub fn new(port: u16, workspace_root: String) -> Self {
         Self {
@@ -142,6 +156,7 @@ impl AppState {
         let m = (secs % 3600) / 60;
         let s = secs % 60;
         let now = format!("{h:02}:{m:02}:{s:02}");
+        append_file_log(&now, level, &message);
         self.logs.push(LogEntry {
             time: now,
             level,

@@ -61,6 +61,63 @@ fn sse_error_response(
     builder.body(Body::from(sse_body)).unwrap()
 }
 
+fn short_session_id(sid: &str) -> String {
+    sid[..sid.len().min(8)].to_string()
+}
+
+fn single_active_session_id(sessions: &HashMap<String, Session>) -> Option<String> {
+    if sessions.len() == 1 {
+        sessions.keys().next().cloned()
+    } else {
+        None
+    }
+}
+
+fn summarize_list(items: &[String], max_items: usize) -> String {
+    if items.is_empty() {
+        return "-".into();
+    }
+    if items.len() <= max_items {
+        return items.join(", ");
+    }
+    format!(
+        "{} ... (+{} more)",
+        items[..max_items].join(", "),
+        items.len() - max_items
+    )
+}
+
+fn summarize_request(req: &Value) -> String {
+    let method = req
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("<invalid-method>");
+    let id = req.get("id").map_or("-".into(), |v| match v {
+        Value::String(s) => s.clone(),
+        _ => v.to_string(),
+    });
+    format!("{method}(id={id})")
+}
+
+fn summarize_response(resp: &Value) -> String {
+    let id = resp.get("id").map_or("-".into(), |v| match v {
+        Value::String(s) => s.clone(),
+        _ => v.to_string(),
+    });
+    if let Some(err) = resp.get("error") {
+        let code = err.get("code").and_then(Value::as_i64).unwrap_or(-32000);
+        let msg = err
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Unknown error");
+        return format!("id={id}:error({code} {msg})");
+    }
+    if resp.get("result").is_some() {
+        return format!("id={id}:result");
+    }
+    format!("id={id}:unknown")
+}
+
 // ── GET / — health ──────────────────────────────────────────
 
 async fn health(State(s): State<ServerState>) -> Json<Value> {
@@ -109,6 +166,7 @@ async fn post_mcp(
     } else {
         vec![body]
     };
+    let request_summary: Vec<String> = requests.iter().map(summarize_request).collect();
 
     let session_id_header = headers
         .get("mcp-session-id")
@@ -124,9 +182,25 @@ async fn post_mcp(
 
     let session_id: String;
     if has_initialize {
-        let new_session = Session::new();
-        session_id = new_session.id.clone();
-        sessions.insert(session_id.clone(), new_session);
+        if let Some(ref sid) = session_id_header {
+            if sessions.contains_key(sid) {
+                // important: ChatGPT MCP client will initialize 8 times
+                // use same session id if the sid already exists
+                session_id = sid.clone();
+            } else if let Some(active_sid) = single_active_session_id(&sessions) {
+                session_id = active_sid;
+            } else {
+                let new_session = Session::new();
+                session_id = new_session.id.clone();
+                sessions.insert(session_id.clone(), new_session);
+            }
+        } else if let Some(active_sid) = single_active_session_id(&sessions) {
+            session_id = active_sid;
+        } else {
+            let new_session = Session::new();
+            session_id = new_session.id.clone();
+            sessions.insert(session_id.clone(), new_session);
+        }
         let mut app = s.app.lock().await;
         app.remote_connected = true;
     } else if let Some(ref sid) = session_id_header {
@@ -135,7 +209,7 @@ async fn post_mcp(
             let mut app = s.app.lock().await;
             app.log(
                 "WARN",
-                format!("Session not found: {}", &sid[..sid.len().min(8)]),
+                format!("Session not found: {}", short_session_id(sid)),
             );
             return sse_error_response(
                 StatusCode::NOT_FOUND,
@@ -184,12 +258,14 @@ async fn post_mcp(
     {
         let mut app = s.app.lock().await;
         app.session_count = sessions.len();
+        let response_summary: Vec<String> = responses.iter().map(summarize_response).collect();
         app.log(
             "INFO",
             format!(
-                "POST /mcp session={} ({} msg(s))",
-                &session_id[..session_id.len().min(8)],
-                requests.len()
+                "POST /mcp sid={} req=[{}] resp=[{}]",
+                short_session_id(&session_id),
+                summarize_list(&request_summary, 6),
+                summarize_list(&response_summary, 6),
             ),
         );
     }
@@ -262,10 +338,7 @@ async fn get_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<B
                 let mut app = app_state.lock().await;
                 app.log(
                     "INFO",
-                    format!(
-                        "SSE stream closed: {}",
-                        &sid_clone[..sid_clone.len().min(8)]
-                    ),
+                    format!("SSE stream closed: {}", short_session_id(&sid_clone)),
                 );
                 break;
             }
@@ -301,7 +374,7 @@ async fn delete_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Respons
             }
             app.log(
                 "INFO",
-                format!("Session closed: {}", &sid[..sid.len().min(8)]),
+                format!("Session closed: {}", short_session_id(&sid)),
             );
             return Response::builder()
                 .status(StatusCode::OK)
