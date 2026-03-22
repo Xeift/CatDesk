@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, Session};
-use crate::state::SharedState;
+use crate::state::{FlowDirection, SharedState};
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
@@ -87,15 +87,42 @@ fn summarize_list(items: &[String], max_items: usize) -> String {
     )
 }
 
+fn request_id(req: &Value) -> String {
+    req.get("id").map_or("-".into(), |v| match v {
+        Value::String(s) => s.clone(),
+        _ => v.to_string(),
+    })
+}
+
+fn request_tool_name(req: &Value) -> Option<String> {
+    req.get("params")
+        .and_then(|v| v.get("name"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+}
+
+fn request_flow_label(req: &Value) -> String {
+    let method = req
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("<invalid-method>");
+    if method == "tools/call" {
+        let tool = request_tool_name(req).unwrap_or_else(|| "?".into());
+        return format!("tools/call:{tool}");
+    }
+    method.to_string()
+}
+
 fn summarize_request(req: &Value) -> String {
     let method = req
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or("<invalid-method>");
-    let id = req.get("id").map_or("-".into(), |v| match v {
-        Value::String(s) => s.clone(),
-        _ => v.to_string(),
-    });
+    let id = request_id(req);
+    if method == "tools/call" {
+        let tool = request_tool_name(req).unwrap_or_else(|| "?".into());
+        return format!("tools/call({tool},id={id})");
+    }
     format!("{method}(id={id})")
 }
 
@@ -167,6 +194,12 @@ async fn post_mcp(
         vec![body]
     };
     let request_summary: Vec<String> = requests.iter().map(summarize_request).collect();
+    let request_flow_events: Vec<String> = requests.iter().map(request_flow_label).collect();
+    let response_flow_events: Vec<String> = requests
+        .iter()
+        .filter(|r| r.get("id").is_some())
+        .map(request_flow_label)
+        .collect();
 
     let session_id_header = headers
         .get("mcp-session-id")
@@ -231,6 +264,11 @@ async fn post_mcp(
 
     let mut responses: Vec<Value> = Vec::new();
 
+    {
+        let mut app = s.app.lock().await;
+        app.record_session_flow(&session_id, &request_flow_events, FlowDirection::Forward);
+    }
+
     for req_val in &requests {
         let req: JsonRpcRequest = match serde_json::from_value(req_val.clone()) {
             Ok(r) => r,
@@ -258,13 +296,21 @@ async fn post_mcp(
     {
         let mut app = s.app.lock().await;
         app.session_count = sessions.len();
+        app.record_session_flow(&session_id, &response_flow_events, FlowDirection::Backward);
         let response_summary: Vec<String> = responses.iter().map(summarize_response).collect();
         app.log(
             "INFO",
             format!(
-                "POST /mcp sid={} req=[{}] resp=[{}]",
+                "POST /mcp request sid={} [{}]",
                 short_session_id(&session_id),
                 summarize_list(&request_summary, 6),
+            ),
+        );
+        app.log(
+            "INFO",
+            format!(
+                "POST /mcp response sid={} [{}]",
+                short_session_id(&session_id),
                 summarize_list(&response_summary, 6),
             ),
         );
@@ -369,6 +415,7 @@ async fn delete_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Respons
         if sessions.remove(&sid).is_some() {
             let mut app = s.app.lock().await;
             app.session_count = sessions.len();
+            app.begin_session_flow_close(&sid);
             if sessions.is_empty() {
                 app.remote_connected = false;
             }

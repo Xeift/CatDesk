@@ -21,10 +21,13 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
-use state::{AppState, Mode, SharedState, ToolMode};
+use state::{
+    AppState, FlowAnimKind, FlowAnimSegment, FlowDirection, Mode, SessionFlow, SharedState,
+    ToolMode,
+};
 use std::io::{Write, stdout};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::Mutex;
 
 // ── Selection ───────────────────────────────────────────────
@@ -93,6 +96,167 @@ fn extract_from_screen(lines: &[String], start: (u16, u16), end: (u16, u16)) -> 
         .map(|l| l.trim_end())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn current_anim_segment(flow: &SessionFlow, now_millis: u128) -> Option<FlowAnimSegment> {
+    if let Some(seg) = flow
+        .anim_queue
+        .iter()
+        .find(|seg| seg.started_ms <= now_millis && now_millis < seg.ends_ms)
+    {
+        return Some(*seg);
+    }
+    flow.anim_queue.front().copied()
+}
+
+fn flow_direction(flow: Option<&SessionFlow>, now_millis: u128) -> FlowDirection {
+    flow.and_then(|f| current_anim_segment(f, now_millis).map(|seg| seg.direction))
+        .or_else(|| flow.and_then(|f| f.anim_queue.back().map(|seg| seg.direction)))
+        .or_else(|| flow.map(|f| f.last_direction))
+        .unwrap_or(FlowDirection::Forward)
+}
+
+fn flow_lit_count(
+    flow: Option<&SessionFlow>,
+    active: bool,
+    now_millis: u128,
+    direction: FlowDirection,
+    forward_delay_cells: u64,
+    backward_delay_cells: u64,
+    close_delay_cells: u64,
+) -> usize {
+    const CELLS: usize = 16;
+    if !active && flow.is_none() {
+        return 0;
+    }
+
+    if let Some(flow) = flow {
+        if let Some(closing_started_ms) = flow.closing_started_ms {
+            let step_ms = flow.closing_step_ms.max(1) as u128;
+            let delay_ms = (close_delay_cells.saturating_mul(flow.closing_step_ms.max(1))) as u128;
+            let elapsed_ms = now_millis.saturating_sub(closing_started_ms);
+            if elapsed_ms < delay_ms {
+                CELLS
+            } else {
+                let progressed = ((elapsed_ms - delay_ms) / step_ms) as usize;
+                CELLS.saturating_sub(progressed.min(CELLS))
+            }
+        } else if active {
+            if let Some(seg) = current_anim_segment(flow, now_millis) {
+                if seg.kind == FlowAnimKind::Turn {
+                    0
+                } else {
+                    let step_ms = seg.step_ms.max(1) as u128;
+                    let delay_cells = match direction {
+                        FlowDirection::Forward => forward_delay_cells,
+                        FlowDirection::Backward => backward_delay_cells,
+                    };
+                    let delay_ms = (delay_cells.saturating_mul(seg.step_ms.max(1))) as u128;
+                    let elapsed_ms = now_millis.saturating_sub(seg.started_ms);
+                    if elapsed_ms < delay_ms {
+                        0
+                    } else {
+                        let progressed = elapsed_ms - delay_ms;
+                        (((progressed / step_ms) as usize) + 1).min(CELLS)
+                    }
+                }
+            } else {
+                CELLS
+            }
+        } else {
+            0
+        }
+    } else if active {
+        CELLS
+    } else {
+        0
+    }
+}
+
+fn debug_lane(direction: FlowDirection, lit_count: usize) -> String {
+    const DASHES: usize = 15;
+    const CELLS: usize = DASHES + 1;
+    let mut out = String::with_capacity(CELLS);
+    for i in 0..CELLS {
+        match direction {
+            FlowDirection::Forward => {
+                if i == DASHES {
+                    out.push('>');
+                } else if i < lit_count {
+                    out.push('#');
+                } else {
+                    out.push('-');
+                }
+            }
+            FlowDirection::Backward => {
+                if i == 0 {
+                    out.push('<');
+                } else if i >= CELLS.saturating_sub(lit_count) {
+                    out.push('#');
+                } else {
+                    out.push('-');
+                }
+            }
+        }
+    }
+    out
+}
+
+fn flow_phase(flow: &SessionFlow, now_millis: u128) -> &'static str {
+    if flow.closing_started_ms.is_some() {
+        return "close";
+    }
+    if let Some(seg) = current_anim_segment(flow, now_millis) {
+        return match seg.kind {
+            FlowAnimKind::Turn => "turn",
+            FlowAnimKind::Move => match seg.direction {
+                FlowDirection::Forward => "request",
+                FlowDirection::Backward => "response",
+            },
+        };
+    }
+    "idle"
+}
+
+fn build_animation_snapshot(app: &AppState) -> Vec<String> {
+    if app.session_flows.is_empty() {
+        return Vec::new();
+    }
+    let now_millis = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let mut rows = Vec::new();
+    for flow in &app.session_flows {
+        let latest_tool = flow
+            .events
+            .iter()
+            .rev()
+            .find_map(|e| e.strip_prefix("tools/call:"))
+            .unwrap_or("-");
+        let closing = flow.closing_started_ms.is_some();
+        let lane_left_active = (app.server_running && app.ngrok_running) || closing;
+        let lane_right_active = (app.ngrok_running && app.remote_connected) || closing;
+        let direction = flow_direction(Some(flow), now_millis);
+        let phase = flow_phase(flow, now_millis);
+        let left_lit = flow_lit_count(Some(flow), lane_left_active, now_millis, direction, 0, 3, 3);
+        let right_lit = flow_lit_count(
+            Some(flow),
+            lane_right_active,
+            now_millis,
+            direction,
+            3,
+            0,
+            0,
+        );
+        let left_lane = debug_lane(direction, left_lit);
+        let right_lane = debug_lane(direction, right_lit);
+        rows.push(format!(
+            "sid {} phase={:<8} tool={:<16} Your computer {} Ngrok {} ChatGPT Web",
+            flow.short_id, phase, latest_tool, left_lane, right_lane
+        ));
+    }
+    rows
 }
 
 fn clipboard_copy(text: &str) {
@@ -1119,13 +1283,21 @@ async fn run_tui(
     _devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut log_scroll: usize = 0;
+    let mut log_follow_tail = true;
+    let mut last_log_max_scroll: usize = 0;
+    let mut last_log_effective_scroll: usize = 0;
     let mut selection = Selection::new();
     // (message, position (col, row), created_at)
     let mut toast: Option<(&str, (u16, u16), Instant)> = None;
     #[allow(unused_assignments)]
     let mut screen_lines: Vec<String> = vec![];
+    let mut last_animation_snapshot = String::new();
 
     loop {
+        {
+            let mut app = state.lock().await;
+            app.prune_closed_session_flows();
+        }
         {
             let app = state.lock().await;
             let toast_ref = toast
@@ -1133,8 +1305,16 @@ async fn run_tui(
                 .filter(|(_, _, t)| t.elapsed().as_secs() < 2)
                 .map(|(m, pos, _)| (*m, *pos));
             let mut new_lines: Vec<String> = Vec::new();
+            let mut latest_log_view: Option<(usize, usize)> = None;
             terminal.draw(|f| {
-                draw_ui(f, &app, log_scroll, toast_ref);
+                draw_ui(
+                    f,
+                    &app,
+                    log_scroll,
+                    log_follow_tail,
+                    &mut latest_log_view,
+                    toast_ref,
+                );
 
                 if let Some(((c0, r0), (c1, r1))) = selection.range() {
                     let palette = app.current_theme().palette;
@@ -1174,7 +1354,29 @@ async fn run_tui(
                     new_lines.push(line);
                 }
             })?;
+            if let Some((max_scroll, effective_scroll)) = latest_log_view {
+                last_log_max_scroll = max_scroll;
+                last_log_effective_scroll = effective_scroll;
+                if !log_follow_tail && log_scroll > last_log_max_scroll {
+                    log_scroll = last_log_max_scroll;
+                }
+            }
             screen_lines = new_lines;
+        }
+
+        let snapshots = {
+            let app = state.lock().await;
+            build_animation_snapshot(&app)
+        };
+        if !snapshots.is_empty() {
+            let snapshot_joined = snapshots.join("\n");
+            if snapshot_joined != last_animation_snapshot {
+                let mut app = state.lock().await;
+                for line in snapshots {
+                    app.log("ANIM", line);
+                }
+                last_animation_snapshot = snapshot_joined;
+            }
         }
 
         if let Some((_, _, t)) = &toast {
@@ -1192,8 +1394,26 @@ async fn run_tui(
                     selection.clear();
                     match key.code {
                         KeyCode::Char('q') => break,
-                        KeyCode::Up => log_scroll = log_scroll.saturating_sub(1),
-                        KeyCode::Down => log_scroll = log_scroll.saturating_add(1),
+                        KeyCode::Up => {
+                            if log_follow_tail {
+                                log_follow_tail = false;
+                                log_scroll = last_log_effective_scroll.saturating_sub(1);
+                            } else {
+                                log_scroll = log_scroll.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if !log_follow_tail {
+                                log_scroll = (log_scroll + 1).min(last_log_max_scroll);
+                                if log_scroll >= last_log_max_scroll {
+                                    log_follow_tail = true;
+                                }
+                            }
+                        }
+                        KeyCode::End => {
+                            log_follow_tail = true;
+                            log_scroll = last_log_max_scroll;
+                        }
                         _ => {}
                     }
                 }
@@ -1227,6 +1447,22 @@ async fn run_tui(
                             }
                         }
                     }
+                    MouseEventKind::ScrollUp => {
+                        if log_follow_tail {
+                            log_follow_tail = false;
+                            log_scroll = last_log_effective_scroll.saturating_sub(1);
+                        } else {
+                            log_scroll = log_scroll.saturating_sub(1);
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        if !log_follow_tail {
+                            log_scroll = (log_scroll + 1).min(last_log_max_scroll);
+                            if log_scroll >= last_log_max_scroll {
+                                log_follow_tail = true;
+                            }
+                        }
+                    }
                     _ => {}
                 },
                 _ => {}
@@ -1250,14 +1486,38 @@ async fn run_tui(
 
 // ── Draw main UI ────────────────────────────────────────────
 
-fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str, (u16, u16))>) {
+fn draw_ui(
+    f: &mut Frame,
+    app: &AppState,
+    log_scroll: usize,
+    log_follow_tail: bool,
+    log_view: &mut Option<(usize, usize)>,
+    toast: Option<(&str, (u16, u16))>,
+) {
     let palette = app.current_theme().palette;
     let area = f.area();
+    let now_millis = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
 
     let both_running = app.server_running && app.ngrok_running;
     let has_url = app.ngrok_url.is_some();
     let show_guide = both_running && has_url && !app.remote_connected;
-    let status_height = if show_guide { 24 } else { 17 };
+    let show_session_flow = !show_guide;
+    let flow_lines = if show_session_flow {
+        if app.session_flows.is_empty() {
+            1
+        } else {
+            app.session_flows.len() as u16
+        }
+    } else {
+        0
+    };
+    let desired_status_height = if show_guide { 20 } else { 17 + flow_lines };
+    let logs_min_height = if show_guide { 3 } else { 5 };
+    let max_status_height = area.height.saturating_sub(6 + logs_min_height).max(17);
+    let status_height = desired_status_height.min(max_status_height);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1265,7 +1525,7 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             Constraint::Length(3),
             Constraint::Length(status_height),
             Constraint::Length(3),
-            Constraint::Min(5),
+            Constraint::Min(logs_min_height),
         ])
         .split(area);
 
@@ -1329,6 +1589,132 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
                 .unwrap_or_else(|| "launch new browser instance".into())
         })
         .unwrap_or_else(|| "--".into());
+    let trim_line = |text: &str, max_chars: usize| -> String {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() <= max_chars {
+            return text.to_string();
+        }
+        let kept = chars[..max_chars.saturating_sub(3)]
+            .iter()
+            .collect::<String>();
+        format!("{kept}...")
+    };
+    let computer_role_style = Style::default()
+        .fg(if app.server_running {
+            palette.success_fg
+        } else {
+            palette.muted_fg
+        })
+        .add_modifier(Modifier::BOLD);
+    let ngrok_role_style = Style::default()
+        .fg(if app.ngrok_running {
+            palette.success_fg
+        } else {
+            palette.muted_fg
+        })
+        .add_modifier(Modifier::BOLD);
+    let chatgpt_role_style = Style::default()
+        .fg(if app.remote_connected {
+            palette.success_fg
+        } else {
+            palette.muted_fg
+        })
+        .add_modifier(Modifier::BOLD);
+    let left_chip_style = Style::default()
+        .fg(palette.info_fg)
+        .add_modifier(Modifier::BOLD);
+    let lane_for = |active: bool,
+                    flow: Option<&SessionFlow>,
+                    forward_delay_cells: u64,
+                    backward_delay_cells: u64,
+                    close_delay_cells: u64|
+     -> Vec<Span<'static>> {
+        const DASHES: usize = 15;
+        const CELLS: usize = DASHES + 1;
+        let unlit = Style::default().fg(palette.muted_fg);
+        let lit = Style::default()
+            .fg(palette.info_fg)
+            .add_modifier(Modifier::BOLD);
+
+        if !active && flow.is_none() {
+            return vec![
+                Span::styled(format!("{} ", "-".repeat(DASHES)), unlit),
+                Span::raw(" "),
+            ];
+        }
+
+        let direction = flow_direction(flow, now_millis);
+        let lit_count = if let Some(flow) = flow {
+            if let Some(closing_started_ms) = flow.closing_started_ms {
+                // Close animation: drain from fully connected to idle, then remove row.
+                let step_ms = flow.closing_step_ms.max(1) as u128;
+                let delay_ms =
+                    (close_delay_cells.saturating_mul(flow.closing_step_ms.max(1))) as u128;
+                let elapsed_ms = now_millis.saturating_sub(closing_started_ms);
+                if elapsed_ms < delay_ms {
+                    CELLS
+                } else {
+                    let progressed = ((elapsed_ms - delay_ms) / step_ms) as usize;
+                    CELLS.saturating_sub(progressed.min(CELLS))
+                }
+            } else if active {
+                // One-shot animation from queued request/response segments.
+                if let Some(seg) = current_anim_segment(flow, now_millis) {
+                    if seg.kind == FlowAnimKind::Turn {
+                        0
+                    } else {
+                        let step_ms = seg.step_ms.max(1) as u128;
+                        let delay_cells = match direction {
+                            FlowDirection::Forward => forward_delay_cells,
+                            FlowDirection::Backward => backward_delay_cells,
+                        };
+                        let delay_ms = (delay_cells.saturating_mul(seg.step_ms.max(1))) as u128;
+                        let elapsed_ms = now_millis.saturating_sub(seg.started_ms);
+                        if elapsed_ms < delay_ms {
+                            0
+                        } else {
+                            let progressed = elapsed_ms - delay_ms;
+                            (((progressed / step_ms) as usize) + 1).min(CELLS)
+                        }
+                    }
+                } else {
+                    CELLS
+                }
+            } else {
+                0
+            }
+        } else {
+            if active { CELLS } else { 0 }
+        };
+
+        let mut spans = Vec::with_capacity(CELLS + 1);
+        for i in 0..CELLS {
+            let lit_here = match direction {
+                FlowDirection::Forward => lit_count > 0 && i < lit_count,
+                FlowDirection::Backward => lit_count > 0 && i >= CELLS.saturating_sub(lit_count),
+            };
+            let ch = match direction {
+                FlowDirection::Forward => {
+                    if i == DASHES {
+                        '>'
+                    } else {
+                        '-'
+                    }
+                }
+                FlowDirection::Backward => {
+                    if i == 0 {
+                        '<'
+                    } else {
+                        '-'
+                    }
+                }
+            };
+            let style = if lit_here { lit } else { unlit };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        spans.push(Span::raw(" "));
+        spans
+    };
 
     let mut status_lines: Vec<Line> = vec![
         Line::from(vec![
@@ -1447,7 +1833,10 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
             }
             Line::from(spans)
         },
-        Line::from(vec![
+    ];
+
+    if !show_guide {
+        status_lines.push(Line::from(vec![
             Span::styled(
                 "  Local browsers:   ",
                 Style::default()
@@ -1455,8 +1844,8 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(browser_summary, Style::default().fg(palette.title_fg)),
-        ]),
-        Line::from(vec![
+        ]));
+        status_lines.push(Line::from(vec![
             Span::styled(
                 "  Remote dbg support:",
                 Style::default()
@@ -1464,8 +1853,8 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(remote_support_summary, Style::default().fg(palette.info_fg)),
-        ]),
-        Line::from(vec![
+        ]));
+        status_lines.push(Line::from(vec![
             Span::styled(
                 "  Remote dbg active: ",
                 Style::default()
@@ -1476,8 +1865,8 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
                 remote_active_summary,
                 Style::default().fg(palette.success_fg),
             ),
-        ]),
-        Line::from(vec![
+        ]));
+        status_lines.push(Line::from(vec![
             Span::styled(
                 "  Selected browser: ",
                 Style::default()
@@ -1488,8 +1877,8 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
                 selected_browser_summary,
                 Style::default().fg(palette.secondary_fg),
             ),
-        ]),
-        Line::from(vec![
+        ]));
+        status_lines.push(Line::from(vec![
             Span::styled(
                 "  Selected target:  ",
                 Style::default()
@@ -1500,8 +1889,61 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
                 selected_target_summary,
                 Style::default().fg(palette.info_fg),
             ),
-        ]),
-    ];
+        ]));
+    }
+
+    if show_session_flow {
+        status_lines.push(Line::from(""));
+        status_lines.push(Line::from(Span::styled(
+            "  Session request flow:",
+            Style::default()
+                .fg(palette.title_fg)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if app.session_flows.is_empty() {
+            let lane_left = lane_for(false, None, 0, 0, 0);
+            let lane_right = lane_for(false, None, 0, 0, 0);
+            let info_block = format!("{:<28}", "sid - -");
+            let mut row = vec![
+                Span::styled("    ", Style::default().fg(palette.muted_fg)),
+                Span::styled(info_block, left_chip_style),
+                Span::styled("    Your computer ", computer_role_style),
+            ];
+            row.extend(lane_left);
+            row.push(Span::styled("Ngrok ", ngrok_role_style));
+            row.extend(lane_right);
+            row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
+            status_lines.push(Line::from(row));
+        } else {
+            for flow in &app.session_flows {
+                let latest_tool = flow
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|e| e.strip_prefix("tools/call:"))
+                    .unwrap_or("-");
+                let info_block = format!(
+                    "{:<28}",
+                    trim_line(&format!("sid {} {}", flow.short_id, latest_tool), 28)
+                );
+                let closing = flow.closing_started_ms.is_some();
+                let lane_left_active = (app.server_running && app.ngrok_running) || closing;
+                let lane_right_active = (app.ngrok_running && app.remote_connected) || closing;
+                let lane_left = lane_for(lane_left_active, Some(flow), 0, 3, 3);
+                let lane_right = lane_for(lane_right_active, Some(flow), 3, 0, 0);
+                let mut row = vec![
+                    Span::styled("    ", Style::default().fg(palette.muted_fg)),
+                    Span::styled(info_block, left_chip_style),
+                    Span::styled("    Your computer ", computer_role_style),
+                ];
+                row.extend(lane_left);
+                row.push(Span::styled("Ngrok ", ngrok_role_style));
+                row.extend(lane_right);
+                row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
+                status_lines.push(Line::from(row));
+            }
+        }
+    }
 
     if show_guide {
         status_lines.push(Line::from(""));
@@ -1660,7 +2102,11 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
         Span::styled("  [q]", Style::default().fg(palette.danger_fg)),
         Span::raw(" Quit  "),
         Span::styled("[Up/Down]", Style::default().fg(palette.key_fg)),
-        Span::raw(" Scroll logs"),
+        Span::raw(" Scroll logs  "),
+        Span::styled("[Wheel]", Style::default().fg(palette.key_fg)),
+        Span::raw(" Scroll logs  "),
+        Span::styled("[End]", Style::default().fg(palette.key_fg)),
+        Span::raw(" Follow latest"),
     ];
     let keys = Paragraph::new(Line::from(key_spans)).block(
         Block::default()
@@ -1695,7 +2141,12 @@ fn draw_ui(f: &mut Frame, app: &AppState, log_scroll: usize, toast: Option<(&str
     let visible_height = chunks[3].height.saturating_sub(2) as usize;
     let total = log_items.len();
     let max_scroll = total.saturating_sub(visible_height);
-    let effective_scroll = log_scroll.min(max_scroll);
+    let effective_scroll = if log_follow_tail {
+        max_scroll
+    } else {
+        log_scroll.min(max_scroll)
+    };
+    *log_view = Some((max_scroll, effective_scroll));
     let visible_items: Vec<ListItem> = log_items
         .into_iter()
         .skip(effective_scroll)
