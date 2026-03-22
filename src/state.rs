@@ -124,6 +124,7 @@ pub struct AppState {
     pub ngrok_running: bool,
     pub ngrok_url: Option<String>,
     pub remote_connected: bool,
+    pub last_remote_activity_ms: Option<u128>,
     pub devtools_running: bool,
     pub port: u16,
     pub workspace_root: String,
@@ -141,12 +142,13 @@ pub struct AppState {
 
 pub type SharedState = Arc<Mutex<AppState>>;
 
-const FLOW_LINK_CELLS: u64 = 16;
+pub const FLOW_ANIM_CELLS: usize = 32;
+const FLOW_LINK_CELLS: u64 = FLOW_ANIM_CELLS as u64;
 const FLOW_CHAIN_DELAY_CELLS: u64 = 3;
-const FLOW_ANIMATION_DURATION_MS: u64 = 500;
+const FLOW_ANIMATION_DURATION_MS: u64 = 250;
 const FLOW_STEP_FIXED_MS: u64 =
     (FLOW_ANIMATION_DURATION_MS + FLOW_LINK_CELLS - 1) / FLOW_LINK_CELLS;
-const FLOW_TURN_TRANSITION_MS: u64 = 120;
+const FLOW_TURN_TRANSITION_MS: u64 = 60;
 const FLOW_CLOSE_PRUNE_MULTIPLIER: u64 = 3;
 
 fn short_session_id(sid: &str) -> String {
@@ -244,6 +246,7 @@ impl AppState {
             ngrok_running: false,
             ngrok_url: None,
             remote_connected: false,
+            last_remote_activity_ms: None,
             devtools_running: false,
             port,
             workspace_root,
@@ -281,6 +284,7 @@ impl AppState {
             return;
         }
         let now_ms = now_unix_millis();
+        self.last_remote_activity_ms = Some(now_ms);
         let step_ms = derive_flow_step_ms();
 
         if let Some(idx) = self
