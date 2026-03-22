@@ -274,7 +274,7 @@ impl AppState {
             level,
             message,
         });
-        if self.logs.len() > 200 {
+        if self.logs.len() > 500 {
             self.logs.remove(0);
         }
     }

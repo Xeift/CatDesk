@@ -382,6 +382,7 @@ async fn get_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<B
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             if tx.send(Ok(": keepalive\n\n".to_string())).await.is_err() {
                 let mut app = app_state.lock().await;
+                app.begin_session_flow_close(&sid_clone);
                 app.log(
                     "INFO",
                     format!("SSE stream closed: {}", short_session_id(&sid_clone)),

@@ -139,7 +139,7 @@ fn flow_lit_count(
     direction: FlowDirection,
     forward_delay_cells: u64,
     backward_delay_cells: u64,
-    close_delay_cells: u64,
+    _close_delay_cells: u64,
     cells: usize,
 ) -> usize {
     if !active && flow.is_none() {
@@ -147,16 +147,9 @@ fn flow_lit_count(
     }
 
     if let Some(flow) = flow {
-        if let Some(closing_started_ms) = flow.closing_started_ms {
-            let step_ms = flow.closing_step_ms.max(1) as u128;
-            let delay_ms = (close_delay_cells.saturating_mul(flow.closing_step_ms.max(1))) as u128;
-            let elapsed_ms = now_millis.saturating_sub(closing_started_ms);
-            if elapsed_ms < delay_ms {
-                cells
-            } else {
-                let progressed = ((elapsed_ms - delay_ms) / step_ms) as usize;
-                cells.saturating_sub(progressed.min(cells))
-            }
+        if flow.closing_started_ms.is_some() {
+            // A closed SSE stream should render as fully unlit immediately.
+            0
         } else if active {
             if let Some(seg) = current_anim_segment(flow, now_millis) {
                 if seg.kind == FlowAnimKind::Turn {
@@ -233,6 +226,26 @@ fn flow_phase(flow: &SessionFlow, now_millis: u128) -> &'static str {
     "idle"
 }
 
+fn latest_flow_action(flow: &SessionFlow) -> String {
+    flow.events
+        .iter()
+        .rev()
+        .find_map(|event| {
+            if let Some(tool) = event.strip_prefix("tools/call:") {
+                if tool.is_empty() {
+                    None
+                } else {
+                    Some(tool.to_string())
+                }
+            } else if event.is_empty() {
+                None
+            } else {
+                Some(event.clone())
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn build_animation_snapshot(app: &AppState) -> Vec<String> {
     if app.session_flows.is_empty() {
         return Vec::new();
@@ -247,12 +260,7 @@ fn build_animation_snapshot(app: &AppState) -> Vec<String> {
         .iter()
         .filter(|flow| should_display_flow_row(flow, app.remote_connected))
     {
-        let latest_tool = flow
-            .events
-            .iter()
-            .rev()
-            .find_map(|e| e.strip_prefix("tools/call:"))
-            .unwrap_or("-");
+        let latest_action = latest_flow_action(flow);
         let closing = flow.closing_started_ms.is_some();
         let lane_active = closing
             || !flow.anim_queue.is_empty()
@@ -272,7 +280,7 @@ fn build_animation_snapshot(app: &AppState) -> Vec<String> {
         let lane = debug_lane(direction, lit, FLOW_ROW_CELLS);
         rows.push(format!(
             "sid {} phase={:<8} tool={:<16} Your computer {} ChatGPT Web (via Ngrok)",
-            flow.short_id, phase, latest_tool, lane
+            flow.short_id, phase, latest_action, lane
         ));
     }
     if rows.is_empty() {
@@ -1545,12 +1553,11 @@ fn draw_ui(
         && !within_connect_grace;
     let show_session_flow = !show_guide;
     let flow_lines = if show_session_flow {
-        let rows = if visible_flow_count == 0 {
-            1
+        if visible_flow_count == 0 {
+            2
         } else {
-            visible_flow_count
-        };
-        rows + 1 // one extra row for Ngrok label above the lane
+            visible_flow_count.saturating_mul(2)
+        }
     } else {
         0
     };
@@ -1646,13 +1653,6 @@ fn draw_ui(
             palette.muted_fg
         })
         .add_modifier(Modifier::BOLD);
-    let ngrok_role_style = Style::default()
-        .fg(if app.ngrok_running {
-            palette.success_fg
-        } else {
-            palette.muted_fg
-        })
-        .add_modifier(Modifier::BOLD);
     let chatgpt_role_style = Style::default()
         .fg(if app.remote_connected {
             palette.success_fg
@@ -1660,9 +1660,15 @@ fn draw_ui(
             palette.muted_fg
         })
         .add_modifier(Modifier::BOLD);
-    let left_chip_style = Style::default()
+    let flow_meta_style = Style::default()
         .fg(palette.info_fg)
         .add_modifier(Modifier::BOLD);
+    let lane_left_padding = "Your computer ".len();
+    let call_offset_for = |text: &str| -> String {
+        let text_width = text.chars().count();
+        let centered_in_lane = FLOW_ROW_CELLS.saturating_sub(text_width) / 2;
+        " ".repeat(lane_left_padding + centered_in_lane)
+    };
     let lane_for = |active: bool, flow: Option<&SessionFlow>| -> Vec<Span<'static>> {
         const DASHES: usize = FLOW_ROW_CELLS - 1;
         const CELLS: usize = FLOW_ROW_CELLS;
@@ -1894,24 +1900,32 @@ fn draw_ui(
                 .fg(palette.title_fg)
                 .add_modifier(Modifier::BOLD),
         )));
-        let ngrok_offset = " ".repeat("Your computer ".len() + FLOW_ROW_CELLS / 2 - 2);
-        status_lines.push(Line::from(vec![
-            Span::styled("    ", Style::default().fg(palette.muted_fg)),
-            Span::styled(format!("{:<28}", ""), Style::default().fg(palette.muted_fg)),
-            Span::styled("    ", Style::default().fg(palette.muted_fg)),
-            Span::styled(ngrok_offset, Style::default().fg(palette.muted_fg)),
-            Span::styled("Ngrok", ngrok_role_style),
-        ]));
         if visible_flow_count == 0 {
+            let call_text = if app.remote_connected {
+                "awaiting request"
+            } else {
+                "session closed"
+            };
+            let call_offset = call_offset_for(call_text);
+            status_lines.push(Line::from(vec![
+                Span::styled("    ", Style::default().fg(palette.muted_fg)),
+                Span::styled(call_offset, Style::default().fg(palette.muted_fg)),
+                Span::styled(call_text, flow_meta_style),
+            ]));
             let lane = lane_for(false, None);
-            let info_block = format!("{:<28}", "sid - -");
+            let sid_text = if app.remote_connected {
+                "[sid=idle]"
+            } else {
+                "[sid=closed]"
+            };
             let mut row = vec![
                 Span::styled("    ", Style::default().fg(palette.muted_fg)),
-                Span::styled(info_block, left_chip_style),
-                Span::styled("    Your computer ", computer_role_style),
+                Span::styled("Your computer ", computer_role_style),
             ];
             row.extend(lane);
             row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
+            row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
+            row.push(Span::styled(sid_text, flow_meta_style));
             status_lines.push(Line::from(row));
         } else {
             for flow in app
@@ -1919,28 +1933,28 @@ fn draw_ui(
                 .iter()
                 .filter(|flow| should_display_flow_row(flow, app.remote_connected))
             {
-                let latest_tool = flow
-                    .events
-                    .iter()
-                    .rev()
-                    .find_map(|e| e.strip_prefix("tools/call:"))
-                    .unwrap_or("-");
-                let info_block = format!(
-                    "{:<28}",
-                    trim_line(&format!("sid {} {}", flow.short_id, latest_tool), 28)
-                );
+                let latest_action = latest_flow_action(flow);
+                let call_text = trim_line(&format!("call {latest_action}"), FLOW_ROW_CELLS);
+                let call_offset = call_offset_for(&call_text);
+                status_lines.push(Line::from(vec![
+                    Span::styled("    ", Style::default().fg(palette.muted_fg)),
+                    Span::styled(call_offset, Style::default().fg(palette.muted_fg)),
+                    Span::styled(call_text, flow_meta_style),
+                ]));
                 let closing = flow.closing_started_ms.is_some();
                 let lane_active = closing
                     || !flow.anim_queue.is_empty()
                     || (app.server_running && app.ngrok_running && app.remote_connected);
                 let lane = lane_for(lane_active, Some(flow));
+                let sid_text = format!("[sid={}]", flow.short_id);
                 let mut row = vec![
                     Span::styled("    ", Style::default().fg(palette.muted_fg)),
-                    Span::styled(info_block, left_chip_style),
-                    Span::styled("    Your computer ", computer_role_style),
+                    Span::styled("Your computer ", computer_role_style),
                 ];
                 row.extend(lane);
                 row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
+                row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
+                row.push(Span::styled(sid_text, flow_meta_style));
                 status_lines.push(Line::from(row));
             }
         }
