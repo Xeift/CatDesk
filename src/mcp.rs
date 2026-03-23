@@ -254,7 +254,7 @@ async fn handle_tools_list(
             tools.push(json!({
                 "name": "run_command",
                 "title": "Run command",
-                "description": "Execute a shell command inside the workspace root. Returns stdout and stderr.",
+                "description": "Execute a shell command inside the workspace root. Prefer dedicated tools first, and use this only when available tools cannot complete the operation. Returns stdout and stderr.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
