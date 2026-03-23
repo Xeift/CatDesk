@@ -584,7 +584,6 @@
         var isFinal = view.panelMode === "final_review";
         var filesEmpty = isFinal ? "No pending changed files." : "No file changes in this tool call.";
         var filesOpenCount = view.changedFiles.length > 0 ? 1 : 0;
-        var filesHeading = "";
         var approvalHtml = "";
         if (isFinal && view.showApproval) {
           approvalHtml =
@@ -601,12 +600,7 @@
 
         root.innerHTML =
           "<section class=\"root\">" +
-            "<header class=\"header\">" +
-              "<h1 class=\"title\">" + esc(view.title) + "</h1>" +
-              "<span class=\"state " + esc(view.state) + "\">" + esc(view.state) + "</span>" +
-            "</header>" +
             "<section class=\"section\">" +
-              filesHeading +
               "<div class=\"section-body\">" +
                 renderFileList(view.changedFiles, { emptyText: filesEmpty, openCount: filesOpenCount }) +
               "</div>" +
