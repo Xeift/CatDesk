@@ -1401,10 +1401,6 @@ async fn run_tui(
         if !snapshots.is_empty() {
             let snapshot_joined = snapshots.join("\n");
             if snapshot_joined != last_animation_snapshot {
-                let mut app = state.lock().await;
-                for line in snapshots {
-                    app.log("ANIM", line);
-                }
                 last_animation_snapshot = snapshot_joined;
             }
         }
@@ -1979,7 +1975,7 @@ fn draw_ui(
                 Span::styled(
                     "https://chatgpt.com/apps#settings/Connectors",
                     Style::default()
-                        .fg(Color::LightCyan)
+                        .fg(palette.primary_fg)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 ),
             ]),
@@ -2009,7 +2005,7 @@ fn draw_ui(
             ]),
             Line::from(vec![Span::styled(
                 "   Name: MCP3000 (or any name you like)",
-                Style::default().fg(palette.muted_fg),
+                Style::default().fg(palette.secondary_fg),
             )]),
             Line::from(vec![Span::styled(
                 format!("   MCP Server URL: {mcp_url}"),
@@ -2019,7 +2015,7 @@ fn draw_ui(
             )]),
             Line::from(vec![Span::styled(
                 "   Authentication: None",
-                Style::default().fg(palette.muted_fg),
+                Style::default().fg(palette.secondary_fg),
             )]),
             Line::from(vec![
                 Span::styled(
