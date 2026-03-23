@@ -390,7 +390,7 @@ async fn run_app(
                         run_theme_settings(terminal, state.clone()).await?;
                         continue;
                     }
-                    KeyCode::Char('t') => {
+                    KeyCode::Tab => {
                         let mut app = state.lock().await;
                         app.tool_mode = app.tool_mode.next();
                         let tool_mode_label = app.tool_mode.label();
@@ -513,7 +513,7 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
         ]),
         Line::from(vec![
             Span::styled(
-                "  [t] ",
+                "  [Tab] ",
                 Style::default()
                     .fg(palette.key_fg)
                     .add_modifier(Modifier::BOLD),
