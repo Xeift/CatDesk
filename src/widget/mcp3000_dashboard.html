@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MCP3000 Review</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0f15;
+      --panel: #111926;
+      --panel-2: #0e1520;
+      --line: #243145;
+      --text: #e7edf7;
+      --muted: #9bacc4;
+      --accent: #59c8ff;
+      --ok: #5dd39f;
+      --warn: #ffd166;
+      --err: #ff6b8a;
+      --chip: #172132;
+      --code: #0b111a;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 12px;
+      color: var(--text);
+      background: #0b1118;
+      font: 13px/1.45 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    .root {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0f1724;
+      padding: 10px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 14px;
+      color: #b9cdf1;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+
+    .state {
+      border: 0;
+      border-radius: 0;
+      padding: 0;
+      background: transparent;
+      color: var(--muted);
+      text-transform: lowercase;
+      white-space: nowrap;
+    }
+
+    .state.done,
+    .state.success { color: var(--ok); }
+    .state.waiting_approval,
+    .state.waiting,
+    .state.pending { color: var(--warn); }
+    .state.failed,
+    .state.error { color: var(--err); }
+
+    .section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0e1622;
+      overflow: hidden;
+    }
+
+    .section h2 {
+      margin: 0;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--line);
+      color: #a7bedf;
+      font-size: 12px;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .section-body {
+      padding: 4px 0;
+    }
+
+    .files {
+      display: block;
+    }
+
+    details.file {
+      border: 0;
+      border-top: 1px solid var(--line);
+      background: transparent;
+    }
+
+    details.file:first-child { border-top: 0; }
+
+    details.file > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 9px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    details.file > summary::-webkit-details-marker { display: none; }
+    details.file[open] > summary { border-bottom: 1px solid var(--line); }
+
+    .file-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      color: var(--text);
+    }
+
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--muted);
+      flex: 0 0 auto;
+    }
+
+    .dot.modified { background: var(--warn); }
+    .dot.added,
+    .dot.untracked,
+    .dot.copied,
+    .dot.success { background: var(--ok); }
+    .dot.deleted,
+    .dot.error,
+    .dot.conflict { background: var(--err); }
+    .dot.renamed,
+    .dot.clean,
+    .dot.truncated { background: var(--accent); }
+
+    .path {
+      color: #d7e2f5;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .file-meta {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 10px;
+      color: var(--muted);
+      white-space: nowrap;
+      font-size: 11px;
+      letter-spacing: 0.1px;
+    }
+
+    .status-label {
+      color: #9db1d1;
+      text-transform: lowercase;
+    }
+
+    .counts {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 6px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .counts .plus {
+      color: #58d18d;
+    }
+
+    .counts .minus {
+      color: #ee6f8f;
+    }
+
+    .diff-wrap {
+      padding: 8px 12px 10px;
+    }
+
+    .dir-summary {
+      padding: 0;
+      color: #b8c8e3;
+      font-size: 12px;
+    }
+
+    .diff {
+      border: 0;
+      border-radius: 0;
+      background: #0a111b;
+      max-height: 230px;
+      overflow: auto;
+    }
+
+    .dline {
+      display: grid;
+      grid-template-columns: 14px 46px 1fr;
+      align-items: baseline;
+      column-gap: 6px;
+      padding: 1px 8px;
+      color: #d9e2f3;
+      font: 12px/1.45 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+      white-space: pre;
+    }
+
+    .dline.hdr { color: #90a8cb; background: #101827; }
+    .dline.add { color: #9bd8b7; background: #102017; }
+    .dline.del { color: #e8a9b8; background: #22131a; }
+
+    .ln {
+      text-align: right;
+      color: #5f7394;
+      user-select: none;
+    }
+
+    .op {
+      text-align: center;
+      color: #5f7394;
+      user-select: none;
+    }
+
+    .dline.add .op { color: #58d18d; }
+    .dline.del .op { color: #ee6f8f; }
+
+    .code {
+      overflow-x: auto;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .loading {
+      padding: 18px 12px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 7px 11px;
+      background: #172437;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+    }
+
+    button:hover { border-color: var(--accent); }
+    button:active { transform: translateY(1px); }
+
+    button.approve { border-color: #2c6f54; color: #b8f2db; }
+    button.reject { border-color: #7f3545; color: #ffc7d2; }
+
+    @media (max-width: 850px) {
+      .actions { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    (function () {
+      var view = {
+        schema: "mcp3000.review.v1",
+        panelMode: "tool_call",
+        title: "Changed Files",
+        state: "done",
+        changedFiles: [],
+        hasChanges: false,
+        showApproval: false,
+        approvePrompt: "Approve these file changes and continue.",
+        rejectPrompt: "Reject these file changes and ask for a safer revision."
+      };
+      var INITIAL_RETRY_INTERVAL_MS = 50;
+      var INITIAL_RETRY_MAX_ATTEMPTS = 120;
+      var initRetryTimer = null;
+      var initResolved = false;
+
+      function esc(value) {
+        return String(value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function asString(value, fallback) {
+        if (typeof value === "string" && value.trim().length > 0) return value;
+        return fallback;
+      }
+
+      function asBool(value, fallback) {
+        if (typeof value === "boolean") return value;
+        return fallback;
+      }
+
+      function asArray(value) {
+        return Array.isArray(value) ? value : [];
+      }
+
+      function normalizeStatus(value, fallback) {
+        var raw = asString(value, fallback).toLowerCase().replace(/\s+/g, "_");
+        if (raw === "ok") return "success";
+        if (raw === "completed") return "done";
+        return raw;
+      }
+
+      function normalizeFile(entry) {
+        if (!entry || typeof entry !== "object") return null;
+        var path = asString(entry.path, "");
+        if (!path) return null;
+        var added = Number(entry.added);
+        var removed = Number(entry.removed);
+        return {
+          path: path,
+          status: normalizeStatus(entry.status, "modified"),
+          added: Number.isFinite(added) ? Math.max(0, Math.floor(added)) : 0,
+          removed: Number.isFinite(removed) ? Math.max(0, Math.floor(removed)) : 0,
+          diff: asString(entry.diff, "")
+        };
+      }
+
+      function normalize(data) {
+        if (!data || typeof data !== "object") return null;
+        var next = {
+          schema: asString(data.schema, "mcp3000.review.v1"),
+          panelMode: asString(data.panelMode, "tool_call"),
+          title: asString(data.title, view.title),
+          state: normalizeStatus(data.state, "done"),
+          changedFiles: [],
+          hasChanges: false,
+          showApproval: false,
+          approvePrompt: asString(data.approvePrompt, view.approvePrompt),
+          rejectPrompt: asString(data.rejectPrompt, view.rejectPrompt)
+        };
+        if (next.panelMode !== "final_review") {
+          next.panelMode = "tool_call";
+        }
+        next.changedFiles = asArray(data.changedFiles).map(normalizeFile).filter(Boolean);
+        next.hasChanges = asBool(data.hasChanges, next.changedFiles.length > 0);
+        next.showApproval = asBool(data.showApproval, next.hasChanges);
+
+        return next;
+      }
+
+      function extractStructured(payload) {
+        if (!payload || typeof payload !== "object") return null;
+
+        var queue = [payload];
+        var seen = [];
+        var maxNodes = 96;
+
+        function pushCandidate(candidate) {
+          if (!candidate || typeof candidate !== "object") return;
+          if (seen.indexOf(candidate) >= 0) return;
+          if (seen.length >= maxNodes) return;
+          seen.push(candidate);
+          queue.push(candidate);
+        }
+
+        while (queue.length > 0) {
+          var current = queue.shift();
+          if (!current || typeof current !== "object") continue;
+
+          if (current.structuredContent && typeof current.structuredContent === "object") {
+            return current.structuredContent;
+          }
+          if (current.schema === "mcp3000.review.v1") {
+            return current;
+          }
+
+          pushCandidate(current.result);
+          pushCandidate(current.output);
+          pushCandidate(current.toolOutput);
+          pushCandidate(current.payload);
+          pushCandidate(current.params);
+          pushCandidate(current.data);
+          pushCandidate(current.response);
+          pushCandidate(current.message);
+
+          if (Array.isArray(current.contents)) {
+            for (var i = 0; i < current.contents.length; i += 1) {
+              pushCandidate(current.contents[i]);
+            }
+          }
+          if (Array.isArray(current.content)) {
+            for (var j = 0; j < current.content.length; j += 1) {
+              pushCandidate(current.content[j]);
+            }
+          }
+        }
+        return null;
+      }
+
+      function isDirectoryFile(file) {
+        if (!file || typeof file !== "object") return false;
+        if (typeof file.path === "string" && /\/$/.test(file.path)) return true;
+        return typeof file.diff === "string" && file.diff.indexOf("<directory>") >= 0;
+      }
+
+      function prettyStatus(status) {
+        return asString(status, "modified").replace(/_/g, " ");
+      }
+
+      function formatCounts(file) {
+        return "+" + file.added + " / -" + file.removed;
+      }
+
+      function classifyDiffLine(line) {
+        if (line.indexOf("@@") === 0 || line.indexOf("--- ") === 0 || line.indexOf("+++ ") === 0) {
+          return "hdr";
+        }
+        if (line.indexOf("+") === 0 && line.indexOf("+++ ") !== 0) return "add";
+        if (line.indexOf("-") === 0 && line.indexOf("--- ") !== 0) return "del";
+        return "";
+      }
+
+      function parseHunkHeader(line) {
+        var match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line || "");
+        if (!match) return null;
+        return {
+          oldLine: parseInt(match[1], 10),
+          newLine: parseInt(match[2], 10)
+        };
+      }
+
+      function diffRows(diffText) {
+        var text = asString(diffText, "");
+        if (!text) return [];
+        var lines = text.replace(/\r\n/g, "\n").split("\n");
+        if (lines.length > 0 && lines[lines.length - 1] === "") {
+          lines.pop();
+        }
+
+        var rows = [];
+        var oldLine = 0;
+        var newLine = 0;
+
+        for (var i = 0; i < lines.length; i += 1) {
+          var line = lines[i];
+
+          if (line.indexOf("--- ") === 0 || line.indexOf("+++ ") === 0) {
+            continue;
+          }
+
+          if (line.indexOf("@@") === 0) {
+            var parsed = parseHunkHeader(line);
+            if (parsed) {
+              oldLine = parsed.oldLine;
+              newLine = parsed.newLine;
+            }
+            continue;
+          }
+
+          if (line.indexOf("+") === 0) {
+            rows.push({
+              cls: "add",
+              op: "+",
+              lineNum: String(newLine > 0 ? newLine : ""),
+              text: line.slice(1)
+            });
+            if (newLine > 0) newLine += 1;
+            continue;
+          }
+
+          if (line.indexOf("-") === 0) {
+            rows.push({
+              cls: "del",
+              op: "-",
+              lineNum: String(oldLine > 0 ? oldLine : ""),
+              text: line.slice(1)
+            });
+            if (oldLine > 0) oldLine += 1;
+            continue;
+          }
+
+          if (line.indexOf(" ") === 0) {
+            rows.push({
+              cls: "",
+              op: "",
+              lineNum: String(newLine > 0 ? newLine : ""),
+              text: line.slice(1)
+            });
+            if (oldLine > 0) oldLine += 1;
+            if (newLine > 0) newLine += 1;
+            continue;
+          }
+
+          rows.push({
+            cls: classifyDiffLine(line),
+            op: "",
+            lineNum: "",
+            text: line
+          });
+        }
+
+        return rows;
+      }
+
+      function renderDiffLines(diffText) {
+        var rows = diffRows(diffText);
+        if (!rows.length) return "<div class=\"empty\">No diff preview available.</div>";
+        return (
+          "<div class=\"diff\">" +
+            rows.map(function (row) {
+              return (
+                "<div class=\"dline" + (row.cls ? " " + row.cls : "") + "\">" +
+                  "<span class=\"op\">" + esc(row.op || "") + "</span>" +
+                  "<span class=\"ln\">" + esc(row.lineNum || "") + "</span>" +
+                  "<span class=\"code\">" + esc(row.text || " ") + "</span>" +
+                "</div>"
+              );
+            }).join("") +
+          "</div>"
+        );
+      }
+
+      function directorySummaryText(file) {
+        var status = normalizeStatus(file && file.status, "modified");
+        if (status === "added" || status === "untracked" || status === "copied") {
+          return "Directory created.";
+        }
+        if (status === "deleted") return "Directory removed.";
+        if (status === "renamed") return "Directory renamed.";
+        return "Directory updated.";
+      }
+
+      function renderFileBody(file) {
+        if (isDirectoryFile(file)) {
+          return "<div class=\"dir-summary\">" + esc(directorySummaryText(file) + " (" + formatCounts(file) + ")") + "</div>";
+        }
+        return renderDiffLines(file.diff);
+      }
+
+      function fileCard(file, openByDefault) {
+        var statusText = prettyStatus(file.status);
+        var plus = "+" + file.added;
+        var minus = "-" + file.removed;
+        return (
+          "<details class=\"file\"" + (openByDefault ? " open" : "") + ">" +
+            "<summary>" +
+              "<span class=\"file-left\">" +
+                "<span class=\"dot " + esc(file.status) + "\"></span>" +
+                "<span class=\"path\">" + esc(file.path) + "</span>" +
+              "</span>" +
+              "<span class=\"file-meta\">" +
+                "<span class=\"status-label\">" + esc(statusText) + "</span>" +
+                "<span class=\"counts\"><span class=\"plus\">" + esc(plus) + "</span><span class=\"minus\">" + esc(minus) + "</span></span>" +
+              "</span>" +
+            "</summary>" +
+            "<div class=\"diff-wrap\">" + renderFileBody(file) + "</div>" +
+          "</details>"
+        );
+      }
+
+      function renderFileList(items, opts) {
+        if (!items.length) return "<div class=\"empty\">" + esc(opts.emptyText) + "</div>";
+        return "<div class=\"files\">" + items.map(function (file, idx) {
+          return fileCard(file, idx < opts.openCount);
+        }).join("") + "</div>";
+      }
+
+      function render() {
+        var root = document.getElementById("root");
+        if (!root) return;
+
+        var isFinal = view.panelMode === "final_review";
+        var filesEmpty = isFinal ? "No pending changed files." : "No file changes in this tool call.";
+        var filesOpenCount = view.changedFiles.length > 0 ? 1 : 0;
+        var filesHeading = "";
+        var approvalHtml = "";
+        if (isFinal && view.showApproval) {
+          approvalHtml =
+            "<section class=\"section\">" +
+              "<h2>Review Decision</h2>" +
+              "<div class=\"section-body\">" +
+                "<div class=\"actions\">" +
+                  "<button class=\"approve\" type=\"button\" data-action=\"approve\">Approve</button>" +
+                  "<button class=\"reject\" type=\"button\" data-action=\"reject\">Reject</button>" +
+                "</div>" +
+              "</div>" +
+            "</section>";
+        }
+
+        root.innerHTML =
+          "<section class=\"root\">" +
+            "<header class=\"header\">" +
+              "<h1 class=\"title\">" + esc(view.title) + "</h1>" +
+              "<span class=\"state " + esc(view.state) + "\">" + esc(view.state) + "</span>" +
+            "</header>" +
+            "<section class=\"section\">" +
+              filesHeading +
+              "<div class=\"section-body\">" +
+                renderFileList(view.changedFiles, { emptyText: filesEmpty, openCount: filesOpenCount }) +
+              "</div>" +
+            "</section>" +
+            approvalHtml +
+          "</section>";
+
+        var approveBtn = root.querySelector("button[data-action='approve']");
+        var rejectBtn = root.querySelector("button[data-action='reject']");
+
+        if (approveBtn) {
+          approveBtn.addEventListener("click", function () {
+            if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
+              window.openai.sendFollowUpMessage({
+                prompt: view.approvePrompt,
+                scrollToBottom: true
+              });
+            }
+          });
+        }
+
+        if (rejectBtn) {
+          rejectBtn.addEventListener("click", function () {
+            if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
+              window.openai.sendFollowUpMessage({
+                prompt: view.rejectPrompt,
+                scrollToBottom: true
+              });
+            }
+          });
+        }
+      }
+
+      function renderLoading(text) {
+        var root = document.getElementById("root");
+        if (!root) return;
+        root.innerHTML =
+          "<section class=\"root\">" +
+            "<section class=\"section\">" +
+              "<div class=\"section-body\">" +
+                "<div class=\"empty loading\">" + esc(text) + "</div>" +
+              "</div>" +
+            "</section>" +
+          "</section>";
+      }
+
+      function stopInitialRetry() {
+        if (initRetryTimer) {
+          clearInterval(initRetryTimer);
+          initRetryTimer = null;
+        }
+      }
+
+      function resolveInitialization() {
+        initResolved = true;
+        stopInitialRetry();
+      }
+
+      function currentToolOutput() {
+        if (!window.openai) return null;
+        return window.openai.toolOutput || null;
+      }
+
+      function startInitialRetry() {
+        if (initRetryTimer || initResolved) return;
+        var attempts = 0;
+        initRetryTimer = setInterval(function () {
+          if (initResolved) {
+            stopInitialRetry();
+            return;
+          }
+          attempts += 1;
+          var payload = currentToolOutput();
+          if (payload && applyPayload(payload)) {
+            resolveInitialization();
+            return;
+          }
+          if (attempts >= INITIAL_RETRY_MAX_ATTEMPTS) {
+            stopInitialRetry();
+          }
+        }, INITIAL_RETRY_INTERVAL_MS);
+      }
+
+      function applyPayload(payload) {
+        var root = document.getElementById("root");
+        if (!root) return false;
+        var structured = extractStructured(payload);
+        if (!structured) {
+          return false;
+        }
+        var normalized = normalize(structured);
+        if (!normalized) {
+          return false;
+        }
+        if (normalized.panelMode === "tool_call" && !normalized.hasChanges) {
+          root.innerHTML = "";
+          return true;
+        }
+        view = normalized;
+        render();
+        return true;
+      }
+
+      window.addEventListener("message", function (event) {
+        if (event.source !== window.parent) return;
+        var message = event.data;
+        if (!message || typeof message !== "object") return;
+        if (message.method === "ui/initialize" || message.method === "ui/notifications/tool-result") {
+          if (applyPayload(message.params || {})) {
+            resolveInitialization();
+          }
+        }
+      });
+
+      renderLoading("Waiting for tool output...");
+      var initialPayload = currentToolOutput();
+      if (initialPayload && applyPayload(initialPayload)) {
+        resolveInitialization();
+      } else {
+        startInitialRetry();
+      }
+    })();
+  </script>
+</body>
+</html>

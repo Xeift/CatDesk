@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -12,6 +16,15 @@ use crate::workspace_tools;
 const SERVER_NAME: &str = "mcp3000";
 const SERVER_VERSION: &str = "4.0.0";
 const PROTOCOL_VERSION: &str = "2025-03-26";
+const UI_TEMPLATE_URI: &str = "ui://widget/mcp3000-dashboard.html";
+const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
+const RENDER_WIDGET_TOOL: &str = "render_mcp3000_widget";
+const MCP3000_WIDGET_HTML: &str = include_str!("widget/mcp3000_dashboard.html");
+const MAX_DIFF_FILES: usize = 16;
+const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
+const MAX_WATCHED_FILES: usize = 512;
+const MAX_FILE_CAPTURE_BYTES: usize = 128 * 1024;
+const MAX_TEXT_CAPTURE_LINES: usize = 420;
 
 // ── JSON-RPC types ──────────────────────────────────────────
 
@@ -67,6 +80,8 @@ impl JsonRpcResponse {
 pub struct Session {
     pub id: String,
     pub initialized: bool,
+    changed_files: HashMap<String, FileDiffEntry>,
+    baseline_files: HashMap<String, Option<FileSnapshot>>,
 }
 
 impl Session {
@@ -74,8 +89,46 @@ impl Session {
         Self {
             id: Uuid::new_v4().to_string(),
             initialized: false,
+            changed_files: HashMap::new(),
+            baseline_files: HashMap::new(),
         }
     }
+}
+
+#[derive(Clone, Default)]
+struct FileDiffEntry {
+    path: String,
+    status: String,
+    added: u64,
+    removed: u64,
+    diff: String,
+}
+
+#[derive(Clone, Default)]
+struct WatchedSnapshot {
+    files: HashMap<String, FileSnapshot>,
+}
+
+#[derive(Clone)]
+struct FileSnapshot {
+    digest: u64,
+    size_bytes: usize,
+    is_binary: bool,
+    is_directory: bool,
+    text: String,
+    text_truncated: bool,
+}
+
+#[derive(Clone)]
+struct WatchTarget {
+    path: PathBuf,
+    recursive: bool,
+}
+
+#[derive(Clone)]
+struct AutoWidgetContext {
+    is_error: bool,
+    turn_files: Vec<FileDiffEntry>,
 }
 
 // ── Handler ─────────────────────────────────────────────────
@@ -119,9 +172,10 @@ pub async fn handle_request(
         }
         "tools/list" => Some(handle_tools_list(req, mode, tool_mode, devtools).await),
         "tools/call" => {
-            Some(handle_tools_call(req, workspace_root, mode, tool_mode, devtools).await)
+            Some(handle_tools_call(req, session, workspace_root, mode, tool_mode, devtools).await)
         }
         "resources/list" => Some(handle_resources_list(req)),
+        "resources/read" => Some(handle_resources_read(req)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
         _ => Some(JsonRpcResponse::error(
             req.id.clone(),
@@ -150,8 +204,36 @@ fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
-            "resources": [],
+            "resources": [{
+                "uri": UI_TEMPLATE_URI,
+                "name": "MCP3000 dashboard widget",
+                "description": "Embedded ChatGPT widget for MCP3000 status and timeline data.",
+                "mimeType": UI_TEMPLATE_MIME_TYPE,
+                "_meta": { "ui": { "prefersBorder": true } }
+            }],
             "nextCursor": null
+        }),
+    )
+}
+
+fn handle_resources_read(req: &JsonRpcRequest) -> JsonRpcResponse {
+    let uri = req
+        .params
+        .get("uri")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if uri != UI_TEMPLATE_URI {
+        return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
+    }
+    JsonRpcResponse::success(
+        req.id.clone(),
+        json!({
+            "contents": [{
+                "uri": UI_TEMPLATE_URI,
+                "mimeType": UI_TEMPLATE_MIME_TYPE,
+                "text": MCP3000_WIDGET_HTML,
+                "_meta": { "ui": { "prefersBorder": true } }
+            }]
         }),
     )
 }
@@ -339,6 +421,49 @@ async fn handle_tools_list(
         }
     }
 
+    // Render tool for ChatGPT embedded UI.
+    tools.push(json!({
+        "name": RENDER_WIDGET_TOOL,
+        "title": "Render MCP3000 review panel",
+        "description": "Render MCP3000 review UI with current tool call diff and cumulative changed files.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "Optional panel title." },
+                "panelMode": { "type": "string", "description": "tool_call or final_review" },
+                "changedFiles": {
+                    "type": "array",
+                    "description": "Changed files to render in the panel.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "status": { "type": "string" },
+                            "added": { "type": "number" },
+                            "removed": { "type": "number" },
+                            "diff": { "type": "string" }
+                        }
+                    }
+                },
+                "state": { "type": "string" },
+                "showApproval": { "type": "boolean" },
+                "approvePrompt": { "type": "string" },
+                "rejectPrompt": { "type": "string" }
+            }
+        },
+        "_meta": {
+            "ui": { "resourceUri": UI_TEMPLATE_URI },
+            "openai/outputTemplate": UI_TEMPLATE_URI,
+            "openai/toolInvocation/invoking": "Rendering widget...",
+            "openai/toolInvocation/invoked": "Widget rendered."
+        },
+        "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+    }));
+
+    for tool in &mut tools {
+        ensure_tool_descriptor_widget_template(tool);
+    }
+
     JsonRpcResponse::success(req.id.clone(), json!({ "tools": tools }))
 }
 
@@ -346,104 +471,179 @@ async fn handle_tools_list(
 
 async fn handle_tools_call(
     req: &JsonRpcRequest,
+    session: &mut Session,
     workspace_root: &str,
     mode: Mode,
     tool_mode: ToolMode,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> JsonRpcResponse {
     let params = &req.params;
-    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let tool_name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
-    // Local computer tools
-    if mode.computer_enabled() {
-        if tool_name == "run_command" {
-            if tool_mode.run_command_enabled() {
-                return handle_run_command(req, workspace_root).await;
+    if tool_name == RENDER_WIDGET_TOOL {
+        return handle_render_widget(req);
+    }
+
+    let watch_targets = collect_watch_targets(req, workspace_root);
+    let before_snapshot = collect_watched_snapshot(&watch_targets, workspace_root);
+
+    let mut response = {
+        // Local computer tools
+        if mode.computer_enabled() {
+            if tool_name == "run_command" {
+                if tool_mode.run_command_enabled() {
+                    handle_run_command(req, workspace_root).await
+                } else if tool_mode.read_only() {
+                    read_only_blocked_response(req, &tool_name)
+                } else {
+                    tool_error_response(req, format!("Unknown tool: {tool_name}"))
+                }
+            } else if tool_mode.read_tools_enabled() {
+                match tool_name.as_str() {
+                    "read_file" => handle_read_file(req, workspace_root),
+                    "list_files" => handle_list_files(req, workspace_root),
+                    "search_text" => handle_search_text(req, workspace_root),
+                    _ => {
+                        if tool_mode.write_tools_enabled() {
+                            match tool_name.as_str() {
+                                "write_file" => handle_write_file(req, workspace_root),
+                                "append_file" => handle_append_file(req, workspace_root),
+                                "make_directory" => handle_make_directory(req, workspace_root),
+                                "move_path" => handle_move_path(req, workspace_root),
+                                "delete_path" => handle_delete_path(req, workspace_root),
+                                "replace_in_file" => handle_replace_in_file(req, workspace_root),
+                                _ => {
+                                    if mode.browser_enabled() {
+                                        forward_to_devtools(req, &tool_name, tool_mode, devtools)
+                                            .await
+                                    } else {
+                                        tool_error_response(
+                                            req,
+                                            format!("Unknown tool: {tool_name}"),
+                                        )
+                                    }
+                                }
+                            }
+                        } else if tool_mode.read_only() && is_local_destructive_tool(&tool_name) {
+                            read_only_blocked_response(req, &tool_name)
+                        } else if mode.browser_enabled() {
+                            forward_to_devtools(req, &tool_name, tool_mode, devtools).await
+                        } else {
+                            tool_error_response(req, format!("Unknown tool: {tool_name}"))
+                        }
+                    }
+                }
+            } else if tool_mode.write_tools_enabled() {
+                match tool_name.as_str() {
+                    "write_file" => handle_write_file(req, workspace_root),
+                    "append_file" => handle_append_file(req, workspace_root),
+                    "make_directory" => handle_make_directory(req, workspace_root),
+                    "move_path" => handle_move_path(req, workspace_root),
+                    "delete_path" => handle_delete_path(req, workspace_root),
+                    "replace_in_file" => handle_replace_in_file(req, workspace_root),
+                    _ => {
+                        if mode.browser_enabled() {
+                            forward_to_devtools(req, &tool_name, tool_mode, devtools).await
+                        } else {
+                            tool_error_response(req, format!("Unknown tool: {tool_name}"))
+                        }
+                    }
+                }
+            } else if tool_mode.read_only() && is_local_destructive_tool(&tool_name) {
+                read_only_blocked_response(req, &tool_name)
+            } else if mode.browser_enabled() {
+                forward_to_devtools(req, &tool_name, tool_mode, devtools).await
+            } else {
+                tool_error_response(req, format!("Unknown tool: {tool_name}"))
             }
-            if tool_mode.read_only() {
-                return read_only_blocked_response(req, tool_name);
-            }
-            return JsonRpcResponse::error(
-                req.id.clone(),
-                -32602,
-                format!("Unknown tool: {tool_name}"),
-            );
+        } else if mode.browser_enabled() {
+            forward_to_devtools(req, &tool_name, tool_mode, devtools).await
+        } else {
+            tool_error_response(req, format!("Unknown tool: {tool_name}"))
         }
-        if tool_mode.read_tools_enabled() {
-            match tool_name {
-                "read_file" => return handle_read_file(req, workspace_root),
-                "list_files" => return handle_list_files(req, workspace_root),
-                "search_text" => return handle_search_text(req, workspace_root),
-                _ => {}
-            }
-        }
-        if tool_mode.write_tools_enabled() {
-            match tool_name {
-                "write_file" => return handle_write_file(req, workspace_root),
-                "append_file" => return handle_append_file(req, workspace_root),
-                "make_directory" => return handle_make_directory(req, workspace_root),
-                "move_path" => return handle_move_path(req, workspace_root),
-                "delete_path" => return handle_delete_path(req, workspace_root),
-                "replace_in_file" => return handle_replace_in_file(req, workspace_root),
-                _ => {}
-            }
-        } else if tool_mode.read_only() && is_local_destructive_tool(tool_name) {
-            return read_only_blocked_response(req, tool_name);
+    };
+
+    let after_snapshot = collect_watched_snapshot(&watch_targets, workspace_root);
+    let turn_files = diff_changed_files(&before_snapshot, &after_snapshot);
+    update_session_changed_files(session, &before_snapshot, &after_snapshot);
+    let is_error = response
+        .result
+        .as_ref()
+        .and_then(|v| v.get("isError"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let has_turn_changes = !turn_files.is_empty();
+    let widget_context = AutoWidgetContext {
+        is_error,
+        turn_files,
+    };
+
+    if let Some(result) = response.result.take() {
+        if has_turn_changes {
+            response.result = Some(enrich_tool_result(req, result, Some(&widget_context)));
+        } else {
+            response.result = Some(strip_widget_payload(result));
         }
     }
 
-    // Everything else → forward to devtools bridge
-    if mode.browser_enabled() {
-        if let Some(bridge) = devtools {
-            if tool_mode.read_only() {
-                match devtools_tool_is_read_only(bridge, tool_name).await {
-                    Some(true) => {}
-                    Some(false) => return read_only_blocked_response(req, tool_name),
-                    None => {
-                        return tool_error_response(
-                            req,
-                            format!(
-                                "Tool '{tool_name}' is blocked in read-only mode (cannot verify readOnlyHint)"
-                            ),
-                        );
-                    }
-                }
-            }
-            let forward_req = json!({
-                "jsonrpc": "2.0",
-                "id": req.id,
-                "method": "tools/call",
-                "params": params
-            });
-            let mut b = bridge.lock().await;
-            match b.request(&forward_req).await {
-                Ok(resp) => {
-                    if let Some(result) = resp.get("result") {
-                        return JsonRpcResponse::success(req.id.clone(), result.clone());
-                    }
-                    if let Some(error) = resp.get("error") {
-                        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-                        let msg = error
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Unknown error");
-                        return JsonRpcResponse::error(req.id.clone(), code, msg.to_string());
-                    }
-                }
-                Err(e) => {
-                    return JsonRpcResponse::success(
-                        req.id.clone(),
-                        json!({
-                            "content": [{"type": "text", "text": format!("DevTools bridge error: {e}")}],
-                            "isError": true,
-                        }),
-                    );
-                }
+    response
+}
+
+async fn forward_to_devtools(
+    req: &JsonRpcRequest,
+    tool_name: &str,
+    tool_mode: ToolMode,
+    devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+) -> JsonRpcResponse {
+    let params = &req.params;
+    let Some(bridge) = devtools else {
+        return tool_error_response(req, format!("Unknown tool: {tool_name}"));
+    };
+
+    if tool_mode.read_only() {
+        match devtools_tool_is_read_only(bridge, tool_name).await {
+            Some(true) => {}
+            Some(false) => return read_only_blocked_response(req, tool_name),
+            None => {
+                return tool_error_response(
+                    req,
+                    format!(
+                        "Tool '{tool_name}' is blocked in read-only mode (cannot verify readOnlyHint)"
+                    ),
+                );
             }
         }
     }
 
-    JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown tool: {tool_name}"))
+    let forward_req = json!({
+        "jsonrpc": "2.0",
+        "id": req.id,
+        "method": "tools/call",
+        "params": params
+    });
+
+    let mut b = bridge.lock().await;
+    match b.request(&forward_req).await {
+        Ok(resp) => {
+            if let Some(result) = resp.get("result") {
+                return JsonRpcResponse::success(req.id.clone(), result.clone());
+            }
+            if let Some(error) = resp.get("error") {
+                let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
+                let msg = error
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error");
+                return tool_error_response(req, format!("DevTools tool error (code {code}): {msg}"));
+            }
+            tool_error_response(req, "DevTools bridge returned empty response".into())
+        }
+        Err(e) => tool_error_response(req, format!("DevTools bridge error: {e}")),
+    }
 }
 
 async fn handle_run_command(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
@@ -452,13 +652,7 @@ async fn handle_run_command(req: &JsonRpcRequest, workspace_root: &str) -> JsonR
     let cmd = match arguments.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => {
-            return JsonRpcResponse::success(
-                req.id.clone(),
-                json!({
-                    "content": [{"type": "text", "text": "Missing required parameter: command"}],
-                    "isError": true,
-                }),
-            );
+            return tool_error_response(req, "Missing required parameter: command".into());
         }
     };
 
@@ -468,13 +662,7 @@ async fn handle_run_command(req: &JsonRpcRequest, workspace_root: &str) -> JsonR
     let cwd = match command::resolve_workspace_path(workspace_root, cwd_input) {
         Ok(p) => p,
         Err(e) => {
-            return JsonRpcResponse::success(
-                req.id.clone(),
-                json!({
-                    "content": [{"type": "text", "text": format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {e}")}],
-                    "isError": true,
-                }),
-            );
+            return tool_error_response(req, format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {e}"));
         }
     };
 
@@ -483,30 +671,99 @@ async fn handle_run_command(req: &JsonRpcRequest, workspace_root: &str) -> JsonR
     let output = command::format_result(&result);
 
     if result.success {
-        JsonRpcResponse::success(
-            req.id.clone(),
-            json!({ "content": [{"type": "text", "text": output}] }),
-        )
+        tool_success_response(req, output)
     } else {
-        JsonRpcResponse::success(
-            req.id.clone(),
-            json!({ "content": [{"type": "text", "text": output}], "isError": true }),
-        )
+        tool_error_response(req, output)
     }
 }
 
 fn tool_success_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse {
-    JsonRpcResponse::success(
-        req.id.clone(),
+    let result = enrich_tool_result(
+        req,
         json!({ "content": [{"type": "text", "text": text}] }),
-    )
+        None,
+    );
+    JsonRpcResponse::success(req.id.clone(), result)
+}
+
+fn handle_render_widget(req: &JsonRpcRequest) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let title = arguments
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Final Review")
+        .to_string();
+    let panel_mode = arguments
+        .get("panelMode")
+        .and_then(Value::as_str)
+        .unwrap_or("final_review")
+        .to_string();
+    let changed_files = arguments
+        .get("changedFiles")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let show_approval = arguments
+        .get("showApproval")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            changed_files
+                .as_array()
+                .map(|arr| !arr.is_empty())
+                .unwrap_or(false)
+        });
+    let approve_prompt = arguments
+        .get("approvePrompt")
+        .and_then(Value::as_str)
+        .unwrap_or("Approve these file changes and continue.")
+        .to_string();
+    let reject_prompt = arguments
+        .get("rejectPrompt")
+        .and_then(Value::as_str)
+        .unwrap_or("Reject these file changes and ask for a safer revision.")
+        .to_string();
+
+    let has_changes = changed_files
+        .as_array()
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false);
+    let state = arguments
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or(if has_changes { "waiting_approval" } else { "done" });
+
+    let structured = json!({
+        "schema": "mcp3000.review.v1",
+        "panelMode": panel_mode,
+        "title": title,
+        "state": state,
+        "changedFiles": changed_files,
+        "hasChanges": has_changes,
+        "showApproval": show_approval,
+        "approvePrompt": approve_prompt,
+        "rejectPrompt": reject_prompt,
+    });
+
+    let result = enrich_tool_result(
+        req,
+        json!({
+            "structuredContent": structured,
+            "content": [{
+                "type": "text",
+                "text": "Rendered MCP3000 workbench UI in ChatGPT."
+            }]
+        }),
+        None,
+    );
+    JsonRpcResponse::success(req.id.clone(), result)
 }
 
 fn tool_error_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse {
-    JsonRpcResponse::success(
-        req.id.clone(),
+    let result = enrich_tool_result(
+        req,
         json!({ "content": [{"type": "text", "text": text}], "isError": true }),
-    )
+        None,
+    );
+    JsonRpcResponse::success(req.id.clone(), result)
 }
 
 fn read_only_blocked_response(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse {
@@ -518,6 +775,760 @@ fn read_only_blocked_response(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcR
 
 fn tool_arguments(req: &JsonRpcRequest) -> Value {
     req.params.get("arguments").cloned().unwrap_or(json!({}))
+}
+
+fn tool_name_from_request(req: &JsonRpcRequest) -> String {
+    req.params
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("unknown_tool")
+        .to_string()
+}
+
+fn ensure_output_template_meta(meta_value: &mut Value) {
+    if !meta_value.is_object() {
+        *meta_value = json!({});
+    }
+    let Some(meta_obj) = meta_value.as_object_mut() else {
+        return;
+    };
+    meta_obj.insert(
+        "openai/outputTemplate".to_string(),
+        Value::String(UI_TEMPLATE_URI.to_string()),
+    );
+    let ui_entry = meta_obj
+        .entry("ui".to_string())
+        .or_insert_with(|| json!({}));
+    if !ui_entry.is_object() {
+        *ui_entry = json!({});
+    }
+    if let Some(ui_obj) = ui_entry.as_object_mut() {
+        ui_obj.insert(
+            "resourceUri".to_string(),
+            Value::String(UI_TEMPLATE_URI.to_string()),
+        );
+    }
+}
+
+fn tool_descriptor_should_attach_widget(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file"
+            | "append_file"
+            | "make_directory"
+            | "move_path"
+            | "delete_path"
+            | "replace_in_file"
+            | RENDER_WIDGET_TOOL
+    )
+}
+
+fn ensure_tool_descriptor_widget_template(tool: &mut Value) {
+    let Some(tool_obj) = tool.as_object_mut() else {
+        return;
+    };
+    let Some(name) = tool_obj.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    if !tool_descriptor_should_attach_widget(name) {
+        return;
+    }
+    let meta_value = tool_obj
+        .entry("_meta".to_string())
+        .or_insert_with(|| json!({}));
+    ensure_output_template_meta(meta_value);
+}
+
+fn extract_tool_result_text(result: &Value) -> String {
+    result
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("text").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn truncate_for_widget(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return "...".to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out = String::with_capacity(max_chars);
+    out.extend(text.chars().take(keep));
+    out.push_str("...");
+    out
+}
+
+fn truncate_diff_for_widget(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(96);
+    let mut out = String::with_capacity(max_chars + 64);
+    out.extend(text.chars().take(keep));
+    out.push_str("\n\n[diff truncated]\n");
+    out
+}
+
+fn summarize_tool_detail(raw_text: &str, is_error: bool) -> String {
+    let first_line = raw_text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(if is_error {
+            "Tool returned an error."
+        } else {
+            "Tool call completed."
+        });
+    truncate_for_widget(first_line, 220)
+}
+
+fn diff_line_stats(diff: &str) -> (u64, u64) {
+    let mut added: u64 = 0;
+    let mut removed: u64 = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added = added.saturating_add(1);
+        } else if line.starts_with('-') {
+            removed = removed.saturating_add(1);
+        }
+    }
+    (added, removed)
+}
+
+fn file_entry_json(file: &FileDiffEntry) -> Value {
+    json!({
+        "path": file.path,
+        "status": file.status,
+        "added": file.added,
+        "removed": file.removed,
+        "diff": file.diff,
+    })
+}
+
+fn build_auto_widget_structured_content(
+    req: &JsonRpcRequest,
+    result: &Value,
+    widget_context: Option<&AutoWidgetContext>,
+) -> Value {
+    let tool_name = tool_name_from_request(req);
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let line = summarize_tool_detail(&extract_tool_result_text(result), is_error);
+    if let Some(ctx) = widget_context {
+        let state = if ctx.is_error {
+            "failed"
+        } else if ctx.turn_files.is_empty() {
+            "done"
+        } else {
+            "changed"
+        };
+        let changed_files: Vec<Value> = ctx.turn_files.iter().map(file_entry_json).collect();
+        return json!({
+            "schema": "mcp3000.review.v1",
+            "panelMode": "tool_call",
+            "title": "Changed Files",
+            "state": state,
+            "changedFiles": changed_files,
+            "hasChanges": !ctx.turn_files.is_empty()
+        });
+    }
+
+    json!({
+        "schema": "mcp3000.review.v1",
+        "panelMode": "tool_call",
+        "title": "Changed Files",
+        "state": if is_error { "failed" } else { "done" },
+        "call": format!("call {}", tool_name),
+        "detail": line,
+        "changedFiles": [],
+        "hasChanges": false
+    })
+}
+
+fn enrich_tool_result(
+    req: &JsonRpcRequest,
+    mut result: Value,
+    widget_context: Option<&AutoWidgetContext>,
+) -> Value {
+    if !result.is_object() {
+        result = json!({
+            "content": [{
+                "type": "text",
+                "text": result.to_string()
+            }]
+        });
+    }
+    let should_overwrite_structured = widget_context.is_some();
+    let has_structured = matches!(result.get("structuredContent"), Some(Value::Object(_)));
+    let structured = if should_overwrite_structured || !has_structured {
+        Some(build_auto_widget_structured_content(
+            req,
+            &result,
+            widget_context,
+        ))
+    } else {
+        None
+    };
+    if let Some(result_obj) = result.as_object_mut() {
+        let meta_value = result_obj
+            .entry("_meta".to_string())
+            .or_insert_with(|| json!({}));
+        ensure_output_template_meta(meta_value);
+        if let Some(structured) = structured {
+            result_obj.insert("structuredContent".to_string(), structured);
+        }
+    }
+    result
+}
+
+fn strip_widget_payload(mut result: Value) -> Value {
+    let Some(result_obj) = result.as_object_mut() else {
+        return result;
+    };
+    result_obj.remove("structuredContent");
+    if let Some(meta) = result_obj.get_mut("_meta").and_then(Value::as_object_mut) {
+        meta.remove("openai/outputTemplate");
+        if let Some(ui_obj) = meta.get_mut("ui").and_then(Value::as_object_mut) {
+            ui_obj.remove("resourceUri");
+            if ui_obj.is_empty() {
+                meta.remove("ui");
+            }
+        }
+        if meta.is_empty() {
+            result_obj.remove("_meta");
+        }
+    }
+    result
+}
+
+fn collect_watch_targets(req: &JsonRpcRequest, workspace_root: &str) -> Vec<WatchTarget> {
+    let tool_name = tool_name_from_request(req);
+    let arguments = tool_arguments(req);
+    let mut dedup: HashMap<PathBuf, bool> = HashMap::new();
+
+    let mut add_target = |path_opt: Option<&str>, recursive: bool| {
+        let Some(path_input) = path_opt else {
+            return;
+        };
+        let Ok(resolved) = command::resolve_workspace_path(workspace_root, Some(path_input)) else {
+            return;
+        };
+        let entry = dedup.entry(resolved).or_insert(false);
+        *entry |= recursive;
+    };
+
+    match tool_name.as_str() {
+        "write_file" | "append_file" | "replace_in_file" => {
+            add_target(arguments.get("path").and_then(Value::as_str), false);
+        }
+        "delete_path" | "make_directory" => {
+            add_target(arguments.get("path").and_then(Value::as_str), true);
+        }
+        "move_path" => {
+            add_target(arguments.get("from").and_then(Value::as_str), true);
+            add_target(arguments.get("to").and_then(Value::as_str), true);
+        }
+        "run_command" => {
+            if let Ok(cwd) = command::resolve_workspace_path(
+                workspace_root,
+                arguments.get("cwd").and_then(Value::as_str),
+            ) {
+                let entry = dedup.entry(cwd).or_insert(false);
+                *entry = true;
+            }
+        }
+        _ => {}
+    }
+
+    dedup
+        .into_iter()
+        .map(|(path, recursive)| WatchTarget { path, recursive })
+        .collect()
+}
+
+fn collect_watched_snapshot(targets: &[WatchTarget], workspace_root: &str) -> WatchedSnapshot {
+    let root = Path::new(workspace_root)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(workspace_root));
+    let mut files: HashMap<String, FileSnapshot> = HashMap::new();
+    let mut remaining = MAX_WATCHED_FILES;
+
+    for target in targets {
+        if remaining == 0 {
+            break;
+        }
+        collect_target_files(&root, target, &mut files, &mut remaining);
+    }
+
+    WatchedSnapshot { files }
+}
+
+fn collect_target_files(
+    root: &Path,
+    target: &WatchTarget,
+    files: &mut HashMap<String, FileSnapshot>,
+    remaining: &mut usize,
+) {
+    if *remaining == 0 {
+        return;
+    }
+    if !target.path.exists() {
+        return;
+    }
+    if target.path.is_file() {
+        if let Some(snapshot) = capture_file(&target.path) {
+            let rel = to_relative(root, &target.path);
+            files.entry(rel).or_insert(snapshot);
+            *remaining = remaining.saturating_sub(1);
+        }
+        return;
+    }
+    if target.path.is_dir() {
+        capture_directory(root, &target.path, files, remaining);
+        collect_dir_files(root, &target.path, target.recursive, files, remaining);
+    }
+}
+
+fn directory_key_from_relative(rel: &str) -> String {
+    if rel.is_empty() || rel == "." {
+        "./".to_string()
+    } else if rel.ends_with('/') {
+        rel.to_string()
+    } else {
+        format!("{rel}/")
+    }
+}
+
+fn capture_directory(
+    root: &Path,
+    path: &Path,
+    files: &mut HashMap<String, FileSnapshot>,
+    remaining: &mut usize,
+) {
+    if *remaining == 0 || !path.is_dir() {
+        return;
+    }
+    let rel = directory_key_from_relative(&to_relative(root, path));
+    if let std::collections::hash_map::Entry::Vacant(v) = files.entry(rel) {
+        v.insert(FileSnapshot {
+            digest: 0,
+            size_bytes: 0,
+            is_binary: true,
+            is_directory: true,
+            text: String::new(),
+            text_truncated: false,
+        });
+        *remaining = remaining.saturating_sub(1);
+    }
+}
+
+fn collect_dir_files(
+    root: &Path,
+    start: &Path,
+    recursive: bool,
+    files: &mut HashMap<String, FileSnapshot>,
+    remaining: &mut usize,
+) {
+    let mut stack = vec![start.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if *remaining == 0 {
+                return;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_file() {
+                if let Some(snapshot) = capture_file(&path) {
+                    let rel = to_relative(root, &path);
+                    if let std::collections::hash_map::Entry::Vacant(v) = files.entry(rel) {
+                        v.insert(snapshot);
+                        *remaining = remaining.saturating_sub(1);
+                    }
+                }
+            } else if file_type.is_dir() {
+                capture_directory(root, &path, files, remaining);
+                if recursive {
+                    stack.push(path);
+                }
+            }
+        }
+        if !recursive {
+            break;
+        }
+    }
+}
+
+fn to_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+fn capture_file(path: &Path) -> Option<FileSnapshot> {
+    let data = std::fs::read(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    let digest = hasher.finish();
+
+    let preview = &data[..data.len().min(MAX_FILE_CAPTURE_BYTES)];
+    let is_binary = preview.iter().any(|b| *b == 0);
+    let mut text = String::new();
+    let mut text_truncated = data.len() > MAX_FILE_CAPTURE_BYTES;
+
+    if !is_binary {
+        text = String::from_utf8_lossy(preview).to_string();
+        let line_count = text.lines().count();
+        if line_count > MAX_TEXT_CAPTURE_LINES {
+            text = text
+                .lines()
+                .take(MAX_TEXT_CAPTURE_LINES)
+                .collect::<Vec<_>>()
+                .join("\n");
+            text_truncated = true;
+        }
+    }
+
+    Some(FileSnapshot {
+        digest,
+        size_bytes: data.len(),
+        is_binary,
+        is_directory: false,
+        text,
+        text_truncated,
+    })
+}
+
+fn snapshot_equal(a: &FileSnapshot, b: &FileSnapshot) -> bool {
+    a.digest == b.digest
+        && a.size_bytes == b.size_bytes
+        && a.is_binary == b.is_binary
+        && a.is_directory == b.is_directory
+}
+
+fn build_entry_from_states(
+    path: &str,
+    before: Option<&FileSnapshot>,
+    after: Option<&FileSnapshot>,
+) -> Option<FileDiffEntry> {
+    match (before, after) {
+        (None, None) => None,
+        (Some(b), Some(a)) if snapshot_equal(b, a) => None,
+        (None, Some(a)) if a.is_directory => Some(FileDiffEntry {
+            path: path.to_string(),
+            status: "added".into(),
+            added: 1,
+            removed: 0,
+            diff: format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+<directory>\n"),
+        }),
+        (Some(b), None) if b.is_directory => Some(FileDiffEntry {
+            path: path.to_string(),
+            status: "deleted".into(),
+            added: 0,
+            removed: 1,
+            diff: format!("--- a/{path}\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-<directory>\n"),
+        }),
+        (Some(b), Some(a)) if b.is_directory || a.is_directory => {
+            if b.is_directory && a.is_directory {
+                return None;
+            }
+            let before_marker = if b.is_directory {
+                "<directory>"
+            } else if b.is_binary {
+                "<binary file>"
+            } else {
+                "<file>"
+            };
+            let after_marker = if a.is_directory {
+                "<directory>"
+            } else if a.is_binary {
+                "<binary file>"
+            } else {
+                "<file>"
+            };
+            Some(FileDiffEntry {
+                path: path.to_string(),
+                status: "modified".into(),
+                added: 1,
+                removed: 1,
+                diff: format!(
+                    "--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-{before_marker}\n+{after_marker}\n"
+                ),
+            })
+        }
+        (None, Some(a)) => {
+            let diff = truncate_diff_for_widget(&build_added_diff(path, a), MAX_DIFF_CHARS_PER_FILE);
+            let (added, removed) = diff_line_stats(&diff);
+            Some(FileDiffEntry {
+                path: path.to_string(),
+                status: "added".into(),
+                added,
+                removed,
+                diff,
+            })
+        }
+        (Some(b), None) => {
+            let diff =
+                truncate_diff_for_widget(&build_deleted_diff(path, b), MAX_DIFF_CHARS_PER_FILE);
+            let (added, removed) = diff_line_stats(&diff);
+            Some(FileDiffEntry {
+                path: path.to_string(),
+                status: "deleted".into(),
+                added,
+                removed,
+                diff,
+            })
+        }
+        (Some(b), Some(a)) => {
+            let diff =
+                truncate_diff_for_widget(&build_modified_diff(path, b, a), MAX_DIFF_CHARS_PER_FILE);
+            let (added, removed) = diff_line_stats(&diff);
+            Some(FileDiffEntry {
+                path: path.to_string(),
+                status: "modified".into(),
+                added,
+                removed,
+                diff,
+            })
+        }
+    }
+}
+
+fn append_prefixed_lines(out: &mut String, prefix: char, text: &str) {
+    if text.is_empty() {
+        out.push(prefix);
+        out.push('\n');
+        return;
+    }
+    for line in text.lines() {
+        out.push(prefix);
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+enum LineDiffOp<'a> {
+    Keep(&'a str),
+    Delete(&'a str),
+    Insert(&'a str),
+}
+
+fn diff_lines<'a>(before: &'a [&'a str], after: &'a [&'a str]) -> Vec<LineDiffOp<'a>> {
+    let n = before.len();
+    let m = after.len();
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if before[i] == after[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+
+    let mut ops: Vec<LineDiffOp<'a>> = Vec::with_capacity(n + m);
+    let mut i = 0usize;
+    let mut j = 0usize;
+
+    while i < n && j < m {
+        if before[i] == after[j] {
+            ops.push(LineDiffOp::Keep(before[i]));
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            ops.push(LineDiffOp::Delete(before[i]));
+            i += 1;
+        } else {
+            ops.push(LineDiffOp::Insert(after[j]));
+            j += 1;
+        }
+    }
+
+    while i < n {
+        ops.push(LineDiffOp::Delete(before[i]));
+        i += 1;
+    }
+    while j < m {
+        ops.push(LineDiffOp::Insert(after[j]));
+        j += 1;
+    }
+
+    ops
+}
+
+fn build_added_diff(path: &str, after: &FileSnapshot) -> String {
+    if after.is_binary {
+        return format!(
+            "--- /dev/null\n+++ b/{path}\nBinary file added ({} bytes)\n",
+            after.size_bytes
+        );
+    }
+    let mut diff = String::new();
+    let lines = after.text.lines().count().max(1);
+    diff.push_str(&format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{lines} @@\n"));
+    append_prefixed_lines(&mut diff, '+', &after.text);
+    if after.text_truncated {
+        diff.push_str("\n[file content preview truncated]\n");
+    }
+    diff
+}
+
+fn build_deleted_diff(path: &str, before: &FileSnapshot) -> String {
+    if before.is_binary {
+        return format!(
+            "--- a/{path}\n+++ /dev/null\nBinary file deleted ({} bytes)\n",
+            before.size_bytes
+        );
+    }
+    let mut diff = String::new();
+    let lines = before.text.lines().count().max(1);
+    diff.push_str(&format!("--- a/{path}\n+++ /dev/null\n@@ -1,{lines} +0,0 @@\n"));
+    append_prefixed_lines(&mut diff, '-', &before.text);
+    if before.text_truncated {
+        diff.push_str("\n[file content preview truncated]\n");
+    }
+    diff
+}
+
+fn build_modified_diff(path: &str, before: &FileSnapshot, after: &FileSnapshot) -> String {
+    if before.is_binary || after.is_binary {
+        return format!(
+            "--- a/{path}\n+++ b/{path}\nBinary file changed ({} -> {} bytes)\n",
+            before.size_bytes, after.size_bytes
+        );
+    }
+    let before_lines: Vec<&str> = before.text.lines().collect();
+    let after_lines: Vec<&str> = after.text.lines().collect();
+    let mut ops = diff_lines(&before_lines, &after_lines);
+    let has_line_level_change = ops
+        .iter()
+        .any(|op| !matches!(op, LineDiffOp::Keep(_)));
+
+    let mut diff = String::new();
+    let before_count = before_lines.len();
+    let after_count = after_lines.len();
+    let before_start = if before_count == 0 { 0 } else { 1 };
+    let after_start = if after_count == 0 { 0 } else { 1 };
+    diff.push_str(&format!(
+        "--- a/{path}\n+++ b/{path}\n@@ -{before_start},{before_count} +{after_start},{after_count} @@\n"
+    ));
+
+    if has_line_level_change {
+        for op in ops {
+            match op {
+                LineDiffOp::Keep(line) => {
+                    diff.push(' ');
+                    diff.push_str(line);
+                    diff.push('\n');
+                }
+                LineDiffOp::Delete(line) => {
+                    diff.push('-');
+                    diff.push_str(line);
+                    diff.push('\n');
+                }
+                LineDiffOp::Insert(line) => {
+                    diff.push('+');
+                    diff.push_str(line);
+                    diff.push('\n');
+                }
+            }
+        }
+    } else {
+        // Fallback for non line-level text differences (for example newline-only changes).
+        ops.clear();
+        append_prefixed_lines(&mut diff, '-', &before.text);
+        append_prefixed_lines(&mut diff, '+', &after.text);
+    }
+
+    if before.text_truncated || after.text_truncated {
+        diff.push_str("\n[file content preview truncated]\n");
+    }
+    diff
+}
+
+fn diff_changed_files(before: &WatchedSnapshot, after: &WatchedSnapshot) -> Vec<FileDiffEntry> {
+    let mut paths: Vec<String> = before
+        .files
+        .keys()
+        .chain(after.files.keys())
+        .cloned()
+        .collect();
+    paths.sort();
+    paths.dedup();
+
+    let mut changed: Vec<FileDiffEntry> = Vec::new();
+    for path in paths {
+        if let Some(entry) = build_entry_from_states(
+            &path,
+            before.files.get(&path),
+            after.files.get(&path),
+        ) {
+            changed.push(entry);
+        }
+    }
+    if changed.len() > MAX_DIFF_FILES {
+        changed.truncate(MAX_DIFF_FILES);
+    }
+    changed
+}
+
+fn update_session_changed_files(
+    session: &mut Session,
+    before: &WatchedSnapshot,
+    after: &WatchedSnapshot,
+) {
+    let mut paths: Vec<String> = before
+        .files
+        .keys()
+        .chain(after.files.keys())
+        .cloned()
+        .collect();
+    paths.sort();
+    paths.dedup();
+
+    for path in paths {
+        session
+            .baseline_files
+            .entry(path.clone())
+            .or_insert_with(|| before.files.get(&path).cloned());
+        let baseline = session
+            .baseline_files
+            .get(&path)
+            .and_then(|value| value.as_ref());
+        let current = after.files.get(&path);
+
+        if let Some(entry) = build_entry_from_states(&path, baseline, current) {
+            session.changed_files.insert(path.clone(), entry);
+        } else {
+            session.changed_files.remove(&path);
+        }
+    }
 }
 
 fn is_local_destructive_tool(tool_name: &str) -> bool {
