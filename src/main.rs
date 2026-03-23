@@ -19,7 +19,7 @@ use crossterm::{
 use devtools::DevtoolsBridge;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 use state::{
     AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, Mode, SessionFlow,
@@ -1960,127 +1960,94 @@ fn draw_ui(
         }
     }
 
-    if show_guide {
-        status_lines.push(Line::from(""));
-        status_lines.push(Line::from(Span::styled(
-            "  What to do next?",
-            Style::default()
-                .fg(palette.title_fg)
-                .add_modifier(Modifier::BOLD),
-        )));
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "  1. ",
-                Style::default()
-                    .fg(palette.title_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Open connector settings: ",
-                Style::default().fg(palette.primary_fg),
-            ),
-            Span::styled(
-                "https://chatgpt.com/apps#settings/Connectors",
-                Style::default()
-                    .fg(palette.info_fg)
-                    .add_modifier(Modifier::UNDERLINED),
-            ),
-        ]));
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "  2. ",
-                Style::default()
-                    .fg(palette.title_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Click ", Style::default().fg(palette.primary_fg)),
-            Span::styled(
-                "Create app",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "  3. ",
-                Style::default()
-                    .fg(palette.title_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Fill in the form:", Style::default().fg(palette.primary_fg)),
-        ]));
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "       Name:           ",
+    let guide_lines = if show_guide {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    "1. ",
+                    Style::default()
+                        .fg(palette.title_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Open connector settings:",
+                    Style::default().fg(palette.primary_fg),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("   ", Style::default().fg(palette.primary_fg)),
+                Span::styled(
+                    "https://chatgpt.com/apps#settings/Connectors",
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "2. ",
+                    Style::default()
+                        .fg(palette.title_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Click ", Style::default().fg(palette.primary_fg)),
+                Span::styled(
+                    "Create app",
+                    Style::default()
+                        .fg(palette.primary_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "3. ",
+                    Style::default()
+                        .fg(palette.title_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Fill in the form:", Style::default().fg(palette.primary_fg)),
+            ]),
+            Line::from(vec![Span::styled(
+                "   Name: MCP3000 (or any name you like)",
                 Style::default().fg(palette.muted_fg),
-            ),
-            Span::styled(
-                "MCP3000",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "  (or any name you like)",
-                Style::default().fg(palette.muted_fg),
-            ),
-        ]));
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "       MCP Server URL: ",
-                Style::default().fg(palette.muted_fg),
-            ),
-            Span::styled(
-                &mcp_url,
+            )]),
+            Line::from(vec![Span::styled(
+                format!("   MCP Server URL: {mcp_url}"),
                 Style::default()
                     .fg(palette.info_fg)
                     .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "       Authentication: ",
+            )]),
+            Line::from(vec![Span::styled(
+                "   Authentication: None",
                 Style::default().fg(palette.muted_fg),
-            ),
-            Span::styled(
-                "None",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "  4. ",
-                Style::default()
-                    .fg(palette.title_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Click ", Style::default().fg(palette.primary_fg)),
-            Span::styled(
-                "\"I understand and want to continue\"",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "  5. ",
-                Style::default()
-                    .fg(palette.title_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Click ", Style::default().fg(palette.primary_fg)),
-            Span::styled(
-                "Create",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+            )]),
+            Line::from(vec![
+                Span::styled(
+                    "4. ",
+                    Style::default()
+                        .fg(palette.title_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Click \"I understand and want to continue\"",
+                    Style::default().fg(palette.primary_fg),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "5. ",
+                    Style::default()
+                        .fg(palette.title_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Click Create", Style::default().fg(palette.primary_fg)),
+            ]),
+        ]
     } else {
+        Vec::new()
+    };
+
+    if !show_guide {
         status_lines.push(Line::from(""));
         status_lines.push(Line::from(vec![
             Span::styled("  Workspace: ", Style::default().fg(palette.muted_fg)),
@@ -2103,14 +2070,55 @@ fn draw_ui(
         ]));
     }
 
-    let status = Paragraph::new(status_lines).block(
-        Block::default()
-            .title(" Status ")
-            .borders(Borders::ALL)
-            .border_type(palette.border_type)
-            .border_style(Style::default().fg(palette.border_fg)),
-    );
-    f.render_widget(status, chunks[1]);
+    let status_block = Block::default()
+        .title(" Status ")
+        .borders(Borders::ALL)
+        .border_type(palette.border_type)
+        .border_style(Style::default().fg(palette.border_fg));
+    let status_inner = status_block.inner(chunks[1]);
+    f.render_widget(status_block, chunks[1]);
+
+    if show_guide {
+        let top_height = (status_lines.len() as u16).min(status_inner.height.saturating_sub(1));
+        let guide_height = (guide_lines.len() as u16 + 2)
+            .min(status_inner.height.saturating_sub(top_height));
+        let status_parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(top_height),
+                Constraint::Length(guide_height),
+                Constraint::Min(0),
+            ])
+            .split(status_inner);
+
+        let status_summary = Paragraph::new(status_lines);
+        f.render_widget(status_summary, status_parts[0]);
+
+        let guide_bg = if app.theme == "neon" {
+            Color::Rgb(48, 16, 54)
+        } else {
+            Color::Rgb(58, 72, 98)
+        };
+        let guide_panel = Paragraph::new(guide_lines)
+            .style(Style::default().bg(guide_bg))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(" What to do next? ")
+                    .borders(Borders::ALL)
+                    .border_type(palette.border_type)
+                    .border_style(
+                        Style::default()
+                            .fg(palette.info_fg)
+                            .bg(guide_bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            );
+        f.render_widget(guide_panel, status_parts[1]);
+    } else {
+        let status = Paragraph::new(status_lines);
+        f.render_widget(status, status_inner);
+    }
 
     // ── Keys ──
     let key_spans = vec![
