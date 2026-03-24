@@ -573,6 +573,20 @@
         }).join("") + "</div>";
       }
 
+      function autoScrollToFirstChange() {
+        var openFile = document.querySelector("details.file[open]");
+        if (!openFile) return;
+
+        var diff = openFile.querySelector(".diff");
+        if (!diff) return;
+
+        var firstChange = diff.querySelector(".dline.add, .dline.del");
+        if (!firstChange) return;
+
+        var targetTop = firstChange.offsetTop - Math.floor(diff.clientHeight * 0.35);
+        diff.scrollTop = targetTop > 0 ? targetTop : 0;
+      }
+
       function render() {
         var root = document.getElementById("root");
         if (!root) return;
@@ -628,6 +642,8 @@
             }
           });
         }
+
+        window.requestAnimationFrame(autoScrollToFirstChange);
       }
 
       function renderLoading(text) {
