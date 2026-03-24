@@ -540,7 +540,7 @@
 
       function renderFileBody(file) {
         if (isDirectoryFile(file)) {
-          return "<div class=\"dir-summary\">" + esc(directorySummaryText(file) + " (" + formatCounts(file) + ")") + "</div>";
+          return "<div class=\"dir-summary\">" + esc(directorySummaryText(file)) + "</div>";
         }
         return renderDiffLines(file.diff);
       }
@@ -549,6 +549,11 @@
         var statusText = prettyStatus(file.status);
         var plus = "+" + file.added;
         var minus = "-" + file.removed;
+        var isDirectory = isDirectoryFile(file);
+        var metaHtml = isDirectory
+          ? "<span class=\"status-label\">directory</span>"
+          : "<span class=\"status-label\">" + esc(statusText) + "</span>" +
+            "<span class=\"counts\"><span class=\"plus\">" + esc(plus) + "</span><span class=\"minus\">" + esc(minus) + "</span></span>";
         return (
           "<details class=\"file\"" + (openByDefault ? " open" : "") + ">" +
             "<summary>" +
@@ -557,8 +562,7 @@
                 "<span class=\"path\">" + esc(file.path) + "</span>" +
               "</span>" +
               "<span class=\"file-meta\">" +
-                "<span class=\"status-label\">" + esc(statusText) + "</span>" +
-                "<span class=\"counts\"><span class=\"plus\">" + esc(plus) + "</span><span class=\"minus\">" + esc(minus) + "</span></span>" +
+                metaHtml +
               "</span>" +
             "</summary>" +
             "<div class=\"diff-wrap\">" + renderFileBody(file) + "</div>" +
