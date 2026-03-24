@@ -287,10 +287,6 @@
         approvePrompt: "Approve these file changes and continue.",
         rejectPrompt: "Reject these file changes and ask for a safer revision."
       };
-      var INITIAL_RETRY_INTERVAL_MS = 50;
-      var INITIAL_RETRY_MAX_ATTEMPTS = 120;
-      var initRetryTimer = null;
-      var initResolved = false;
 
       function esc(value) {
         return String(value)
@@ -647,41 +643,9 @@
           "</section>";
       }
 
-      function stopInitialRetry() {
-        if (initRetryTimer) {
-          clearInterval(initRetryTimer);
-          initRetryTimer = null;
-        }
-      }
-
-      function resolveInitialization() {
-        initResolved = true;
-        stopInitialRetry();
-      }
-
       function currentToolOutput() {
         if (!window.openai) return null;
         return window.openai.toolOutput || null;
-      }
-
-      function startInitialRetry() {
-        if (initRetryTimer || initResolved) return;
-        var attempts = 0;
-        initRetryTimer = setInterval(function () {
-          if (initResolved) {
-            stopInitialRetry();
-            return;
-          }
-          attempts += 1;
-          var payload = currentToolOutput();
-          if (payload && applyPayload(payload)) {
-            resolveInitialization();
-            return;
-          }
-          if (attempts >= INITIAL_RETRY_MAX_ATTEMPTS) {
-            stopInitialRetry();
-          }
-        }, INITIAL_RETRY_INTERVAL_MS);
       }
 
       function applyPayload(payload) {
@@ -709,19 +673,24 @@
         var message = event.data;
         if (!message || typeof message !== "object") return;
         if (message.method === "ui/initialize" || message.method === "ui/notifications/tool-result") {
-          if (applyPayload(message.params || {})) {
-            resolveInitialization();
-          }
+          applyPayload(message.params || {});
         }
       });
 
+      window.addEventListener(
+        "openai:set_globals",
+        function (event) {
+          var toolOutput = event && event.detail && event.detail.globals
+            ? event.detail.globals.toolOutput
+            : window.openai && window.openai.toolOutput;
+          if (toolOutput) applyPayload(toolOutput);
+        },
+        { passive: true }
+      );
+
       renderLoading("Waiting for tool output...");
       var initialPayload = currentToolOutput();
-      if (initialPayload && applyPayload(initialPayload)) {
-        resolveInitialization();
-      } else {
-        startInitialRetry();
-      }
+      if (initialPayload) applyPayload(initialPayload);
     })();
   </script>
 </body>
