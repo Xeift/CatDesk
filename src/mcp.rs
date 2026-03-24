@@ -23,6 +23,8 @@ const MCP3000_WIDGET_HTML: &str = include_str!("widget/mcp3000_dashboard.html");
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
+const MAX_SEARCH_RESULTS_WIDGET: usize = 200;
+const MAX_SEARCH_LINE_CHARS: usize = 320;
 const MAX_WATCHED_FILES: usize = 512;
 const MAX_FILE_CAPTURE_BYTES: usize = 128 * 1024;
 const MAX_TEXT_CAPTURE_LINES: usize = 420;
@@ -103,6 +105,23 @@ struct FileDiffEntry {
     added: u64,
     removed: u64,
     diff: String,
+}
+
+#[derive(Clone, Default)]
+struct SearchResultEntry {
+    path: String,
+    line: u64,
+    text: String,
+}
+
+#[derive(Clone, Default)]
+struct SearchWidgetContent {
+    query: String,
+    path: String,
+    files_scanned: u64,
+    matches: u64,
+    results: Vec<SearchResultEntry>,
+    truncated: bool,
 }
 
 #[derive(Clone, Default)]
@@ -587,7 +606,7 @@ async fn handle_tools_call(
     if let Some(result) = response.result.take() {
         if has_turn_changes {
             response.result = Some(enrich_tool_result(req, result, Some(&widget_context)));
-        } else if tool_name == "run_command" {
+        } else if tool_name == "run_command" || tool_name == "search_text" {
             response.result = Some(enrich_tool_result(req, result, None));
         } else {
             response.result = Some(strip_widget_payload(result));
@@ -819,6 +838,7 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
     matches!(
         name,
         "run_command"
+            | "search_text"
             | "write_file"
             | "append_file"
             | "make_directory"
@@ -928,6 +948,91 @@ fn file_entry_json(file: &FileDiffEntry) -> Value {
     })
 }
 
+fn search_result_entry_json(entry: &SearchResultEntry) -> Value {
+    json!({
+        "path": entry.path,
+        "line": entry.line,
+        "text": entry.text,
+    })
+}
+
+fn parse_search_match_line(line: &str) -> Option<SearchResultEntry> {
+    let mut parts = line.splitn(3, ':');
+    let path = parts.next()?.trim();
+    let line_no = parts.next()?.trim().parse::<u64>().ok()?;
+    let text_raw = parts.next()?.trim_start();
+    if path.is_empty() {
+        return None;
+    }
+    Some(SearchResultEntry {
+        path: path.to_string(),
+        line: line_no,
+        text: truncate_for_widget(text_raw, MAX_SEARCH_LINE_CHARS),
+    })
+}
+
+fn parse_search_text_output(output: &str) -> SearchWidgetContent {
+    let normalized = output.replace("\r\n", "\n");
+    let mut lines: Vec<&str> = normalized.lines().collect();
+    let mut parsed = SearchWidgetContent::default();
+
+    let query_line = lines.first().copied().unwrap_or_default();
+    if let Some(value) = query_line.strip_prefix("query: ") {
+        parsed.query = value.trim().to_string();
+    }
+
+    let path_line = lines.get(1).copied().unwrap_or_default();
+    if let Some(value) = path_line.strip_prefix("path: ") {
+        parsed.path = value.trim().to_string();
+    }
+
+    let files_line = lines.get(2).copied().unwrap_or_default();
+    if let Some(value) = files_line.strip_prefix("files_scanned: ") {
+        parsed.files_scanned = value.trim().parse::<u64>().unwrap_or(0);
+    }
+
+    let matches_line = lines.get(3).copied().unwrap_or_default();
+    if let Some(value) = matches_line.strip_prefix("matches: ") {
+        parsed.matches = value.trim().parse::<u64>().unwrap_or(0);
+    }
+
+    if lines.len() <= 4 {
+        return parsed;
+    }
+
+    lines.drain(0..4);
+    while lines.first().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        lines.remove(0);
+    }
+    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    if let Some(last) = lines.last().copied() {
+        if last.starts_with("[truncated at ") && last.ends_with(" matches]") {
+            parsed.truncated = true;
+            lines.pop();
+            while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+                lines.pop();
+            }
+        }
+    }
+
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if parsed.results.len() >= MAX_SEARCH_RESULTS_WIDGET {
+            parsed.truncated = true;
+            break;
+        }
+        if let Some(entry) = parse_search_match_line(line) {
+            parsed.results.push(entry);
+        }
+    }
+
+    parsed
+}
+
 fn build_auto_widget_structured_content(
     req: &JsonRpcRequest,
     result: &Value,
@@ -974,6 +1079,34 @@ fn build_auto_widget_structured_content(
             "output": output_text,
             "changedFiles": changed_files,
             "hasChanges": has_changes
+        });
+    }
+
+    if tool_name == "search_text" {
+        let arguments = tool_arguments(req);
+        let query_arg = arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let path_arg = arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or(".");
+        let parsed = parse_search_text_output(&extract_tool_result_text(result));
+        return json!({
+            "schema": "mcp3000.review.v1",
+            "panelMode": "tool_call",
+            "title": "Search Results",
+            "state": if is_error { "failed" } else { "done" },
+            "toolName": "search_text",
+            "searchQuery": if parsed.query.is_empty() { query_arg } else { parsed.query.as_str() },
+            "searchPath": if parsed.path.is_empty() { path_arg } else { parsed.path.as_str() },
+            "filesScanned": parsed.files_scanned,
+            "matchCount": parsed.matches,
+            "searchTruncated": parsed.truncated,
+            "searchResults": parsed.results.iter().map(search_result_entry_json).collect::<Vec<_>>(),
+            "changedFiles": [],
+            "hasChanges": false
         });
     }
 

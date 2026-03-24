@@ -272,6 +272,64 @@
       word-break: break-word;
     }
 
+    .search-panel {
+      display: grid;
+      gap: 8px;
+      padding: 8px 12px 10px;
+    }
+
+    .search-summary {
+      display: grid;
+      gap: 4px;
+      color: #c6d6ef;
+      font-size: 12px;
+    }
+
+    .search-summary b {
+      color: #93a9cc;
+      font-weight: 600;
+    }
+
+    .search-results {
+      border: 0;
+      border-radius: 0;
+      background: #0a111b;
+      max-height: 260px;
+      overflow: auto;
+    }
+
+    .search-row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 2px;
+      padding: 6px 8px;
+      border-top: 1px solid #132035;
+    }
+
+    .search-row:first-child {
+      border-top: 0;
+    }
+
+    .search-loc {
+      color: #89a8d3;
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .search-line {
+      color: #d9e2f3;
+      font: 12px/1.45 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .search-note {
+      color: #9db1d1;
+      font-size: 11px;
+    }
+
     .actions {
       display: flex;
       gap: 8px;
@@ -313,6 +371,12 @@
         toolName: "",
         command: "",
         output: "",
+        searchQuery: "",
+        searchPath: "",
+        filesScanned: 0,
+        matchCount: 0,
+        searchResults: [],
+        searchTruncated: false,
         showApproval: false,
         approvePrompt: "Approve these file changes and continue.",
         rejectPrompt: "Reject these file changes and ask for a safer revision."
@@ -363,8 +427,22 @@
         };
       }
 
+      function normalizeSearchResult(entry) {
+        if (!entry || typeof entry !== "object") return null;
+        var path = asString(entry.path, "");
+        if (!path) return null;
+        var line = Number(entry.line);
+        return {
+          path: path,
+          line: Number.isFinite(line) && line > 0 ? Math.floor(line) : 0,
+          text: asString(entry.text, "")
+        };
+      }
+
       function normalize(data) {
         if (!data || typeof data !== "object") return null;
+        var filesScanned = Number(data.filesScanned);
+        var matchCount = Number(data.matchCount);
         var next = {
           schema: asString(data.schema, "mcp3000.review.v1"),
           panelMode: asString(data.panelMode, "tool_call"),
@@ -375,6 +453,12 @@
           toolName: asString(data.toolName, ""),
           command: asString(data.command, ""),
           output: asString(data.output, ""),
+          searchQuery: asString(data.searchQuery, ""),
+          searchPath: asString(data.searchPath, ""),
+          filesScanned: Number.isFinite(filesScanned) && filesScanned >= 0 ? Math.floor(filesScanned) : 0,
+          matchCount: Number.isFinite(matchCount) && matchCount >= 0 ? Math.floor(matchCount) : 0,
+          searchResults: [],
+          searchTruncated: asBool(data.searchTruncated, false),
           showApproval: false,
           approvePrompt: asString(data.approvePrompt, view.approvePrompt),
           rejectPrompt: asString(data.rejectPrompt, view.rejectPrompt)
@@ -384,6 +468,7 @@
         }
         next.changedFiles = asArray(data.changedFiles).map(normalizeFile).filter(Boolean);
         next.hasChanges = asBool(data.hasChanges, next.changedFiles.length > 0);
+        next.searchResults = asArray(data.searchResults).map(normalizeSearchResult).filter(Boolean);
         next.showApproval = asBool(data.showApproval, next.hasChanges);
 
         return next;
@@ -622,6 +707,42 @@
         );
       }
 
+      function renderSearchPanel(current) {
+        var summaryHtml =
+          "<div class=\"search-summary\">" +
+            "<div><b>query:</b> " + esc(current.searchQuery) + "</div>" +
+            "<div><b>path:</b> " + esc(current.searchPath) + "</div>" +
+            "<div><b>files:</b> " + esc(current.filesScanned) + " <b>matches:</b> " + esc(current.matchCount) + "</div>" +
+          "</div>";
+        var resultsHtml = "";
+        if (current.searchResults.length > 0) {
+          resultsHtml =
+            "<div class=\"search-results\">" +
+              current.searchResults.map(function (entry) {
+                var lineLabel = entry.line > 0 ? ":" + entry.line : "";
+                return (
+                  "<div class=\"search-row\">" +
+                    "<div class=\"search-loc\">" + esc(entry.path + lineLabel) + "</div>" +
+                    "<div class=\"search-line\">" + esc(entry.text) + "</div>" +
+                  "</div>"
+                );
+              }).join("") +
+            "</div>";
+        } else {
+          resultsHtml = "<div class=\"empty\">No matches found.</div>";
+        }
+        var truncatedHtml = current.searchTruncated
+          ? "<div class=\"search-note\">Results truncated by limit.</div>"
+          : "";
+        return (
+          "<div class=\"search-panel\">" +
+            summaryHtml +
+            resultsHtml +
+            truncatedHtml +
+          "</div>"
+        );
+      }
+
       function autoScrollToFirstChange() {
         var openFile = document.querySelector("details.file[open]");
         if (!openFile) return;
@@ -642,6 +763,7 @@
 
         var isFinal = view.panelMode === "final_review";
         var isRunCommand = view.panelMode === "tool_call" && view.toolName === "run_command";
+        var isSearchText = view.panelMode === "tool_call" && view.toolName === "search_text";
         var filesEmpty = isFinal ? "No pending changed files." : "No file changes in this tool call.";
         var filesOpenCount = view.changedFiles.length > 0 ? 1 : 0;
         var commandSectionHtml = "";
@@ -653,8 +775,17 @@
               "</div>" +
             "</section>";
         }
+        var searchSectionHtml = "";
+        if (isSearchText) {
+          searchSectionHtml =
+            "<section class=\"section\">" +
+              "<div class=\"section-body\">" +
+                renderSearchPanel(view) +
+              "</div>" +
+            "</section>";
+        }
         var filesSectionHtml = "";
-        if (!isRunCommand || view.hasChanges) {
+        if ((!isRunCommand && !isSearchText) || view.hasChanges) {
           filesSectionHtml =
             "<section class=\"section\">" +
               "<div class=\"section-body\">" +
@@ -679,6 +810,7 @@
         root.innerHTML =
           "<section class=\"root\">" +
             commandSectionHtml +
+            searchSectionHtml +
             filesSectionHtml +
             approvalHtml +
           "</section>";
@@ -743,7 +875,8 @@
         if (
           normalized.panelMode === "tool_call" &&
           !normalized.hasChanges &&
-          normalized.toolName !== "run_command"
+          normalized.toolName !== "run_command" &&
+          normalized.toolName !== "search_text"
         ) {
           root.innerHTML = "";
           return true;
