@@ -245,6 +245,33 @@
       padding: 18px 12px;
     }
 
+    .command-panel {
+      display: grid;
+      gap: 8px;
+      padding: 8px 12px 10px;
+    }
+
+    .command-line {
+      color: #d7e2f5;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .command-output {
+      margin: 0;
+      border: 0;
+      border-radius: 0;
+      background: #0a111b;
+      max-height: 260px;
+      overflow: auto;
+      padding: 8px;
+      color: #d9e2f3;
+      font: 12px/1.45 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .actions {
       display: flex;
       gap: 8px;
@@ -283,6 +310,9 @@
         state: "done",
         changedFiles: [],
         hasChanges: false,
+        toolName: "",
+        command: "",
+        output: "",
         showApproval: false,
         approvePrompt: "Approve these file changes and continue.",
         rejectPrompt: "Reject these file changes and ask for a safer revision."
@@ -342,6 +372,9 @@
           state: normalizeStatus(data.state, "done"),
           changedFiles: [],
           hasChanges: false,
+          toolName: asString(data.toolName, ""),
+          command: asString(data.command, ""),
+          output: asString(data.output, ""),
           showApproval: false,
           approvePrompt: asString(data.approvePrompt, view.approvePrompt),
           rejectPrompt: asString(data.rejectPrompt, view.rejectPrompt)
@@ -577,6 +610,18 @@
         }).join("") + "</div>";
       }
 
+      function renderCommandPanel(current) {
+        var commandLine = current.command
+          ? "<div class=\"command-line\">$ " + esc(current.command) + "</div>"
+          : "";
+        return (
+          "<div class=\"command-panel\">" +
+            commandLine +
+            "<pre class=\"command-output\">" + esc(current.output) + "</pre>" +
+          "</div>"
+        );
+      }
+
       function autoScrollToFirstChange() {
         var openFile = document.querySelector("details.file[open]");
         if (!openFile) return;
@@ -596,8 +641,27 @@
         if (!root) return;
 
         var isFinal = view.panelMode === "final_review";
+        var isRunCommand = view.panelMode === "tool_call" && view.toolName === "run_command";
         var filesEmpty = isFinal ? "No pending changed files." : "No file changes in this tool call.";
         var filesOpenCount = view.changedFiles.length > 0 ? 1 : 0;
+        var commandSectionHtml = "";
+        if (isRunCommand) {
+          commandSectionHtml =
+            "<section class=\"section\">" +
+              "<div class=\"section-body\">" +
+                renderCommandPanel(view) +
+              "</div>" +
+            "</section>";
+        }
+        var filesSectionHtml = "";
+        if (!isRunCommand || view.hasChanges) {
+          filesSectionHtml =
+            "<section class=\"section\">" +
+              "<div class=\"section-body\">" +
+                renderFileList(view.changedFiles, { emptyText: filesEmpty, openCount: filesOpenCount }) +
+              "</div>" +
+            "</section>";
+        }
         var approvalHtml = "";
         if (isFinal && view.showApproval) {
           approvalHtml =
@@ -614,11 +678,8 @@
 
         root.innerHTML =
           "<section class=\"root\">" +
-            "<section class=\"section\">" +
-              "<div class=\"section-body\">" +
-                renderFileList(view.changedFiles, { emptyText: filesEmpty, openCount: filesOpenCount }) +
-              "</div>" +
-            "</section>" +
+            commandSectionHtml +
+            filesSectionHtml +
             approvalHtml +
           "</section>";
 
@@ -679,7 +740,11 @@
         if (!normalized) {
           return false;
         }
-        if (normalized.panelMode === "tool_call" && !normalized.hasChanges) {
+        if (
+          normalized.panelMode === "tool_call" &&
+          !normalized.hasChanges &&
+          normalized.toolName !== "run_command"
+        ) {
           root.innerHTML = "";
           return true;
         }

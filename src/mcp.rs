@@ -22,6 +22,7 @@ const RENDER_WIDGET_TOOL: &str = "render_mcp3000_widget";
 const MCP3000_WIDGET_HTML: &str = include_str!("widget/mcp3000_dashboard.html");
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
+const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
 const MAX_WATCHED_FILES: usize = 512;
 const MAX_FILE_CAPTURE_BYTES: usize = 128 * 1024;
 const MAX_TEXT_CAPTURE_LINES: usize = 420;
@@ -582,9 +583,12 @@ async fn handle_tools_call(
         turn_files,
     };
 
+    let tool_name = tool_name_from_request(req);
     if let Some(result) = response.result.take() {
         if has_turn_changes {
             response.result = Some(enrich_tool_result(req, result, Some(&widget_context)));
+        } else if tool_name == "run_command" {
+            response.result = Some(enrich_tool_result(req, result, None));
         } else {
             response.result = Some(strip_widget_payload(result));
         }
@@ -814,7 +818,8 @@ fn ensure_output_template_meta(meta_value: &mut Value) {
 fn tool_descriptor_should_attach_widget(name: &str) -> bool {
     matches!(
         name,
-        "write_file"
+        "run_command"
+            | "write_file"
             | "append_file"
             | "make_directory"
             | "move_path"
@@ -933,6 +938,45 @@ fn build_auto_widget_structured_content(
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    if tool_name == "run_command" {
+        let arguments = tool_arguments(req);
+        let command_text = arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let output_text = truncate_for_widget(
+            &extract_tool_result_text(result),
+            MAX_COMMAND_OUTPUT_CHARS,
+        );
+        let (state, changed_files, has_changes) = if let Some(ctx) = widget_context {
+            (
+                if ctx.is_error {
+                    "failed"
+                } else if ctx.turn_files.is_empty() {
+                    "done"
+                } else {
+                    "changed"
+                },
+                ctx.turn_files.iter().map(file_entry_json).collect::<Vec<_>>(),
+                !ctx.turn_files.is_empty(),
+            )
+        } else {
+            (if is_error { "failed" } else { "done" }, Vec::new(), false)
+        };
+        return json!({
+            "schema": "mcp3000.review.v1",
+            "panelMode": "tool_call",
+            "title": "Command Output",
+            "state": state,
+            "toolName": "run_command",
+            "command": command_text,
+            "output": output_text,
+            "changedFiles": changed_files,
+            "hasChanges": has_changes
+        });
+    }
+
     let line = summarize_tool_detail(&extract_tool_result_text(result), is_error);
     if let Some(ctx) = widget_context {
         let state = if ctx.is_error {
