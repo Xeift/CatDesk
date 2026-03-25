@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tiktoken_rs::o200k_base_singleton;
 use uuid::Uuid;
 
 use crate::command;
@@ -606,11 +607,18 @@ async fn handle_tools_call(
     if let Some(result) = response.result.take() {
         if has_turn_changes {
             response.result = Some(enrich_tool_result(req, result, Some(&widget_context)));
-        } else if tool_name == "run_command" || tool_name == "search_text" {
-            response.result = Some(enrich_tool_result(req, result, None));
         } else {
-            response.result = Some(strip_widget_payload(result));
+            response.result = Some(enrich_tool_result(req, result, None));
         }
+    }
+
+    if let Some(result) = response.result.as_mut() {
+        let input_payload = build_turn_token_payload(req, &tool_name);
+        let input_tokens = estimate_value_tokens_o200k(&input_payload);
+        let output_payload = sanitize_result_for_turn_token_count(result);
+        let output_tokens = estimate_value_tokens_o200k(&output_payload);
+        let turn_total_tokens = input_tokens.saturating_add(output_tokens);
+        attach_turn_token_usage(result, input_tokens, output_tokens, turn_total_tokens);
     }
 
     response
@@ -766,7 +774,7 @@ fn handle_render_widget(req: &JsonRpcRequest) -> JsonRpcResponse {
         "rejectPrompt": reject_prompt,
     });
 
-    let result = enrich_tool_result(
+    let mut result = enrich_tool_result(
         req,
         json!({
             "structuredContent": structured,
@@ -777,6 +785,12 @@ fn handle_render_widget(req: &JsonRpcRequest) -> JsonRpcResponse {
         }),
         None,
     );
+    let input_payload = build_turn_token_payload(req, RENDER_WIDGET_TOOL);
+    let input_tokens = estimate_value_tokens_o200k(&input_payload);
+    let output_payload = sanitize_result_for_turn_token_count(&result);
+    let output_tokens = estimate_value_tokens_o200k(&output_payload);
+    let turn_total_tokens = input_tokens.saturating_add(output_tokens);
+    attach_turn_token_usage(&mut result, input_tokens, output_tokens, turn_total_tokens);
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
@@ -807,6 +821,62 @@ fn tool_name_from_request(req: &JsonRpcRequest) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("unknown_tool")
         .to_string()
+}
+
+fn build_turn_token_payload(req: &JsonRpcRequest, tool_name: &str) -> Value {
+    json!({
+        "name": tool_name,
+        "arguments": tool_arguments(req),
+    })
+}
+
+fn estimate_tokens_o200k(text: &str) -> u64 {
+    o200k_base_singleton()
+        .encode_with_special_tokens(text)
+        .len()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn estimate_value_tokens_o200k(value: &Value) -> u64 {
+    match serde_json::to_string(value) {
+        Ok(serialized) => estimate_tokens_o200k(&serialized),
+        Err(_) => 0,
+    }
+}
+
+fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
+    let mut sanitized = result.clone();
+    let Some(obj) = sanitized.as_object_mut() else {
+        return sanitized;
+    };
+    obj.remove("_meta");
+    if let Some(structured) = obj.get_mut("structuredContent").and_then(Value::as_object_mut) {
+        structured.remove("turnTokenUsage");
+    }
+    sanitized
+}
+
+fn attach_turn_token_usage(
+    result: &mut Value,
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+) {
+    let Some(obj) = result.as_object_mut() else {
+        return;
+    };
+    let Some(structured) = obj.get_mut("structuredContent").and_then(Value::as_object_mut) else {
+        return;
+    };
+    structured.insert(
+        "turnTokenUsage".to_string(),
+        json!({
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": total_tokens,
+        }),
+    );
 }
 
 fn ensure_output_template_meta(meta_value: &mut Value) {
@@ -1173,26 +1243,6 @@ fn enrich_tool_result(
         ensure_output_template_meta(meta_value);
         if let Some(structured) = structured {
             result_obj.insert("structuredContent".to_string(), structured);
-        }
-    }
-    result
-}
-
-fn strip_widget_payload(mut result: Value) -> Value {
-    let Some(result_obj) = result.as_object_mut() else {
-        return result;
-    };
-    result_obj.remove("structuredContent");
-    if let Some(meta) = result_obj.get_mut("_meta").and_then(Value::as_object_mut) {
-        meta.remove("openai/outputTemplate");
-        if let Some(ui_obj) = meta.get_mut("ui").and_then(Value::as_object_mut) {
-            ui_obj.remove("resourceUri");
-            if ui_obj.is_empty() {
-                meta.remove("ui");
-            }
-        }
-        if meta.is_empty() {
-            result_obj.remove("_meta");
         }
     }
     result

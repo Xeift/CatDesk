@@ -330,6 +330,55 @@
       font-size: 11px;
     }
 
+    .files-token-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(120px, 156px);
+      gap: 6px;
+      align-items: stretch;
+    }
+
+    .main-stack {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .token-side {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0e1622;
+      padding: 6px 8px;
+      display: grid;
+      align-content: start;
+      gap: 3px;
+    }
+
+    .token-side-title {
+      color: #b9cdf1;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .token-line {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 6px;
+      color: #d8e3f6;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .token-key {
+      color: #9db1d1;
+    }
+
+    @media (max-width: 520px) {
+      .files-token-row {
+        grid-template-columns: 1fr;
+      }
+    }
+
     .actions {
       display: flex;
       gap: 8px;
@@ -377,6 +426,11 @@
         matchCount: 0,
         searchResults: [],
         searchTruncated: false,
+        turnTokenUsage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0
+        },
         showApproval: false,
         approvePrompt: "Approve these file changes and continue.",
         rejectPrompt: "Reject these file changes and ask for a safer revision."
@@ -439,6 +493,17 @@
         };
       }
 
+      function normalizeTurnTokenUsage(entry) {
+        var inputTokens = Number(entry && entry.inputTokens);
+        var outputTokens = Number(entry && entry.outputTokens);
+        var totalTokens = Number(entry && entry.totalTokens);
+        return {
+          inputTokens: Number.isFinite(inputTokens) && inputTokens >= 0 ? Math.floor(inputTokens) : 0,
+          outputTokens: Number.isFinite(outputTokens) && outputTokens >= 0 ? Math.floor(outputTokens) : 0,
+          totalTokens: Number.isFinite(totalTokens) && totalTokens >= 0 ? Math.floor(totalTokens) : 0
+        };
+      }
+
       function normalize(data) {
         if (!data || typeof data !== "object") return null;
         var filesScanned = Number(data.filesScanned);
@@ -459,6 +524,7 @@
           matchCount: Number.isFinite(matchCount) && matchCount >= 0 ? Math.floor(matchCount) : 0,
           searchResults: [],
           searchTruncated: asBool(data.searchTruncated, false),
+          turnTokenUsage: normalizeTurnTokenUsage(data.turnTokenUsage),
           showApproval: false,
           approvePrompt: asString(data.approvePrompt, view.approvePrompt),
           rejectPrompt: asString(data.rejectPrompt, view.rejectPrompt)
@@ -743,6 +809,20 @@
         );
       }
 
+      function renderTurnToken(current) {
+        if (!current) return "";
+        var usage = current.turnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+        if (!Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) return "";
+        return (
+          "<div class=\"token-side\">" +
+            "<div class=\"token-side-title\">Token Usage</div>" +
+            "<div class=\"token-line\"><span class=\"token-key\">Input</span><span>" + esc(usage.inputTokens) + "</span></div>" +
+            "<div class=\"token-line\"><span class=\"token-key\">Output</span><span>" + esc(usage.outputTokens) + "</span></div>" +
+            "<div class=\"token-line\"><span class=\"token-key\">Total</span><span>" + esc(usage.totalTokens) + "</span></div>" +
+          "</div>"
+        );
+      }
+
       function autoScrollToFirstChange() {
         var openFile = document.querySelector("details.file[open]");
         if (!openFile) return;
@@ -793,6 +873,20 @@
               "</div>" +
             "</section>";
         }
+        var tokenPanelHtml = renderTurnToken(view);
+        var mainContentHtml = commandSectionHtml + searchSectionHtml + filesSectionHtml;
+        var contentRowHtml = "";
+        if (mainContentHtml && tokenPanelHtml) {
+          contentRowHtml =
+            "<div class=\"files-token-row\">" +
+              "<div class=\"main-stack\">" + mainContentHtml + "</div>" +
+              tokenPanelHtml +
+            "</div>";
+        } else if (mainContentHtml) {
+          contentRowHtml = mainContentHtml;
+        } else if (tokenPanelHtml) {
+          contentRowHtml = tokenPanelHtml;
+        }
         var approvalHtml = "";
         if (isFinal && view.showApproval) {
           approvalHtml =
@@ -809,9 +903,7 @@
 
         root.innerHTML =
           "<section class=\"root\">" +
-            commandSectionHtml +
-            searchSectionHtml +
-            filesSectionHtml +
+            contentRowHtml +
             approvalHtml +
           "</section>";
 
@@ -876,7 +968,8 @@
           normalized.panelMode === "tool_call" &&
           !normalized.hasChanges &&
           normalized.toolName !== "run_command" &&
-          normalized.toolName !== "search_text"
+          normalized.toolName !== "search_text" &&
+          normalized.turnTokenUsage.totalTokens <= 0
         ) {
           root.innerHTML = "";
           return true;
