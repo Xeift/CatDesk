@@ -332,7 +332,7 @@
 
     .files-token-row {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(120px, 156px);
+      grid-template-columns: minmax(0, 1fr) minmax(96px, 124px);
       gap: 6px;
       align-items: stretch;
     }
@@ -353,24 +353,40 @@
       gap: 3px;
     }
 
-    .token-side-title {
-      color: #b9cdf1;
-      font-size: 10px;
-      font-weight: 700;
-    }
-
     .token-line {
       display: flex;
       align-items: baseline;
       justify-content: space-between;
       gap: 6px;
       color: #d8e3f6;
-      font-size: 10px;
+      font-size: 12px;
       font-variant-numeric: tabular-nums;
     }
 
     .token-key {
       color: #9db1d1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 13px;
+      line-height: 1;
+    }
+
+    .token-icon {
+      width: 13px;
+      height: 13px;
+      display: block;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .token-icon-price {
+      stroke-width: 12;
+      stroke-linecap: round;
+      stroke-linejoin: round;
     }
 
     @media (max-width: 520px) {
@@ -809,16 +825,68 @@
         );
       }
 
+      var GPT54_INPUT_USD_PER_1M = 2.5;
+      var GPT54_OUTPUT_USD_PER_1M = 15.0;
+
+      function estimateGpt54TurnCostUsd(usage) {
+        if (!usage) return 0;
+        var input = Number(usage.inputTokens);
+        var output = Number(usage.outputTokens);
+        if (!Number.isFinite(input) || input < 0) input = 0;
+        if (!Number.isFinite(output) || output < 0) output = 0;
+        return (input * GPT54_INPUT_USD_PER_1M + output * GPT54_OUTPUT_USD_PER_1M) / 1000000;
+      }
+
+      function formatUsdCompact(usd) {
+        if (!Number.isFinite(usd) || usd <= 0) return "0";
+        if (usd >= 1) return usd.toFixed(4).replace(/\.?0+$/, "");
+        if (usd >= 0.01) return usd.toFixed(5).replace(/\.?0+$/, "");
+        return usd.toFixed(6).replace(/\.?0+$/, "");
+      }
+
+      function tokenKeySvg(kind) {
+        if (kind === "input") {
+          return (
+            "<svg class=\"token-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M8 2v9\"></path>" +
+              "<path d=\"M5 8.5 8 11.5 11 8.5\"></path>" +
+            "</svg>"
+          );
+        }
+        if (kind === "output") {
+          return (
+            "<svg class=\"token-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M8 14V5\"></path>" +
+              "<path d=\"M5 7.5 8 4.5 11 7.5\"></path>" +
+            "</svg>"
+          );
+        }
+        if (kind === "total") {
+          return (
+            "<svg class=\"token-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M12 3H4l4 5-4 5h8\"></path>" +
+            "</svg>"
+          );
+        }
+        return (
+          "<svg class=\"token-icon token-icon-price\" viewBox=\"0 0 100 100\" aria-hidden=\"true\" focusable=\"false\">" +
+            "<line x1=\"50\" y1=\"10\" x2=\"50\" y2=\"90\"></line>" +
+            "<path d=\"M 70 30 C 70 10, 30 10, 30 30 C 30 50, 70 50, 70 70 C 70 90, 30 90, 30 70\"></path>" +
+          "</svg>"
+        );
+      }
+
       function renderTurnToken(current) {
         if (!current) return "";
         var usage = current.turnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
         if (!Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) return "";
+        var estimatedUsd = estimateGpt54TurnCostUsd(usage);
         return (
           "<div class=\"token-side\">" +
-            "<div class=\"token-side-title\">Token Usage</div>" +
-            "<div class=\"token-line\"><span class=\"token-key\">Input</span><span>" + esc(usage.inputTokens) + "</span></div>" +
-            "<div class=\"token-line\"><span class=\"token-key\">Output</span><span>" + esc(usage.outputTokens) + "</span></div>" +
-            "<div class=\"token-line\"><span class=\"token-key\">Total</span><span>" + esc(usage.totalTokens) + "</span></div>" +
+            "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("input") + "</span><span>" + esc(usage.inputTokens) + "</span></div>" +
+            "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("output") + "</span><span>" + esc(usage.outputTokens) + "</span></div>" +
+            "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("total") + "</span><span>" + esc(usage.totalTokens) + "</span></div>" +
+            "<div class=\"token-line token-price\"><span class=\"token-key\">" + tokenKeySvg("price") + "</span><span>" + esc(formatUsdCompact(estimatedUsd)) + "</span></div>" +
           "</div>"
         );
       }
