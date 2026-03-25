@@ -86,6 +86,7 @@ pub struct Session {
     pub initialized: bool,
     changed_files: HashMap<String, FileDiffEntry>,
     baseline_files: HashMap<String, Option<FileSnapshot>>,
+    pending_turn_token_usage: TokenUsage,
 }
 
 impl Session {
@@ -95,7 +96,31 @@ impl Session {
             initialized: false,
             changed_files: HashMap::new(),
             baseline_files: HashMap::new(),
+            pending_turn_token_usage: TokenUsage::default(),
         }
+    }
+}
+
+#[derive(Clone, Default)]
+struct TokenUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+}
+
+impl TokenUsage {
+    fn from_counts(input_tokens: u64, output_tokens: u64) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+        }
+    }
+
+    fn accumulate(&mut self, other: &Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.total_tokens = self.input_tokens.saturating_add(self.output_tokens);
     }
 }
 
@@ -506,7 +531,7 @@ async fn handle_tools_call(
         .to_string();
 
     if tool_name == RENDER_FINAL_SUMMARY_WIDGET_TOOL {
-        return handle_render_final_summary_widget(req);
+        return handle_render_final_summary_widget(req, session);
     }
 
     let watch_targets = collect_watch_targets(req, workspace_root);
@@ -613,12 +638,11 @@ async fn handle_tools_call(
     }
 
     if let Some(result) = response.result.as_mut() {
-        let input_payload = build_turn_token_payload(req, &tool_name);
-        let input_tokens = estimate_value_tokens_o200k(&input_payload);
-        let output_payload = sanitize_result_for_turn_token_count(result);
-        let output_tokens = estimate_value_tokens_o200k(&output_payload);
-        let turn_total_tokens = input_tokens.saturating_add(output_tokens);
-        attach_turn_token_usage(result, input_tokens, output_tokens, turn_total_tokens);
+        let turn_token_usage = estimate_turn_token_usage(req, &tool_name, result);
+        session
+            .pending_turn_token_usage
+            .accumulate(&turn_token_usage);
+        attach_turn_token_usage(result, &turn_token_usage);
     }
 
     response
@@ -717,7 +741,10 @@ fn tool_success_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse 
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
-fn handle_render_final_summary_widget(req: &JsonRpcRequest) -> JsonRpcResponse {
+fn handle_render_final_summary_widget(
+    req: &JsonRpcRequest,
+    session: &mut Session,
+) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let title = arguments
         .get("title")
@@ -785,12 +812,9 @@ fn handle_render_final_summary_widget(req: &JsonRpcRequest) -> JsonRpcResponse {
         }),
         None,
     );
-    let input_payload = build_turn_token_payload(req, RENDER_FINAL_SUMMARY_WIDGET_TOOL);
-    let input_tokens = estimate_value_tokens_o200k(&input_payload);
-    let output_payload = sanitize_result_for_turn_token_count(&result);
-    let output_tokens = estimate_value_tokens_o200k(&output_payload);
-    let turn_total_tokens = input_tokens.saturating_add(output_tokens);
-    attach_turn_token_usage(&mut result, input_tokens, output_tokens, turn_total_tokens);
+    let turn_token_usage = session.pending_turn_token_usage.clone();
+    attach_turn_token_usage(&mut result, &turn_token_usage);
+    session.pending_turn_token_usage = TokenUsage::default();
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
@@ -845,6 +869,14 @@ fn estimate_value_tokens_o200k(value: &Value) -> u64 {
     }
 }
 
+fn estimate_turn_token_usage(req: &JsonRpcRequest, tool_name: &str, result: &Value) -> TokenUsage {
+    let input_payload = build_turn_token_payload(req, tool_name);
+    let input_tokens = estimate_value_tokens_o200k(&input_payload);
+    let output_payload = sanitize_result_for_turn_token_count(result);
+    let output_tokens = estimate_value_tokens_o200k(&output_payload);
+    TokenUsage::from_counts(input_tokens, output_tokens)
+}
+
 fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
     let mut sanitized = result.clone();
     let Some(obj) = sanitized.as_object_mut() else {
@@ -857,12 +889,7 @@ fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
     sanitized
 }
 
-fn attach_turn_token_usage(
-    result: &mut Value,
-    input_tokens: u64,
-    output_tokens: u64,
-    total_tokens: u64,
-) {
+fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
     let Some(obj) = result.as_object_mut() else {
         return;
     };
@@ -872,9 +899,9 @@ fn attach_turn_token_usage(
     structured.insert(
         "turnTokenUsage".to_string(),
         json!({
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-            "totalTokens": total_tokens,
+            "inputTokens": usage.input_tokens,
+            "outputTokens": usage.output_tokens,
+            "totalTokens": usage.total_tokens,
         }),
     );
 }
@@ -1973,5 +2000,48 @@ fn handle_replace_in_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpc
     match workspace_tools::replace_in_file(workspace_root, path, find, replace, replace_all) {
         Ok(text) => tool_success_response(req, text),
         Err(e) => tool_error_response(req, e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render_final_summary_request(arguments: Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-1")),
+            method: "tools/call".into(),
+            params: json!({
+                "name": RENDER_FINAL_SUMMARY_WIDGET_TOOL,
+                "arguments": arguments,
+            }),
+        }
+    }
+
+    #[test]
+    fn final_summary_uses_accumulated_token_usage_and_resets_session_state() {
+        let req = render_final_summary_request(json!({
+            "title": "Summary",
+            "changedFiles": [],
+        }));
+        let mut session = Session::new();
+        session.pending_turn_token_usage = TokenUsage::from_counts(123, 45);
+
+        let resp = handle_render_final_summary_widget(&req, &mut session);
+        let usage = resp
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .and_then(|structured| structured.get("turnTokenUsage"))
+            .cloned()
+            .expect("missing turnTokenUsage");
+
+        assert_eq!(usage.get("inputTokens").and_then(Value::as_u64), Some(123));
+        assert_eq!(usage.get("outputTokens").and_then(Value::as_u64), Some(45));
+        assert_eq!(usage.get("totalTokens").and_then(Value::as_u64), Some(168));
+        assert_eq!(session.pending_turn_token_usage.input_tokens, 0);
+        assert_eq!(session.pending_turn_token_usage.output_tokens, 0);
+        assert_eq!(session.pending_turn_token_usage.total_tokens, 0);
     }
 }
