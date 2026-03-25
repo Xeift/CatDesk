@@ -447,6 +447,7 @@
           outputTokens: 0,
           totalTokens: 0
         },
+        toolCallCount: 0,
         showApproval: false,
         approvePrompt: "Approve these file changes and continue.",
         rejectPrompt: "Reject these file changes and ask for a safer revision."
@@ -524,6 +525,7 @@
         if (!data || typeof data !== "object") return null;
         var filesScanned = Number(data.filesScanned);
         var matchCount = Number(data.matchCount);
+        var toolCallCount = Number(data.toolCallCount);
         var next = {
           schema: asString(data.schema, "mcp3000.review.v1"),
           panelMode: asString(data.panelMode, "tool_call"),
@@ -541,6 +543,7 @@
           searchResults: [],
           searchTruncated: asBool(data.searchTruncated, false),
           turnTokenUsage: normalizeTurnTokenUsage(data.turnTokenUsage),
+          toolCallCount: Number.isFinite(toolCallCount) && toolCallCount >= 0 ? Math.floor(toolCallCount) : 0,
           showApproval: false,
           approvePrompt: asString(data.approvePrompt, view.approvePrompt),
           rejectPrompt: asString(data.rejectPrompt, view.rejectPrompt)
@@ -868,6 +871,13 @@
             "</svg>"
           );
         }
+        if (kind === "calls") {
+          return (
+            "<svg class=\"token-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path fill=\"currentColor\" stroke=\"currentColor\" stroke-width=\"8\" stroke-linejoin=\"round\" paint-order=\"stroke fill\" transform=\"matrix(0.07 0 0 0.07 -8.6 -5.0)\" d=\"m 253.26173,85.195312 c -6.6211,10e-7 -12.59767,1.728516 -17.92969,5.185547 -5.27344,3.398438 -9.19922,7.880862 -11.77735,13.447261 -2.57812,5.56641 -3.86718,12.36328 -3.86718,20.39063 v 5.27344 h -15.64453 v 6.32812 h 15.64453 v 52.91016 29.44336 c 0,8.49609 -0.32226,14.0332 -0.9668,16.61133 -1.17187,4.74609 -3.54492,7.11914 -7.11914,7.11914 -1.875,0 -4.24804,-1.28906 -7.11914,-3.86719 -2.63672,-2.40235 -4.57031,-3.86719 -5.80078,-4.39453 -1.69922,-0.76172 -3.25197,-1.14258 -4.65821,-1.14258 -1.99219,0 -3.6914,0.73242 -5.09765,2.19727 -1.40625,1.52343 -2.10938,3.28125 -2.10938,5.27343 0,3.10548 1.9922,5.44923 5.97657,7.03125 2.92969,1.23048 6.18164,1.84571 9.75586,1.84571 11.01562,0 19.27735,-4.18946 24.78515,-12.56836 4.57032,-7.08985 6.85547,-16.46485 6.85547,-28.125 v -19.42383 -52.91016 h 20.74219 v -6.32812 h -20.74219 v -5.80078 c 0,-12.53907 0.41016,-20.30274 1.23047,-23.29102 0.82031,-3.046873 2.16797,-5.273437 4.04297,-6.679687 1.875,-1.464844 4.16015,-2.197267 6.85547,-2.197265 2.22656,-10e-7 4.24804,0.55664 6.06445,1.669921 1.81641,1.113282 3.8086,3.28125 5.97656,6.503907 2.16797,3.164064 3.98437,5.244144 5.44922,6.240234 1.52344,0.9375 2.95899,1.40625 4.30664,1.40625 1.75781,0 3.39844,-0.76172 4.92188,-2.28516 1.52343,-1.58202 2.28515,-3.25195 2.28515,-5.00976 0,-3.281255 -1.69922,-6.240236 -5.09765,-8.876955 -5.15626,-3.984375 -10.81055,-5.976563 -16.96289,-5.976563 z\"></path>" +
+            "</svg>"
+          );
+        }
         return (
           "<svg class=\"token-icon token-icon-price\" viewBox=\"0 0 100 100\" aria-hidden=\"true\" focusable=\"false\">" +
             "<line x1=\"50\" y1=\"10\" x2=\"50\" y2=\"90\"></line>" +
@@ -879,14 +889,20 @@
       function renderTurnToken(current) {
         if (!current) return "";
         var usage = current.turnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-        if (!Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) return "";
+        var callCount = Number(current.toolCallCount);
+        if (!Number.isFinite(callCount) || callCount < 0) callCount = 0;
+        if ((!Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) && callCount <= 0) return "";
         var estimatedUsd = estimateGpt54TurnCostUsd(usage);
+        var callsHtml = callCount > 0
+          ? "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("calls") + "</span><span>" + esc(callCount) + "</span></div>"
+          : "";
         return (
           "<div class=\"token-side\">" +
             "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("input") + "</span><span>" + esc(usage.inputTokens) + "</span></div>" +
             "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("output") + "</span><span>" + esc(usage.outputTokens) + "</span></div>" +
             "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("total") + "</span><span>" + esc(usage.totalTokens) + "</span></div>" +
             "<div class=\"token-line token-price\"><span class=\"token-key\">" + tokenKeySvg("price") + "</span><span>" + esc(formatUsdCompact(estimatedUsd)) + "</span></div>" +
+            callsHtml +
           "</div>"
         );
       }
@@ -1037,7 +1053,8 @@
           !normalized.hasChanges &&
           normalized.toolName !== "run_command" &&
           normalized.toolName !== "search_text" &&
-          normalized.turnTokenUsage.totalTokens <= 0
+          normalized.turnTokenUsage.totalTokens <= 0 &&
+          normalized.toolCallCount <= 0
         ) {
           root.innerHTML = "";
           return true;

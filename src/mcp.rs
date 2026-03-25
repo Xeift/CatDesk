@@ -87,6 +87,7 @@ pub struct Session {
     changed_files: HashMap<String, FileDiffEntry>,
     baseline_files: HashMap<String, Option<FileSnapshot>>,
     pending_turn_token_usage: TokenUsage,
+    pending_tool_call_count: u64,
 }
 
 impl Session {
@@ -97,6 +98,7 @@ impl Session {
             changed_files: HashMap::new(),
             baseline_files: HashMap::new(),
             pending_turn_token_usage: TokenUsage::default(),
+            pending_tool_call_count: 0,
         }
     }
 }
@@ -642,6 +644,7 @@ async fn handle_tools_call(
         session
             .pending_turn_token_usage
             .accumulate(&turn_token_usage);
+        session.pending_tool_call_count = session.pending_tool_call_count.saturating_add(1);
         attach_turn_token_usage(result, &turn_token_usage);
     }
 
@@ -814,7 +817,9 @@ fn handle_render_final_summary_widget(
     );
     let turn_token_usage = session.pending_turn_token_usage.clone();
     attach_turn_token_usage(&mut result, &turn_token_usage);
+    attach_tool_call_count(&mut result, session.pending_tool_call_count);
     session.pending_turn_token_usage = TokenUsage::default();
+    session.pending_tool_call_count = 0;
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
@@ -904,6 +909,16 @@ fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
             "totalTokens": usage.total_tokens,
         }),
     );
+}
+
+fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
+    let Some(obj) = result.as_object_mut() else {
+        return;
+    };
+    let Some(structured) = obj.get_mut("structuredContent").and_then(Value::as_object_mut) else {
+        return;
+    };
+    structured.insert("toolCallCount".to_string(), json!(tool_call_count));
 }
 
 fn ensure_output_template_meta(meta_value: &mut Value) {
@@ -2027,6 +2042,7 @@ mod tests {
         }));
         let mut session = Session::new();
         session.pending_turn_token_usage = TokenUsage::from_counts(123, 45);
+        session.pending_tool_call_count = 3;
 
         let resp = handle_render_final_summary_widget(&req, &mut session);
         let usage = resp
@@ -2036,12 +2052,20 @@ mod tests {
             .and_then(|structured| structured.get("turnTokenUsage"))
             .cloned()
             .expect("missing turnTokenUsage");
+        let tool_call_count = resp
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .and_then(|structured| structured.get("toolCallCount"))
+            .and_then(Value::as_u64);
 
         assert_eq!(usage.get("inputTokens").and_then(Value::as_u64), Some(123));
         assert_eq!(usage.get("outputTokens").and_then(Value::as_u64), Some(45));
         assert_eq!(usage.get("totalTokens").and_then(Value::as_u64), Some(168));
+        assert_eq!(tool_call_count, Some(3));
         assert_eq!(session.pending_turn_token_usage.input_tokens, 0);
         assert_eq!(session.pending_turn_token_usage.output_tokens, 0);
         assert_eq!(session.pending_turn_token_usage.total_tokens, 0);
+        assert_eq!(session.pending_tool_call_count, 0);
     }
 }
