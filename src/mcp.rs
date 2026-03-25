@@ -19,7 +19,7 @@ const SERVER_VERSION: &str = "4.0.0";
 const PROTOCOL_VERSION: &str = "2025-03-26";
 const UI_TEMPLATE_URI: &str = "ui://widget/mcp3000-dashboard.html";
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
-const RENDER_WIDGET_TOOL: &str = "render_mcp3000_widget";
+const RENDER_FINAL_SUMMARY_WIDGET_TOOL: &str = "render_final_summary_widget";
 const MCP3000_WIDGET_HTML: &str = include_str!("widget/mcp3000_dashboard.html");
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
@@ -444,9 +444,9 @@ async fn handle_tools_list(
 
     // Render tool for ChatGPT embedded UI.
     tools.push(json!({
-        "name": RENDER_WIDGET_TOOL,
-        "title": "Render MCP3000 review panel",
-        "description": "Render MCP3000 review UI with current tool call diff and cumulative changed files.",
+        "name": RENDER_FINAL_SUMMARY_WIDGET_TOOL,
+        "title": "Render final summary panel",
+        "description": "Render the final summary UI with current tool call diff and cumulative changed files.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -505,8 +505,8 @@ async fn handle_tools_call(
         .unwrap_or("")
         .to_string();
 
-    if tool_name == RENDER_WIDGET_TOOL {
-        return handle_render_widget(req);
+    if tool_name == RENDER_FINAL_SUMMARY_WIDGET_TOOL {
+        return handle_render_final_summary_widget(req);
     }
 
     let watch_targets = collect_watch_targets(req, workspace_root);
@@ -717,12 +717,12 @@ fn tool_success_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse 
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
-fn handle_render_widget(req: &JsonRpcRequest) -> JsonRpcResponse {
+fn handle_render_final_summary_widget(req: &JsonRpcRequest) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let title = arguments
         .get("title")
         .and_then(Value::as_str)
-        .unwrap_or("Final Review")
+        .unwrap_or("Final Summary")
         .to_string();
     let panel_mode = arguments
         .get("panelMode")
@@ -780,12 +780,12 @@ fn handle_render_widget(req: &JsonRpcRequest) -> JsonRpcResponse {
             "structuredContent": structured,
             "content": [{
                 "type": "text",
-                "text": "Rendered MCP3000 workbench UI in ChatGPT."
+                "text": "Rendered final summary UI in ChatGPT."
             }]
         }),
         None,
     );
-    let input_payload = build_turn_token_payload(req, RENDER_WIDGET_TOOL);
+    let input_payload = build_turn_token_payload(req, RENDER_FINAL_SUMMARY_WIDGET_TOOL);
     let input_tokens = estimate_value_tokens_o200k(&input_payload);
     let output_payload = sanitize_result_for_turn_token_count(&result);
     let output_tokens = estimate_value_tokens_o200k(&output_payload);
@@ -915,7 +915,7 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
             | "move_path"
             | "delete_path"
             | "replace_in_file"
-            | RENDER_WIDGET_TOOL
+            | RENDER_FINAL_SUMMARY_WIDGET_TOOL
     )
 }
 
