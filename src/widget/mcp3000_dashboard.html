@@ -896,7 +896,7 @@
         var output = Number(usage.outputTokens);
         if (!Number.isFinite(input) || input < 0) input = 0;
         if (!Number.isFinite(output) || output < 0) output = 0;
-        return (input * GPT54_INPUT_USD_PER_1M + output * GPT54_OUTPUT_USD_PER_1M) / 1000000;
+        return (input * GPT54_OUTPUT_USD_PER_1M + output * GPT54_INPUT_USD_PER_1M) / 1000000;
       }
 
       function formatUsdCompact(usd) {
