@@ -353,6 +353,55 @@
       gap: 3px;
     }
 
+    .token-side-hover {
+      position: relative;
+      min-height: 100px;
+      overflow: hidden;
+      transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+    }
+
+    .token-side-hover:hover,
+    .token-side-hover:focus-within {
+      border-color: var(--accent);
+      background: #111d2d;
+      box-shadow: inset 0 0 0 1px rgba(171, 224, 255, 0.08);
+    }
+
+    .token-face {
+      display: grid;
+      align-content: start;
+      gap: 3px;
+      transition: opacity 140ms ease, transform 140ms ease;
+    }
+
+    .token-face-history {
+      position: absolute;
+      inset: 6px 8px;
+      opacity: 0;
+      transform: translateY(5px);
+      pointer-events: none;
+    }
+
+    .token-side-hover:hover .token-face-live,
+    .token-side-hover:focus-within .token-face-live {
+      opacity: 0;
+      transform: translateY(-5px);
+    }
+
+    .token-side-hover:hover .token-face-history,
+    .token-side-hover:focus-within .token-face-history {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .token-face-label {
+      color: #87a3ca;
+      font-size: 9px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 1px;
+    }
+
     .token-line {
       display: flex;
       align-items: baseline;
@@ -448,6 +497,12 @@
           totalTokens: 0
         },
         toolCallCount: 0,
+        historyTurnTokenUsage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0
+        },
+        historyToolCallCount: 0,
         showApproval: false,
         approvePrompt: "Approve these file changes and continue.",
         rejectPrompt: "Reject these file changes and ask for a safer revision."
@@ -526,6 +581,7 @@
         var filesScanned = Number(data.filesScanned);
         var matchCount = Number(data.matchCount);
         var toolCallCount = Number(data.toolCallCount);
+        var historyToolCallCount = Number(data.historyToolCallCount);
         var next = {
           schema: asString(data.schema, "mcp3000.review.v1"),
           panelMode: asString(data.panelMode, "tool_call"),
@@ -544,6 +600,8 @@
           searchTruncated: asBool(data.searchTruncated, false),
           turnTokenUsage: normalizeTurnTokenUsage(data.turnTokenUsage),
           toolCallCount: Number.isFinite(toolCallCount) && toolCallCount >= 0 ? Math.floor(toolCallCount) : 0,
+          historyTurnTokenUsage: normalizeTurnTokenUsage(data.historyTurnTokenUsage),
+          historyToolCallCount: Number.isFinite(historyToolCallCount) && historyToolCallCount >= 0 ? Math.floor(historyToolCallCount) : 0,
           showApproval: false,
           approvePrompt: asString(data.approvePrompt, view.approvePrompt),
           rejectPrompt: asString(data.rejectPrompt, view.rejectPrompt)
@@ -886,23 +944,53 @@
         );
       }
 
-      function renderTurnToken(current) {
-        if (!current) return "";
-        var usage = current.turnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-        var callCount = Number(current.toolCallCount);
-        if (!Number.isFinite(callCount) || callCount < 0) callCount = 0;
-        if ((!Number.isFinite(usage.totalTokens) || usage.totalTokens <= 0) && callCount <= 0) return "";
+      function renderTokenFace(usage, callCount, label) {
         var estimatedUsd = estimateGpt54TurnCostUsd(usage);
         var callsHtml = callCount > 0
           ? "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("calls") + "</span><span>" + esc(callCount) + "</span></div>"
           : "";
+        var labelHtml = label
+          ? "<div class=\"token-face-label\">" + esc(label) + "</div>"
+          : "";
         return (
-          "<div class=\"token-side\">" +
+          "<div class=\"token-face\">" +
+            labelHtml +
             "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("input") + "</span><span>" + esc(usage.inputTokens) + "</span></div>" +
             "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("output") + "</span><span>" + esc(usage.outputTokens) + "</span></div>" +
             "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("total") + "</span><span>" + esc(usage.totalTokens) + "</span></div>" +
             "<div class=\"token-line token-price\"><span class=\"token-key\">" + tokenKeySvg("price") + "</span><span>" + esc(formatUsdCompact(estimatedUsd)) + "</span></div>" +
             callsHtml +
+          "</div>"
+        );
+      }
+
+      function renderTurnToken(current) {
+        if (!current) return "";
+        var usage = current.turnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+        var callCount = Number(current.toolCallCount);
+        var historyUsage = current.historyTurnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+        var historyCallCount = Number(current.historyToolCallCount);
+        var currentLabel = current.panelMode === "final_review" ? "This turn" : "This tool call";
+        if (!Number.isFinite(callCount) || callCount < 0) callCount = 0;
+        if (!Number.isFinite(historyCallCount) || historyCallCount < 0) historyCallCount = 0;
+        var hasCurrent = Number.isFinite(usage.totalTokens) && usage.totalTokens > 0 || callCount > 0;
+        var hasHistory = Number.isFinite(historyUsage.totalTokens) && historyUsage.totalTokens > 0 || historyCallCount > 0;
+        if (!hasCurrent && !hasHistory) return "";
+        if (!hasHistory) {
+          return (
+            "<div class=\"token-side\">" +
+              renderTokenFace(usage, callCount, "") +
+            "</div>"
+          );
+        }
+        return (
+          "<div class=\"token-side token-side-hover\" tabindex=\"0\" aria-label=\"Hover to show historical totals\">" +
+            "<div class=\"token-face token-face-live\">" +
+              renderTokenFace(usage, callCount, currentLabel) +
+            "</div>" +
+            "<div class=\"token-face token-face-history\">" +
+              renderTokenFace(historyUsage, historyCallCount, "History total") +
+            "</div>" +
           "</div>"
         );
       }
