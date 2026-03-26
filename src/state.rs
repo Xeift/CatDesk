@@ -1,4 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::Mutex;
@@ -24,6 +26,46 @@ pub struct SessionFlow {
     pub last_direction: FlowDirection,
     pub closing_started_ms: Option<u128>,
     pub closing_step_ms: u64,
+}
+
+const USAGE_TOTALS_FILE_NAME: &str = ".mcp3000_usage_totals.json";
+
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub tool_call_count: u64,
+}
+
+impl UsageTotals {
+    pub fn accumulate(&mut self, input_tokens: u64, output_tokens: u64, tool_call_count: u64) {
+        self.input_tokens = self.input_tokens.saturating_add(input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(output_tokens);
+        self.total_tokens = self.input_tokens.saturating_add(self.output_tokens);
+        self.tool_call_count = self.tool_call_count.saturating_add(tool_call_count);
+    }
+
+    fn normalized(mut self) -> Self {
+        self.total_tokens = self.input_tokens.saturating_add(self.output_tokens);
+        self
+    }
+
+    fn load_from_path(path: &Path) -> Self {
+        let Ok(bytes) = std::fs::read(path) else {
+            return Self::default();
+        };
+        serde_json::from_slice::<Self>(&bytes)
+            .unwrap_or_default()
+            .normalized()
+    }
+
+    fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(self)
+            .map_err(std::io::Error::other)?;
+        std::fs::write(path, bytes)
+    }
 }
 
 /// Direction for session flow animation.
@@ -134,6 +176,8 @@ pub struct AppState {
     pub session_flows: Vec<SessionFlow>,
     pub session_count: usize,
     pub request_count: u64,
+    pub usage_totals: UsageTotals,
+    usage_totals_path: PathBuf,
     pub server_handle: Option<tokio::task::JoinHandle<()>>,
     pub ngrok_child: Option<tokio::process::Child>,
     pub remote_browser_child: Option<tokio::process::Child>,
@@ -153,6 +197,10 @@ const FLOW_CLOSE_PRUNE_MULTIPLIER: u64 = 3;
 
 fn short_session_id(sid: &str) -> String {
     sid[..sid.len().min(8)].to_string()
+}
+
+fn usage_totals_path(workspace_root: &str) -> PathBuf {
+    Path::new(workspace_root).join(USAGE_TOTALS_FILE_NAME)
 }
 
 fn now_hms() -> String {
@@ -238,6 +286,8 @@ fn enqueue_flow_segment(
 
 impl AppState {
     pub fn new(port: u16, workspace_root: String) -> Self {
+        let usage_totals_path = usage_totals_path(&workspace_root);
+        let usage_totals = UsageTotals::load_from_path(&usage_totals_path);
         Self {
             theme: theme::DEFAULT_THEME_ID.to_string(),
             mode: Mode::Both,
@@ -256,6 +306,8 @@ impl AppState {
             session_flows: Vec::new(),
             session_count: 0,
             request_count: 0,
+            usage_totals,
+            usage_totals_path,
             server_handle: None,
             ngrok_child: None,
             remote_browser_child: None,
@@ -277,6 +329,10 @@ impl AppState {
         if self.logs.len() > 500 {
             self.logs.remove(0);
         }
+    }
+
+    pub fn persist_usage_totals(&self) -> std::io::Result<()> {
+        self.usage_totals.save_to_path(&self.usage_totals_path)
     }
 
     pub fn record_session_flow(&mut self, sid: &str, events: &[String], direction: FlowDirection) {
@@ -359,5 +415,36 @@ impl AppState {
             let ttl_ms = (FLOW_LINK_CELLS * FLOW_CLOSE_PRUNE_MULTIPLIER) as u128 * step_ms;
             now_ms.saturating_sub(closing_started_ms) < ttl_ms
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_state_loads_usage_totals_from_workspace_file() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("mcp3000-usage-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let usage_path = workspace.join(USAGE_TOTALS_FILE_NAME);
+        std::fs::write(
+            &usage_path,
+            r#"{"inputTokens":120,"outputTokens":34,"totalTokens":154,"toolCallCount":7}"#,
+        )
+        .expect("write usage totals");
+
+        let app = AppState::new(8787, workspace.to_string_lossy().into_owned());
+
+        assert_eq!(app.usage_totals.input_tokens, 120);
+        assert_eq!(app.usage_totals.output_tokens, 34);
+        assert_eq!(app.usage_totals.total_tokens, 154);
+        assert_eq!(app.usage_totals.tool_call_count, 7);
+
+        let _ = std::fs::remove_file(usage_path);
+        let _ = std::fs::remove_dir(workspace);
     }
 }

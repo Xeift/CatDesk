@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, Session};
-use crate::state::{FlowDirection, SharedState};
+use crate::state::{FlowDirection, SharedState, UsageTotals};
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
@@ -145,6 +145,47 @@ fn summarize_response(resp: &Value) -> String {
     format!("id={id}:unknown")
 }
 
+fn tool_name_from_jsonrpc_request(req: &JsonRpcRequest) -> &str {
+    req.params
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("unknown_tool")
+}
+
+fn extract_turn_token_usage(result: Option<&Value>) -> Option<(u64, u64)> {
+    let usage = result
+        .and_then(|value| value.get("structuredContent"))
+        .and_then(|value| value.get("turnTokenUsage"))?;
+    let input_tokens = usage.get("inputTokens").and_then(Value::as_u64)?;
+    let output_tokens = usage.get("outputTokens").and_then(Value::as_u64)?;
+    Some((input_tokens, output_tokens))
+}
+
+fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) {
+    let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(structured) = result_obj
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    structured.insert(
+        "historyTurnTokenUsage".to_string(),
+        json!({
+            "inputTokens": usage_totals.input_tokens,
+            "outputTokens": usage_totals.output_tokens,
+            "totalTokens": usage_totals.total_tokens,
+        }),
+    );
+    structured.insert(
+        "historyToolCallCount".to_string(),
+        json!(usage_totals.tool_call_count),
+    );
+}
+
 // ── GET / — health ──────────────────────────────────────────
 
 async fn health(State(s): State<ServerState>) -> Json<Value> {
@@ -183,9 +224,14 @@ async fn post_mcp(
         app.request_count += 1;
     }
 
-    let (workspace_root, mode, tool_mode) = {
+    let (workspace_root, mode, tool_mode, mut usage_totals) = {
         let app = s.app.lock().await;
-        (app.workspace_root.clone(), app.mode, app.tool_mode)
+        (
+            app.workspace_root.clone(),
+            app.mode,
+            app.tool_mode,
+            app.usage_totals.clone(),
+        )
     };
 
     let requests: Vec<Value> = if body.is_array() {
@@ -286,15 +332,33 @@ async fn post_mcp(
         };
 
         let session = sessions.get_mut(&session_id).unwrap();
+        let tool_name = tool_name_from_jsonrpc_request(&req).to_string();
         if let Some(resp) =
             mcp::handle_request(&req, session, &workspace_root, mode, tool_mode, &s.devtools).await
         {
+            let mut resp = resp;
+            if req.method == "tools/call" {
+                if tool_name != "render_final_summary_widget" {
+                    if let Some((input_tokens, output_tokens)) =
+                        extract_turn_token_usage(resp.result.as_ref())
+                    {
+                        usage_totals.accumulate(input_tokens, output_tokens, 1);
+                    }
+                }
+                attach_history_usage(&mut resp.result, &usage_totals);
+            }
             responses.push(serde_json::to_value(resp).unwrap());
         }
     }
 
     {
         let mut app = s.app.lock().await;
+        if app.usage_totals != usage_totals {
+            app.usage_totals = usage_totals.clone();
+            if let Err(e) = app.persist_usage_totals() {
+                app.log("WARN", format!("Failed to persist usage totals: {e}"));
+            }
+        }
         app.session_count = sessions.len();
         app.record_session_flow(&session_id, &response_flow_events, FlowDirection::Backward);
         let response_summary: Vec<String> = responses.iter().map(summarize_response).collect();
