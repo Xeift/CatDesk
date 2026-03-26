@@ -7,18 +7,20 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0a0f15;
-      --panel: #111926;
-      --panel-2: #0e1520;
-      --line: #243145;
-      --text: #e7edf7;
-      --muted: #9bacc4;
-      --accent: #59c8ff;
-      --ok: #5dd39f;
-      --warn: #ffd166;
-      --err: #ff6b8a;
-      --chip: #172132;
-      --code: #0b111a;
+      --bg: #212121;
+      --panel: #303030;
+      --panel-2: #414141;
+      --line: #414141;
+      --text: #ffffff;
+      --text-2: #cdcdcd;
+      --text-3: #afafaf;
+      --muted: #afafaf;
+      --accent: #0285ff;
+      --ok: #40c977;
+      --warn: #ff9e6c;
+      --err: #ff8583;
+      --chip: #303030;
+      --code: #212121;
     }
 
     * { box-sizing: border-box; }
@@ -27,7 +29,7 @@
       margin: 0;
       padding: 12px;
       color: var(--text);
-      background: #0b1118;
+      background: var(--bg);
       font: 13px/1.45 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
     }
 
@@ -36,7 +38,7 @@
       gap: 8px;
       border: 1px solid var(--line);
       border-radius: 10px;
-      background: #0f1724;
+      background: var(--bg);
       padding: 10px;
     }
 
@@ -50,7 +52,7 @@
     .title {
       margin: 0;
       font-size: 14px;
-      color: #b9cdf1;
+      color: var(--text);
       font-weight: 700;
       letter-spacing: 0.2px;
     }
@@ -76,7 +78,7 @@
     .section {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #0e1622;
+      background: var(--panel);
       overflow: hidden;
     }
 
@@ -84,7 +86,7 @@
       margin: 0;
       padding: 7px 10px;
       border-bottom: 1px solid var(--line);
-      color: #a7bedf;
+      color: var(--text-2);
       font-size: 12px;
       text-transform: none;
       letter-spacing: 0;
@@ -148,7 +150,7 @@
     .dot.truncated { background: var(--accent); }
 
     .path {
-      color: #d7e2f5;
+      color: var(--text);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -165,7 +167,7 @@
     }
 
     .status-label {
-      color: #9db1d1;
+      color: var(--text-3);
       text-transform: lowercase;
     }
 
@@ -177,11 +179,11 @@
     }
 
     .counts .plus {
-      color: #58d18d;
+      color: var(--ok);
     }
 
     .counts .minus {
-      color: #ee6f8f;
+      color: var(--err);
     }
 
     .diff-wrap {
@@ -190,14 +192,14 @@
 
     .dir-summary {
       padding: 0;
-      color: #b8c8e3;
+      color: var(--text-2);
       font-size: 12px;
     }
 
     .diff {
       border: 0;
       border-radius: 0;
-      background: #0a111b;
+      background: var(--bg);
       max-height: 230px;
       overflow: auto;
     }
@@ -208,29 +210,29 @@
       align-items: baseline;
       column-gap: 6px;
       padding: 1px 8px;
-      color: #d9e2f3;
+      color: var(--text-2);
       font: 12px/1.45 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
       white-space: pre;
     }
 
-    .dline.hdr { color: #90a8cb; background: #101827; }
-    .dline.add { color: #9bd8b7; background: #102017; }
-    .dline.del { color: #e8a9b8; background: #22131a; }
+    .dline.hdr { color: var(--text-3); background: var(--panel); }
+    .dline.add { color: var(--text); background: rgba(64, 201, 119, 0.14); }
+    .dline.del { color: var(--text); background: rgba(255, 133, 131, 0.14); }
 
     .ln {
       text-align: right;
-      color: #5f7394;
+      color: var(--text-3);
       user-select: none;
     }
 
     .op {
       text-align: center;
-      color: #5f7394;
+      color: var(--text-3);
       user-select: none;
     }
 
-    .dline.add .op { color: #58d18d; }
-    .dline.del .op { color: #ee6f8f; }
+    .dline.add .op { color: var(--ok); }
+    .dline.del .op { color: var(--err); }
 
     .code {
       overflow-x: auto;
@@ -252,7 +254,7 @@
     }
 
     .command-line {
-      color: #d7e2f5;
+      color: var(--text);
       font-size: 12px;
       white-space: pre-wrap;
       word-break: break-word;
@@ -262,11 +264,11 @@
       margin: 0;
       border: 0;
       border-radius: 0;
-      background: #0a111b;
+      background: var(--bg);
       max-height: 260px;
       overflow: auto;
       padding: 8px;
-      color: #d9e2f3;
+      color: var(--text-2);
       font: 12px/1.45 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
       white-space: pre-wrap;
       word-break: break-word;
@@ -281,19 +283,19 @@
     .search-summary {
       display: grid;
       gap: 4px;
-      color: #c6d6ef;
+      color: var(--text-2);
       font-size: 12px;
     }
 
     .search-summary b {
-      color: #93a9cc;
+      color: var(--text-3);
       font-weight: 600;
     }
 
     .search-results {
       border: 0;
       border-radius: 0;
-      background: #0a111b;
+      background: var(--bg);
       max-height: 260px;
       overflow: auto;
     }
@@ -303,7 +305,7 @@
       grid-template-columns: 1fr;
       gap: 2px;
       padding: 6px 8px;
-      border-top: 1px solid #132035;
+      border-top: 1px solid var(--line);
     }
 
     .search-row:first-child {
@@ -311,7 +313,7 @@
     }
 
     .search-loc {
-      color: #89a8d3;
+      color: var(--accent);
       font-size: 11px;
       white-space: nowrap;
       overflow: hidden;
@@ -319,14 +321,14 @@
     }
 
     .search-line {
-      color: #d9e2f3;
+      color: var(--text-2);
       font: 12px/1.45 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
       white-space: pre-wrap;
       word-break: break-word;
     }
 
     .search-note {
-      color: #9db1d1;
+      color: var(--text-3);
       font-size: 11px;
     }
 
@@ -346,7 +348,7 @@
     .token-side {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #0e1622;
+      background: var(--panel);
       padding: 6px 8px;
       display: grid;
       align-content: start;
@@ -363,8 +365,8 @@
     .token-side-hover:hover,
     .token-side-hover:focus-within {
       border-color: var(--accent);
-      background: #111d2d;
-      box-shadow: inset 0 0 0 1px rgba(171, 224, 255, 0.08);
+      background: var(--panel-2);
+      box-shadow: inset 0 0 0 1px rgba(2, 133, 255, 0.16);
     }
 
     .token-face {
@@ -395,7 +397,7 @@
     }
 
     .token-face-label {
-      color: #87a3ca;
+      color: var(--text-3);
       font-size: 9px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
@@ -407,13 +409,13 @@
       align-items: baseline;
       justify-content: space-between;
       gap: 6px;
-      color: #d8e3f6;
+      color: var(--text-2);
       font-size: 12px;
       font-variant-numeric: tabular-nums;
     }
 
     .token-key {
-      color: #9db1d1;
+      color: var(--text-3);
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -454,8 +456,8 @@
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 7px 11px;
-      background: #172437;
-      color: var(--text);
+      background: var(--panel-2);
+      color: var(--text-2);
       cursor: pointer;
       font: inherit;
     }
@@ -463,8 +465,8 @@
     button:hover { border-color: var(--accent); }
     button:active { transform: translateY(1px); }
 
-    button.approve { border-color: #2c6f54; color: #b8f2db; }
-    button.reject { border-color: #7f3545; color: #ffc7d2; }
+    button.approve { border-color: var(--ok); color: var(--ok); }
+    button.reject { border-color: var(--err); color: var(--err); }
 
     @media (max-width: 850px) {
       .actions { justify-content: flex-start; }
