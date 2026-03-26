@@ -62,8 +62,7 @@ impl UsageTotals {
     }
 
     fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec(self)
-            .map_err(std::io::Error::other)?;
+        let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
         std::fs::write(path, bytes)
     }
 }

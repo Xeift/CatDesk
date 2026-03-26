@@ -2076,8 +2076,8 @@ fn draw_ui(
 
     if show_guide {
         let top_height = (status_lines.len() as u16).min(status_inner.height.saturating_sub(1));
-        let guide_height = (guide_lines.len() as u16 + 2)
-            .min(status_inner.height.saturating_sub(top_height));
+        let guide_height =
+            (guide_lines.len() as u16 + 2).min(status_inner.height.saturating_sub(top_height));
         let status_parts = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
