@@ -289,14 +289,83 @@
 
     .search-summary {
       display: grid;
-      gap: 4px;
+      gap: 6px;
       color: var(--text-2);
       font-size: 12px;
     }
 
-    .search-summary b {
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .panel-title {
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: lowercase;
+    }
+
+    .panel-kicker {
       color: var(--text-3);
-      font-weight: 600;
+      font-size: 11px;
+      text-transform: lowercase;
+      white-space: nowrap;
+    }
+
+    .summary-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .summary-row.metrics {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      padding-bottom: 1px;
+    }
+
+    .summary-stat {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      color: var(--text-2);
+    }
+
+    .summary-stat.query {
+      color: var(--text);
+    }
+
+    .summary-stat.path {
+      max-width: 100%;
+    }
+
+    .summary-stat.other {
+      color: var(--text-3);
+    }
+
+    .summary-stat svg {
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
+      display: block;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .summary-value {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .search-results {
@@ -347,36 +416,9 @@
 
     .listing-summary {
       display: grid;
-      gap: 4px;
-      color: var(--text-2);
-      font-size: 12px;
-    }
-
-    .listing-summary b {
-      color: var(--text-3);
-      font-weight: 600;
-    }
-
-    .listing-stats {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .listing-stat {
-      display: inline-flex;
-      align-items: center;
       gap: 6px;
       color: var(--text-2);
-    }
-
-    .listing-stat.other {
-      color: var(--text-3);
-    }
-
-    .listing-stat .listing-kind {
-      color: inherit;
+      font-size: 12px;
     }
 
     .listing-results {
@@ -950,6 +992,17 @@
         );
       }
 
+      function directoryMetaLabel(file) {
+        var status = normalizeStatus(file && file.status, "modified");
+        if (
+          view.toolName === "make_directory" &&
+          (status === "added" || status === "untracked" || status === "copied")
+        ) {
+          return "directory created";
+        }
+        return "directory";
+      }
+
       function renderFileBody(file) {
         if (isDirectoryFile(file)) {
           return renderDirectorySummary(file);
@@ -963,7 +1016,7 @@
         var minus = "-" + file.removed;
         var isDirectory = isDirectoryFile(file);
         var metaHtml = isDirectory
-          ? "<span class=\"status-label\">directory</span>"
+          ? "<span class=\"status-label\">" + esc(directoryMetaLabel(file)) + "</span>"
           : "<span class=\"status-label\">" + esc(statusText) + "</span>" +
             "<span class=\"counts\"><span class=\"plus\">" + esc(plus) + "</span><span class=\"minus\">" + esc(minus) + "</span></span>";
         return (
@@ -1001,12 +1054,80 @@
         );
       }
 
+      function summaryIconSvg(kind) {
+        if (kind === "path") {
+          return (
+            "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M1.75 4.75h4.1l1.25 1.5h7.15\"></path>" +
+              "<path d=\"M1.75 5.75h12.5v6.5H1.75z\"></path>" +
+            "</svg>"
+          );
+        }
+        if (kind === "items") {
+          return (
+            "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M3 4.25h10\"></path>" +
+              "<path d=\"M3 8h10\"></path>" +
+              "<path d=\"M3 11.75h10\"></path>" +
+            "</svg>"
+          );
+        }
+        if (kind === "query") {
+          return (
+            "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<circle cx=\"7\" cy=\"7\" r=\"3.75\"></circle>" +
+              "<path d=\"M10 10l3 3\"></path>" +
+            "</svg>"
+          );
+        }
+        if (kind === "files" || kind === "file") {
+          return (
+            "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M4.25 2.25h4.5l2.5 2.5v8h-7z\"></path>" +
+              "<path d=\"M8.75 2.25v2.5h2.5\"></path>" +
+            "</svg>"
+          );
+        }
+        if (kind === "matches") {
+          return (
+            "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<circle cx=\"8\" cy=\"8\" r=\"5.25\"></circle>" +
+              "<path d=\"M5.5 8h5\"></path>" +
+            "</svg>"
+          );
+        }
+        return (
+          "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+            "<circle cx=\"8\" cy=\"8\" r=\"5.25\"></circle>" +
+            "<path d=\"M8 5.5v5\"></path>" +
+            "<path d=\"M5.5 8h5\"></path>" +
+          "</svg>"
+        );
+      }
+
+      function renderSummaryStat(iconKind, label, value, extraClass) {
+        var cls = "summary-stat" + (extraClass ? " " + extraClass : "");
+        return (
+          "<span class=\"" + cls + "\">" +
+            summaryIconSvg(iconKind) +
+            "<span class=\"summary-value\">" + esc(label) + ": " + esc(value) + "</span>" +
+          "</span>"
+        );
+      }
+
       function renderSearchPanel(current) {
         var summaryHtml =
           "<div class=\"search-summary\">" +
-            "<div><b>query:</b> " + esc(current.searchQuery) + "</div>" +
-            "<div><b>path:</b> " + esc(current.searchPath) + "</div>" +
-            "<div><b>files:</b> " + esc(current.filesScanned) + " <b>matches:</b> " + esc(current.matchCount) + "</div>" +
+            "<div class=\"panel-head\">" +
+              "<span class=\"panel-title\">search results</span>" +
+              "<span class=\"panel-kicker\">matches found</span>" +
+            "</div>" +
+            "<div class=\"summary-row\">" +
+              renderSummaryStat("query", "query", current.searchQuery, "query") +
+              renderSummaryStat("path", "path", current.searchPath, "path") +
+              renderSummaryStat("files", "files", current.filesScanned, "") +
+              renderSummaryStat("matches", "matches", current.matchCount, "other") +
+            "</div>" +
           "</div>";
         var resultsHtml = "";
         if (current.searchResults.length > 0) {
@@ -1064,21 +1185,22 @@
       }
 
       function renderListStat(kind, label, count) {
-        var cls = kind === "other" ? "listing-stat other" : "listing-stat";
-        return (
-          "<span class=\"" + cls + "\">" +
-            "<span class=\"listing-kind\">" + listingIconSvg(kind) + "</span>" +
-            "<span>" + esc(label) + ": " + esc(count) + "</span>" +
-          "</span>"
-        );
+        var extraClass = kind === "other" ? "other" : "";
+        return renderSummaryStat(kind === "dir" ? "path" : kind, label, count, extraClass);
       }
 
       function renderListFilesPanel(current) {
         var summaryHtml =
           "<div class=\"listing-summary\">" +
-            "<div><b>path:</b> " + esc(current.listPath) + "</div>" +
-            "<div><b>items:</b> " + esc(current.listItemCount) + "</div>" +
-            "<div class=\"listing-stats\">" +
+            "<div class=\"panel-head\">" +
+              "<span class=\"panel-title\">listed files</span>" +
+              "<span class=\"panel-kicker\">files listed</span>" +
+            "</div>" +
+            "<div class=\"summary-row\">" +
+              renderSummaryStat("path", "path", current.listPath, "path") +
+            "</div>" +
+            "<div class=\"summary-row metrics\">" +
+              renderSummaryStat("items", "items", current.listItemCount, "") +
               renderListStat("dir", "dirs", current.listDirectoryCount) +
               renderListStat("file", "files", current.listFileCount) +
               renderListStat("other", "other", current.listOtherCount) +
