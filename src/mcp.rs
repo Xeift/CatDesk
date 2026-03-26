@@ -5,8 +5,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tiktoken_rs::o200k_base_singleton;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::command;
@@ -696,7 +696,10 @@ async fn forward_to_devtools(
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown error");
-                return tool_error_response(req, format!("DevTools tool error (code {code}): {msg}"));
+                return tool_error_response(
+                    req,
+                    format!("DevTools tool error (code {code}): {msg}"),
+                );
             }
             tool_error_response(req, "DevTools bridge returned empty response".into())
         }
@@ -739,6 +742,22 @@ fn tool_success_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse 
     let result = enrich_tool_result(
         req,
         json!({ "content": [{"type": "text", "text": text}] }),
+        None,
+    );
+    JsonRpcResponse::success(req.id.clone(), result)
+}
+
+fn tool_success_response_with_structured(
+    req: &JsonRpcRequest,
+    text: String,
+    structured: Value,
+) -> JsonRpcResponse {
+    let result = enrich_tool_result(
+        req,
+        json!({
+            "structuredContent": structured,
+            "content": [{"type": "text", "text": text}]
+        }),
         None,
     );
     JsonRpcResponse::success(req.id.clone(), result)
@@ -790,7 +809,11 @@ fn handle_render_final_summary_widget(
     let state = arguments
         .get("state")
         .and_then(Value::as_str)
-        .unwrap_or(if has_changes { "waiting_approval" } else { "done" });
+        .unwrap_or(if has_changes {
+            "waiting_approval"
+        } else {
+            "done"
+        });
 
     let structured = json!({
         "schema": "mcp3000.review.v1",
@@ -888,7 +911,10 @@ fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
         return sanitized;
     };
     obj.remove("_meta");
-    if let Some(structured) = obj.get_mut("structuredContent").and_then(Value::as_object_mut) {
+    if let Some(structured) = obj
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    {
         structured.remove("turnTokenUsage");
     }
     sanitized
@@ -898,7 +924,10 @@ fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
     let Some(obj) = result.as_object_mut() else {
         return;
     };
-    let Some(structured) = obj.get_mut("structuredContent").and_then(Value::as_object_mut) else {
+    let Some(structured) = obj
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    else {
         return;
     };
     structured.insert(
@@ -915,7 +944,10 @@ fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
     let Some(obj) = result.as_object_mut() else {
         return;
     };
-    let Some(structured) = obj.get_mut("structuredContent").and_then(Value::as_object_mut) else {
+    let Some(structured) = obj
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    else {
         return;
     };
     structured.insert("toolCallCount".to_string(), json!(tool_call_count));
@@ -950,6 +982,7 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
     matches!(
         name,
         "run_command"
+            | "list_files"
             | "search_text"
             | "write_file"
             | "append_file"
@@ -1113,17 +1146,29 @@ fn parse_search_text_output(output: &str) -> SearchWidgetContent {
     }
 
     lines.drain(0..4);
-    while lines.first().map(|line| line.trim().is_empty()).unwrap_or(false) {
+    while lines
+        .first()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
         lines.remove(0);
     }
-    while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+    while lines
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
         lines.pop();
     }
     if let Some(last) = lines.last().copied() {
         if last.starts_with("[truncated at ") && last.ends_with(" matches]") {
             parsed.truncated = true;
             lines.pop();
-            while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+            while lines
+                .last()
+                .map(|line| line.trim().is_empty())
+                .unwrap_or(false)
+            {
                 lines.pop();
             }
         }
@@ -1162,10 +1207,8 @@ fn build_auto_widget_structured_content(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let output_text = truncate_for_widget(
-            &extract_tool_result_text(result),
-            MAX_COMMAND_OUTPUT_CHARS,
-        );
+        let output_text =
+            truncate_for_widget(&extract_tool_result_text(result), MAX_COMMAND_OUTPUT_CHARS);
         let (state, changed_files, has_changes) = if let Some(ctx) = widget_context {
             (
                 if ctx.is_error {
@@ -1175,7 +1218,10 @@ fn build_auto_widget_structured_content(
                 } else {
                     "changed"
                 },
-                ctx.turn_files.iter().map(file_entry_json).collect::<Vec<_>>(),
+                ctx.turn_files
+                    .iter()
+                    .map(file_entry_json)
+                    .collect::<Vec<_>>(),
                 !ctx.turn_files.is_empty(),
             )
         } else {
@@ -1200,10 +1246,7 @@ fn build_auto_widget_structured_content(
             .get("query")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let path_arg = arguments
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or(".");
+        let path_arg = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
         let parsed = parse_search_text_output(&extract_tool_result_text(result));
         return json!({
             "schema": "mcp3000.review.v1",
@@ -1550,7 +1593,8 @@ fn build_entry_from_states(
             })
         }
         (None, Some(a)) => {
-            let diff = truncate_diff_for_widget(&build_added_diff(path, a), MAX_DIFF_CHARS_PER_FILE);
+            let diff =
+                truncate_diff_for_widget(&build_added_diff(path, a), MAX_DIFF_CHARS_PER_FILE);
             let (added, removed) = diff_line_stats(&diff);
             Some(FileDiffEntry {
                 path: path.to_string(),
@@ -1660,7 +1704,9 @@ fn build_added_diff(path: &str, after: &FileSnapshot) -> String {
     }
     let mut diff = String::new();
     let lines = after.text.lines().count().max(1);
-    diff.push_str(&format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{lines} @@\n"));
+    diff.push_str(&format!(
+        "--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{lines} @@\n"
+    ));
     append_prefixed_lines(&mut diff, '+', &after.text);
     if after.text_truncated {
         diff.push_str("\n[file content preview truncated]\n");
@@ -1677,7 +1723,9 @@ fn build_deleted_diff(path: &str, before: &FileSnapshot) -> String {
     }
     let mut diff = String::new();
     let lines = before.text.lines().count().max(1);
-    diff.push_str(&format!("--- a/{path}\n+++ /dev/null\n@@ -1,{lines} +0,0 @@\n"));
+    diff.push_str(&format!(
+        "--- a/{path}\n+++ /dev/null\n@@ -1,{lines} +0,0 @@\n"
+    ));
     append_prefixed_lines(&mut diff, '-', &before.text);
     if before.text_truncated {
         diff.push_str("\n[file content preview truncated]\n");
@@ -1695,9 +1743,7 @@ fn build_modified_diff(path: &str, before: &FileSnapshot, after: &FileSnapshot) 
     let before_lines: Vec<&str> = before.text.lines().collect();
     let after_lines: Vec<&str> = after.text.lines().collect();
     let mut ops = diff_lines(&before_lines, &after_lines);
-    let has_line_level_change = ops
-        .iter()
-        .any(|op| !matches!(op, LineDiffOp::Keep(_)));
+    let has_line_level_change = ops.iter().any(|op| !matches!(op, LineDiffOp::Keep(_)));
 
     let mut diff = String::new();
     let before_count = before_lines.len();
@@ -1753,11 +1799,9 @@ fn diff_changed_files(before: &WatchedSnapshot, after: &WatchedSnapshot) -> Vec<
 
     let mut changed: Vec<FileDiffEntry> = Vec::new();
     for path in paths {
-        if let Some(entry) = build_entry_from_states(
-            &path,
-            before.files.get(&path),
-            after.files.get(&path),
-        ) {
+        if let Some(entry) =
+            build_entry_from_states(&path, before.files.get(&path), after.files.get(&path))
+        {
             changed.push(entry);
         }
     }
@@ -1912,7 +1956,25 @@ fn handle_list_files(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
     match workspace_tools::list_files(workspace_root, path, include_hidden, limit) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(listing) => {
+            let text = listing.render_text();
+            let structured = json!({
+                "schema": "mcp3000.review.v1",
+                "panelMode": "tool_call",
+                "title": "List Files",
+                "state": "done",
+                "toolName": "list_files",
+                "listPath": listing.path,
+                "listItemCount": listing.item_count,
+                "listDirectoryCount": listing.directory_count,
+                "listFileCount": listing.file_count,
+                "listOtherCount": listing.other_count,
+                "listTruncated": listing.truncated,
+                "listLimit": listing.limit,
+                "listEntries": listing.entries,
+            });
+            tool_success_response_with_structured(req, text, structured)
+        }
         Err(e) => tool_error_response(req, e),
     }
 }

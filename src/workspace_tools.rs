@@ -1,4 +1,5 @@
 use crate::command;
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -10,6 +11,52 @@ const DEFAULT_LIST_LIMIT: usize = 200;
 const HARD_LIST_LIMIT: usize = 1000;
 const DEFAULT_SEARCH_LIMIT: usize = 100;
 const HARD_SEARCH_LIMIT: usize = 500;
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFilesEntry {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub depth: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFilesOutput {
+    pub path: String,
+    pub item_count: usize,
+    pub directory_count: usize,
+    pub file_count: usize,
+    pub other_count: usize,
+    pub truncated: bool,
+    pub limit: usize,
+    pub entries: Vec<ListFilesEntry>,
+}
+
+impl ListFilesOutput {
+    pub fn render_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("path: {}\n", self.path));
+        out.push_str(&format!("items: {}\n\n", self.item_count));
+        out.push_str(
+            &self
+                .entries
+                .iter()
+                .map(|entry| match entry.kind.as_str() {
+                    "dir" => format!("dir  {}/", entry.path),
+                    "file" => format!("file {}", entry.path),
+                    _ => format!("other {}", entry.path),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        if self.truncated {
+            out.push_str(&format!("\n\n[truncated at {} items]", self.limit));
+        }
+        out
+    }
+}
 
 fn workspace_root_path(workspace_root: &str) -> Result<PathBuf, String> {
     Path::new(workspace_root)
@@ -149,7 +196,7 @@ pub fn list_files(
     path: Option<&str>,
     include_hidden: bool,
     limit: Option<usize>,
-) -> Result<String, String> {
+) -> Result<ListFilesOutput, String> {
     let root = workspace_root_path(workspace_root)?;
     let start = command::resolve_workspace_path(workspace_root, path)?;
     if !start.exists() {
@@ -163,14 +210,23 @@ pub fn list_files(
     let mut queue = VecDeque::new();
     queue.push_back(start.clone());
 
-    let mut items: Vec<String> = Vec::new();
+    let mut entries: Vec<ListFilesEntry> = Vec::new();
+    let mut directory_count: usize = 0;
+    let mut file_count: usize = 0;
+    let mut other_count: usize = 0;
     let mut truncated = false;
 
     while let Some(dir) = queue.pop_front() {
-        let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
-        for entry_res in entries {
-            let entry = entry_res.map_err(|e| e.to_string())?;
-            let name = entry.file_name().to_string_lossy().to_string();
+        let mut dir_entries = fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .map(|entry_res| {
+                let entry = entry_res.map_err(|e| e.to_string())?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                Ok((name, entry))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        dir_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, entry) in dir_entries {
             if !include_hidden && name.starts_with('.') {
                 continue;
             }
@@ -178,17 +234,37 @@ pub fn list_files(
             let path = entry.path();
             let ft = entry.file_type().map_err(|e| e.to_string())?;
             let rel = to_workspace_relative(&root, &path);
+            let rel_from_start = path.strip_prefix(&start).unwrap_or(path.as_path());
+            let depth = rel_from_start.components().count().saturating_sub(1);
 
             if ft.is_dir() {
-                items.push(format!("dir  {rel}/"));
+                directory_count += 1;
+                entries.push(ListFilesEntry {
+                    path: rel,
+                    name,
+                    kind: "dir".into(),
+                    depth,
+                });
                 queue.push_back(path);
             } else if ft.is_file() {
-                items.push(format!("file {rel}"));
+                file_count += 1;
+                entries.push(ListFilesEntry {
+                    path: rel,
+                    name,
+                    kind: "file".into(),
+                    depth,
+                });
             } else {
-                items.push(format!("other {rel}"));
+                other_count += 1;
+                entries.push(ListFilesEntry {
+                    path: rel,
+                    name,
+                    kind: "other".into(),
+                    depth,
+                });
             }
 
-            if items.len() >= max_items {
+            if entries.len() >= max_items {
                 truncated = true;
                 break;
             }
@@ -199,14 +275,16 @@ pub fn list_files(
         }
     }
 
-    let mut out = String::new();
-    out.push_str(&format!("path: {}\n", to_workspace_relative(&root, &start)));
-    out.push_str(&format!("items: {}\n\n", items.len()));
-    out.push_str(&items.join("\n"));
-    if truncated {
-        out.push_str(&format!("\n\n[truncated at {} items]", max_items));
-    }
-    Ok(out)
+    Ok(ListFilesOutput {
+        path: to_workspace_relative(&root, &start),
+        item_count: entries.len(),
+        directory_count,
+        file_count,
+        other_count,
+        truncated,
+        limit: max_items,
+        entries,
+    })
 }
 
 pub fn search_text(

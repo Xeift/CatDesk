@@ -8,18 +8,19 @@
     :root {
       color-scheme: dark;
       --bg: #212121;
-      --panel: #303030;
+      --panel: #383838;
       --panel-2: #414141;
       --line: #414141;
       --text: #ffffff;
       --text-2: #cdcdcd;
       --text-3: #afafaf;
       --muted: #afafaf;
+      --text-inverted: #fafafa;
       --accent: #0285ff;
       --ok: #40c977;
       --warn: #ff9e6c;
       --err: #ff8583;
-      --chip: #303030;
+      --chip: #383838;
       --code: #212121;
     }
 
@@ -331,6 +332,83 @@
       font-size: 11px;
     }
 
+    .listing-panel {
+      display: grid;
+      gap: 8px;
+      padding: 8px 12px 10px;
+    }
+
+    .listing-summary {
+      display: grid;
+      gap: 4px;
+      color: var(--text-2);
+      font-size: 12px;
+    }
+
+    .listing-summary b {
+      color: var(--text-3);
+      font-weight: 600;
+    }
+
+    .listing-results {
+      border: 0;
+      border-radius: 0;
+      background: var(--bg);
+      max-height: 260px;
+      overflow: auto;
+    }
+
+    .listing-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-top: 1px solid var(--line);
+      min-width: 0;
+    }
+
+    .listing-row:first-child {
+      border-top: 0;
+    }
+
+    .listing-row.other .listing-kind {
+      color: var(--text-3);
+    }
+
+    .listing-kind {
+      width: 14px;
+      height: 14px;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-2);
+    }
+
+    .listing-kind svg {
+      width: 14px;
+      height: 14px;
+      display: block;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .listing-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text);
+    }
+
+    .listing-note {
+      color: var(--text-3);
+      font-size: 11px;
+    }
+
     .files-token-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(96px, 124px);
@@ -492,6 +570,14 @@
         matchCount: 0,
         searchResults: [],
         searchTruncated: false,
+        listPath: "",
+        listItemCount: 0,
+        listDirectoryCount: 0,
+        listFileCount: 0,
+        listOtherCount: 0,
+        listEntries: [],
+        listTruncated: false,
+        listLimit: 0,
         turnTokenUsage: {
           inputTokens: 0,
           outputTokens: 0,
@@ -566,6 +652,22 @@
         };
       }
 
+      function normalizeListEntry(entry) {
+        if (!entry || typeof entry !== "object") return null;
+        var path = asString(entry.path, "");
+        var name = asString(entry.name, "");
+        var kind = asString(entry.kind, "").toLowerCase();
+        var depth = Number(entry.depth);
+        if (!path || !name) return null;
+        if (kind !== "dir" && kind !== "file" && kind !== "other") return null;
+        return {
+          path: path,
+          name: name,
+          kind: kind,
+          depth: Number.isFinite(depth) && depth >= 0 ? Math.floor(depth) : 0
+        };
+      }
+
       function normalizeTurnTokenUsage(entry) {
         var inputTokens = Number(entry && entry.inputTokens);
         var outputTokens = Number(entry && entry.outputTokens);
@@ -581,6 +683,11 @@
         if (!data || typeof data !== "object") return null;
         var filesScanned = Number(data.filesScanned);
         var matchCount = Number(data.matchCount);
+        var listItemCount = Number(data.listItemCount);
+        var listDirectoryCount = Number(data.listDirectoryCount);
+        var listFileCount = Number(data.listFileCount);
+        var listOtherCount = Number(data.listOtherCount);
+        var listLimit = Number(data.listLimit);
         var toolCallCount = Number(data.toolCallCount);
         var historyToolCallCount = Number(data.historyToolCallCount);
         var next = {
@@ -599,6 +706,14 @@
           matchCount: Number.isFinite(matchCount) && matchCount >= 0 ? Math.floor(matchCount) : 0,
           searchResults: [],
           searchTruncated: asBool(data.searchTruncated, false),
+          listPath: asString(data.listPath, ""),
+          listItemCount: Number.isFinite(listItemCount) && listItemCount >= 0 ? Math.floor(listItemCount) : 0,
+          listDirectoryCount: Number.isFinite(listDirectoryCount) && listDirectoryCount >= 0 ? Math.floor(listDirectoryCount) : 0,
+          listFileCount: Number.isFinite(listFileCount) && listFileCount >= 0 ? Math.floor(listFileCount) : 0,
+          listOtherCount: Number.isFinite(listOtherCount) && listOtherCount >= 0 ? Math.floor(listOtherCount) : 0,
+          listEntries: [],
+          listTruncated: asBool(data.listTruncated, false),
+          listLimit: Number.isFinite(listLimit) && listLimit >= 0 ? Math.floor(listLimit) : 0,
           turnTokenUsage: normalizeTurnTokenUsage(data.turnTokenUsage),
           toolCallCount: Number.isFinite(toolCallCount) && toolCallCount >= 0 ? Math.floor(toolCallCount) : 0,
           historyTurnTokenUsage: normalizeTurnTokenUsage(data.historyTurnTokenUsage),
@@ -613,6 +728,7 @@
         next.changedFiles = asArray(data.changedFiles).map(normalizeFile).filter(Boolean);
         next.hasChanges = asBool(data.hasChanges, next.changedFiles.length > 0);
         next.searchResults = asArray(data.searchResults).map(normalizeSearchResult).filter(Boolean);
+        next.listEntries = asArray(data.listEntries).map(normalizeListEntry).filter(Boolean);
         next.showApproval = asBool(data.showApproval, next.hasChanges);
 
         return next;
@@ -887,6 +1003,69 @@
         );
       }
 
+      function listingIconSvg(kind) {
+        if (kind === "dir") {
+          return (
+            "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M1.75 4.75h4.1l1.25 1.5h7.15\"></path>" +
+              "<path d=\"M1.75 5.75h12.5v6.5H1.75z\"></path>" +
+            "</svg>"
+          );
+        }
+        if (kind === "file") {
+          return (
+            "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M4.25 1.75h5l3 3v9.5h-8z\"></path>" +
+              "<path d=\"M9.25 1.75v3h3\"></path>" +
+            "</svg>"
+          );
+        }
+        return (
+          "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+            "<circle cx=\"8\" cy=\"8\" r=\"5.25\"></circle>" +
+            "<path d=\"M8 5.5v5\"></path>" +
+            "<path d=\"M5.5 8h5\"></path>" +
+          "</svg>"
+        );
+      }
+
+      function renderListFilesPanel(current) {
+        var summaryHtml =
+          "<div class=\"listing-summary\">" +
+            "<div><b>path:</b> " + esc(current.listPath) + "</div>" +
+            "<div><b>items:</b> " + esc(current.listItemCount) + "</div>" +
+            "<div><b>dirs:</b> " + esc(current.listDirectoryCount) + " <b>files:</b> " + esc(current.listFileCount) + " <b>other:</b> " + esc(current.listOtherCount) + "</div>" +
+          "</div>";
+        var rowsHtml = "";
+        if (current.listEntries.length > 0) {
+          rowsHtml =
+            "<div class=\"listing-results\">" +
+              current.listEntries.map(function (entry) {
+                var indentPx = 8 + (entry.depth * 16);
+                var label = entry.kind === "dir" ? entry.name + "/" : entry.name;
+                return (
+                  "<div class=\"listing-row " + esc(entry.kind) + "\" title=\"" + esc(entry.path) + "\" style=\"padding-left: " + esc(indentPx) + "px\">" +
+                    "<span class=\"listing-kind\">" + listingIconSvg(entry.kind) + "</span>" +
+                    "<span class=\"listing-name\">" + esc(label) + "</span>" +
+                  "</div>"
+                );
+              }).join("") +
+            "</div>";
+        } else {
+          rowsHtml = "<div class=\"empty\">Directory is empty.</div>";
+        }
+        var truncatedHtml = current.listTruncated
+          ? "<div class=\"listing-note\">Results truncated at " + esc(current.listLimit) + " items.</div>"
+          : "";
+        return (
+          "<div class=\"listing-panel\">" +
+            summaryHtml +
+            rowsHtml +
+            truncatedHtml +
+          "</div>"
+        );
+      }
+
       var GPT54_INPUT_USD_PER_1M = 2.5;
       var GPT54_OUTPUT_USD_PER_1M = 15.0;
 
@@ -1017,6 +1196,7 @@
         var isFinal = view.panelMode === "final_review";
         var isRunCommand = view.panelMode === "tool_call" && view.toolName === "run_command";
         var isSearchText = view.panelMode === "tool_call" && view.toolName === "search_text";
+        var isListFiles = view.panelMode === "tool_call" && view.toolName === "list_files";
         var filesEmpty = isFinal ? "No pending changed files." : "No file changes in this tool call.";
         var filesOpenCount = view.changedFiles.length > 0 ? 1 : 0;
         var commandSectionHtml = "";
@@ -1037,8 +1217,17 @@
               "</div>" +
             "</section>";
         }
+        var listSectionHtml = "";
+        if (isListFiles) {
+          listSectionHtml =
+            "<section class=\"section\">" +
+              "<div class=\"section-body\">" +
+                renderListFilesPanel(view) +
+              "</div>" +
+            "</section>";
+        }
         var filesSectionHtml = "";
-        if ((!isRunCommand && !isSearchText) || view.hasChanges) {
+        if ((!isRunCommand && !isSearchText && !isListFiles) || view.hasChanges) {
           filesSectionHtml =
             "<section class=\"section\">" +
               "<div class=\"section-body\">" +
@@ -1047,7 +1236,7 @@
             "</section>";
         }
         var tokenPanelHtml = renderTurnToken(view);
-        var mainContentHtml = commandSectionHtml + searchSectionHtml + filesSectionHtml;
+        var mainContentHtml = commandSectionHtml + searchSectionHtml + listSectionHtml + filesSectionHtml;
         var contentRowHtml = "";
         if (mainContentHtml && tokenPanelHtml) {
           contentRowHtml =
@@ -1142,6 +1331,7 @@
           !normalized.hasChanges &&
           normalized.toolName !== "run_command" &&
           normalized.toolName !== "search_text" &&
+          normalized.toolName !== "list_files" &&
           normalized.turnTokenUsage.totalTokens <= 0 &&
           normalized.toolCallCount <= 0
         ) {
