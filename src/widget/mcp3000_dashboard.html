@@ -191,9 +191,16 @@
     }
 
     .dir-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       padding: 0;
       color: var(--text-2);
       font-size: 12px;
+    }
+
+    .dir-summary .listing-kind {
+      color: var(--text-2);
     }
 
     .diff {
@@ -313,7 +320,7 @@
     }
 
     .search-loc {
-      color: var(--accent);
+      color: var(--text-3);
       font-size: 11px;
       white-space: nowrap;
       overflow: hidden;
@@ -348,6 +355,28 @@
     .listing-summary b {
       color: var(--text-3);
       font-weight: 600;
+    }
+
+    .listing-stats {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .listing-stat {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-2);
+    }
+
+    .listing-stat.other {
+      color: var(--text-3);
+    }
+
+    .listing-stat .listing-kind {
+      color: inherit;
     }
 
     .listing-results {
@@ -906,19 +935,24 @@
         );
       }
 
-      function directorySummaryText(file) {
-        var status = normalizeStatus(file && file.status, "modified");
-        if (status === "added" || status === "untracked" || status === "copied") {
-          return "Directory created.";
-        }
-        if (status === "deleted") return "Directory removed.";
-        if (status === "renamed") return "Directory renamed.";
-        return "Directory updated.";
+      function directoryLabel(file) {
+        var path = asString(file && file.path, "");
+        if (!path) return "/";
+        return /\/$/.test(path) ? path : path + "/";
+      }
+
+      function renderDirectorySummary(file) {
+        return (
+          "<div class=\"dir-summary\">" +
+            "<span class=\"listing-kind\">" + listingIconSvg("dir") + "</span>" +
+            "<span class=\"listing-name\">" + esc(directoryLabel(file)) + "</span>" +
+          "</div>"
+        );
       }
 
       function renderFileBody(file) {
         if (isDirectoryFile(file)) {
-          return "<div class=\"dir-summary\">" + esc(directorySummaryText(file)) + "</div>";
+          return renderDirectorySummary(file);
         }
         return renderDiffLines(file.diff);
       }
@@ -1029,12 +1063,26 @@
         );
       }
 
+      function renderListStat(kind, label, count) {
+        var cls = kind === "other" ? "listing-stat other" : "listing-stat";
+        return (
+          "<span class=\"" + cls + "\">" +
+            "<span class=\"listing-kind\">" + listingIconSvg(kind) + "</span>" +
+            "<span>" + esc(label) + ": " + esc(count) + "</span>" +
+          "</span>"
+        );
+      }
+
       function renderListFilesPanel(current) {
         var summaryHtml =
           "<div class=\"listing-summary\">" +
             "<div><b>path:</b> " + esc(current.listPath) + "</div>" +
             "<div><b>items:</b> " + esc(current.listItemCount) + "</div>" +
-            "<div><b>dirs:</b> " + esc(current.listDirectoryCount) + " <b>files:</b> " + esc(current.listFileCount) + " <b>other:</b> " + esc(current.listOtherCount) + "</div>" +
+            "<div class=\"listing-stats\">" +
+              renderListStat("dir", "dirs", current.listDirectoryCount) +
+              renderListStat("file", "files", current.listFileCount) +
+              renderListStat("other", "other", current.listOtherCount) +
+            "</div>" +
           "</div>";
         var rowsHtml = "";
         if (current.listEntries.length > 0) {
