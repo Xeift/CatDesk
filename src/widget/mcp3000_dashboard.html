@@ -301,6 +301,10 @@
       gap: 10px;
     }
 
+    .panel-head.kicker-only {
+      justify-content: flex-end;
+    }
+
     .panel-title {
       color: var(--text);
       font-size: 12px;
@@ -327,6 +331,16 @@
       flex-wrap: nowrap;
       overflow-x: auto;
       padding-bottom: 1px;
+    }
+
+    .summary-row.with-kicker .summary-stat.path {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .summary-kicker {
+      margin-left: auto;
+      flex: 0 0 auto;
     }
 
     .summary-stat {
@@ -994,17 +1008,20 @@
 
       function directoryMetaLabel(file) {
         var status = normalizeStatus(file && file.status, "modified");
-        if (
-          view.toolName === "make_directory" &&
-          (status === "added" || status === "untracked" || status === "copied")
-        ) {
+        if (status === "added" || status === "untracked" || status === "copied") {
           return "directory created";
+        }
+        if (status === "deleted") {
+          return "directory deleted";
+        }
+        if (status === "modified" || status === "renamed") {
+          return "directory changed";
         }
         return "directory";
       }
 
       function renderFileBody(file) {
-        if (isDirectoryFile(file)) {
+        if (view.toolName === "make_directory" || isDirectoryFile(file)) {
           return renderDirectorySummary(file);
         }
         return renderDiffLines(file.diff);
@@ -1014,7 +1031,7 @@
         var statusText = prettyStatus(file.status);
         var plus = "+" + file.added;
         var minus = "-" + file.removed;
-        var isDirectory = isDirectoryFile(file);
+        var isDirectory = view.toolName === "make_directory" || isDirectoryFile(file);
         var metaHtml = isDirectory
           ? "<span class=\"status-label\">" + esc(directoryMetaLabel(file)) + "</span>"
           : "<span class=\"status-label\">" + esc(statusText) + "</span>" +
@@ -1118,15 +1135,12 @@
       function renderSearchPanel(current) {
         var summaryHtml =
           "<div class=\"search-summary\">" +
-            "<div class=\"panel-head\">" +
-              "<span class=\"panel-title\">search results</span>" +
-              "<span class=\"panel-kicker\">matches found</span>" +
-            "</div>" +
-            "<div class=\"summary-row\">" +
+            "<div class=\"summary-row metrics with-kicker\">" +
               renderSummaryStat("query", "query", current.searchQuery, "query") +
               renderSummaryStat("path", "path", current.searchPath, "path") +
               renderSummaryStat("files", "files", current.filesScanned, "") +
               renderSummaryStat("matches", "matches", current.matchCount, "other") +
+              "<span class=\"panel-kicker summary-kicker\">keywords found</span>" +
             "</div>" +
           "</div>";
         var resultsHtml = "";
@@ -1192,18 +1206,13 @@
       function renderListFilesPanel(current) {
         var summaryHtml =
           "<div class=\"listing-summary\">" +
-            "<div class=\"panel-head\">" +
-              "<span class=\"panel-title\">listed files</span>" +
-              "<span class=\"panel-kicker\">files listed</span>" +
-            "</div>" +
-            "<div class=\"summary-row\">" +
+            "<div class=\"summary-row metrics with-kicker\">" +
               renderSummaryStat("path", "path", current.listPath, "path") +
-            "</div>" +
-            "<div class=\"summary-row metrics\">" +
               renderSummaryStat("items", "items", current.listItemCount, "") +
               renderListStat("dir", "dirs", current.listDirectoryCount) +
               renderListStat("file", "files", current.listFileCount) +
               renderListStat("other", "other", current.listOtherCount) +
+              "<span class=\"panel-kicker summary-kicker\">files listed</span>" +
             "</div>" +
           "</div>";
         var rowsHtml = "";

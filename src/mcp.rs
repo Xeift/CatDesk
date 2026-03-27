@@ -1365,6 +1365,7 @@ fn build_auto_widget_structured_content(
             "panelMode": "tool_call",
             "title": "Changed Files",
             "state": state,
+            "toolName": tool_name,
             "changedFiles": changed_files,
             "hasChanges": !ctx.turn_files.is_empty()
         });
@@ -1375,6 +1376,7 @@ fn build_auto_widget_structured_content(
         "panelMode": "tool_call",
         "title": "Changed Files",
         "state": if is_error { "failed" } else { "done" },
+        "toolName": tool_name,
         "call": format!("call {}", tool_name),
         "detail": line,
         "changedFiles": [],
