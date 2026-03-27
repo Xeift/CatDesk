@@ -23,7 +23,7 @@ use ratatui::{
 };
 use state::{
     AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, Mode, SessionFlow,
-    SharedState, ToolMode,
+    SharedState, ToolMode, UsageTotals,
 };
 use std::io::{Write, stdout};
 use std::sync::Arc;
@@ -548,17 +548,26 @@ async fn run_theme_settings(
     state: SharedState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let themes = theme::all();
+    let mut confirm_reset_token_billing = false;
     let mut selected_idx = {
         let app = state.lock().await;
         themes.iter().position(|t| t.id == app.theme).unwrap_or(0)
     };
 
     loop {
-        let current_theme = {
+        let (current_theme, usage_totals) = {
             let app = state.lock().await;
-            app.current_theme()
+            (app.current_theme(), app.usage_totals.clone())
         };
-        terminal.draw(|f| draw_theme_settings(f, current_theme, selected_idx))?;
+        terminal.draw(|f| {
+            draw_theme_settings(
+                f,
+                current_theme,
+                &usage_totals,
+                selected_idx,
+                confirm_reset_token_billing,
+            )
+        })?;
 
         if event::poll(UI_POLL_INTERVAL)? {
             if let Event::Key(key) = event::read()? {
@@ -567,8 +576,12 @@ async fn run_theme_settings(
                 }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Up => selected_idx = selected_idx.saturating_sub(1),
+                    KeyCode::Up => {
+                        confirm_reset_token_billing = false;
+                        selected_idx = selected_idx.saturating_sub(1);
+                    }
                     KeyCode::Down => {
+                        confirm_reset_token_billing = false;
                         if selected_idx + 1 < themes.len() {
                             selected_idx += 1;
                         }
@@ -581,14 +594,33 @@ async fn run_theme_settings(
                         app.persist_state_with_log();
                         return Ok(());
                     }
-                    _ => {}
+                    KeyCode::Char('r') => {
+                        if !confirm_reset_token_billing {
+                            confirm_reset_token_billing = true;
+                            continue;
+                        }
+                        let mut app = state.lock().await;
+                        app.usage_totals = UsageTotals::default();
+                        app.log("INFO", "Token billing totals reset".into());
+                        app.persist_state_with_log();
+                        confirm_reset_token_billing = false;
+                    }
+                    _ => {
+                        confirm_reset_token_billing = false;
+                    }
                 }
             }
         }
     }
 }
 
-fn draw_theme_settings(f: &mut Frame, current_theme: &theme::ThemeDef, selected_idx: usize) {
+fn draw_theme_settings(
+    f: &mut Frame,
+    current_theme: &theme::ThemeDef,
+    usage_totals: &UsageTotals,
+    selected_idx: usize,
+    confirm_reset_token_billing: bool,
+) {
     let themes = theme::all();
     let palette = current_theme.palette;
     let area = f.area();
@@ -601,7 +633,7 @@ fn draw_theme_settings(f: &mut Frame, current_theme: &theme::ThemeDef, selected_
         ])
         .split(area);
 
-    let header = Paragraph::new("  Settings - Theme")
+    let header = Paragraph::new("  Settings")
         .style(
             Style::default()
                 .fg(palette.header_fg)
@@ -654,10 +686,58 @@ fn draw_theme_settings(f: &mut Frame, current_theme: &theme::ThemeDef, selected_
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Token billing:",
+        Style::default()
+            .fg(palette.title_fg)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("  Input: ", Style::default().fg(palette.muted_fg)),
+        Span::styled(
+            usage_totals.input_tokens.to_string(),
+            Style::default().fg(palette.primary_fg),
+        ),
+        Span::styled("   Output: ", Style::default().fg(palette.muted_fg)),
+        Span::styled(
+            usage_totals.output_tokens.to_string(),
+            Style::default().fg(palette.primary_fg),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Total: ", Style::default().fg(palette.muted_fg)),
+        Span::styled(
+            usage_totals.total_tokens.to_string(),
+            Style::default()
+                .fg(palette.secondary_fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   Tool calls: ", Style::default().fg(palette.muted_fg)),
+        Span::styled(
+            usage_totals.tool_call_count.to_string(),
+            Style::default().fg(palette.primary_fg),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  [r]", Style::default().fg(palette.warning_fg)),
+        Span::styled(
+            if confirm_reset_token_billing {
+                " Press again to confirm token billing reset"
+            } else {
+                " Reset token billing totals"
+            },
+            Style::default().fg(if confirm_reset_token_billing {
+                palette.danger_fg
+            } else {
+                palette.muted_fg
+            }),
+        ),
+    ]));
 
     let body = Paragraph::new(lines).block(
         Block::default()
-            .title(" Theme ")
+            .title(" Theme & Billing ")
             .borders(Borders::ALL)
             .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
@@ -669,6 +749,19 @@ fn draw_theme_settings(f: &mut Frame, current_theme: &theme::ThemeDef, selected_
         Span::raw(" Select  "),
         Span::styled("[Enter]", Style::default().fg(palette.success_fg)),
         Span::raw(" Apply  "),
+        Span::styled(
+            "[r]",
+            Style::default().fg(if confirm_reset_token_billing {
+                palette.danger_fg
+            } else {
+                palette.warning_fg
+            }),
+        ),
+        Span::raw(if confirm_reset_token_billing {
+            " Confirm reset  "
+        } else {
+            " Reset token billing  "
+        }),
         Span::styled("[q/Esc]", Style::default().fg(palette.danger_fg)),
         Span::raw(" Back"),
     ]))
