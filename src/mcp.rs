@@ -318,6 +318,16 @@ async fn handle_tools_list(
 
         if tool_mode.read_tools_enabled() {
             tools.push(json!({
+                "name": "mcp3000_instruction",
+                "title": "Get usage instructions",
+                "description": "Read MCP3000 operating guidance. Call this first if you are unsure which tool to use. Prefer dedicated tools over run_command whenever possible.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                },
+                "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+            }));
+            tools.push(json!({
                 "name": "read_file",
                 "title": "Read file",
                 "description": "Read a text file from workspace.",
@@ -552,6 +562,7 @@ async fn handle_tools_call(
                 }
             } else if tool_mode.read_tools_enabled() {
                 match tool_name.as_str() {
+                    "mcp3000_instruction" => handle_mcp3000_instruction(req, mode, tool_mode),
                     "read_file" => handle_read_file(req, workspace_root),
                     "list_files" => handle_list_files(req, workspace_root),
                     "search_text" => handle_search_text(req, workspace_root),
@@ -873,6 +884,80 @@ fn tool_name_from_request(req: &JsonRpcRequest) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("unknown_tool")
         .to_string()
+}
+
+fn mcp3000_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
+    let mut lines = vec![
+        "MCP3000 usage instructions".to_string(),
+        "".to_string(),
+        "Prefer dedicated MCP tools whenever a dedicated tool can complete the task.".to_string(),
+    ];
+
+    if mode.computer_enabled() && tool_mode.read_tools_enabled() {
+        lines.push(
+            "Use read_file to read files, list_files to inspect directories, and search_text to search the workspace."
+                .to_string(),
+        );
+        if tool_mode.write_tools_enabled() {
+            lines.push(
+                "Use write_file, append_file, replace_in_file, make_directory, move_path, and delete_path for direct workspace edits and filesystem changes."
+                    .to_string(),
+            );
+        }
+    }
+
+    if mode.browser_enabled() {
+        lines.push(
+            "For browser tasks, prefer the dedicated browser and DevTools tools exposed by the server."
+                .to_string(),
+        );
+        lines.push(
+            "If the custom connector disconnects or returns an empty list, always call api_tool.list_resources to refresh."
+                .to_string(),
+        );
+    }
+
+    if mode.computer_enabled() && tool_mode.run_command_enabled() {
+        lines.push(
+            "Use run_command only as a last resort when the available dedicated tools cannot complete the operation."
+                .to_string(),
+        );
+    }
+
+    lines.push(
+        "Keep file and directory operations inside the workspace root unless a tool explicitly says otherwise."
+            .to_string(),
+    );
+    lines.push(
+        "When the work is complete and you are ready to report back, always call render_final_summary_widget."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn mcp3000_instruction_structured(mode: Mode, tool_mode: ToolMode) -> Value {
+    json!({
+        "schema": "mcp3000.review.v1",
+        "panelMode": "tool_call",
+        "title": "MCP3000 Instruction",
+        "state": "done",
+        "toolName": "mcp3000_instruction",
+        "instructionText": mcp3000_instruction_text(mode, tool_mode),
+        "changedFiles": [],
+        "hasChanges": false
+    })
+}
+
+fn handle_mcp3000_instruction(
+    req: &JsonRpcRequest,
+    mode: Mode,
+    tool_mode: ToolMode,
+) -> JsonRpcResponse {
+    tool_success_response_with_structured(
+        req,
+        mcp3000_instruction_text(mode, tool_mode),
+        mcp3000_instruction_structured(mode, tool_mode),
+    )
 }
 
 fn build_turn_token_payload(req: &JsonRpcRequest, tool_name: &str) -> Value {
