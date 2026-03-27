@@ -355,9 +355,7 @@ async fn post_mcp(
         let mut app = s.app.lock().await;
         if app.usage_totals != usage_totals {
             app.usage_totals = usage_totals.clone();
-            if let Err(e) = app.persist_usage_totals() {
-                app.log("WARN", format!("Failed to persist usage totals: {e}"));
-            }
+            app.persist_state_with_log();
         }
         app.session_count = sessions.len();
         app.record_session_flow(&session_id, &response_flow_events, FlowDirection::Backward);

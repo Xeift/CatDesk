@@ -28,7 +28,7 @@ pub struct SessionFlow {
     pub closing_step_ms: u64,
 }
 
-const USAGE_TOTALS_FILE_NAME: &str = ".mcp3000_usage_totals.json";
+const APP_STATE_FILE_NAME: &str = "mcp3000_state.json";
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,18 +51,46 @@ impl UsageTotals {
         self.total_tokens = self.input_tokens.saturating_add(self.output_tokens);
         self
     }
+}
 
-    fn load_from_path(path: &Path) -> Self {
-        let Ok(bytes) = std::fs::read(path) else {
-            return Self::default();
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedAppState {
+    theme: String,
+    mode: Mode,
+    tool_mode: ToolMode,
+    usage_totals: UsageTotals,
+    selected_browser: Option<DetectedBrowser>,
+}
+
+impl Default for PersistedAppState {
+    fn default() -> Self {
+        Self {
+            theme: theme::DEFAULT_THEME_ID.to_string(),
+            mode: Mode::Both,
+            tool_mode: ToolMode::OneTool,
+            usage_totals: UsageTotals::default(),
+            selected_browser: None,
+        }
+    }
+}
+
+impl PersistedAppState {
+    fn load_from_path(path: &Path) -> std::io::Result<Self> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e),
         };
-        serde_json::from_slice::<Self>(&bytes)
-            .unwrap_or_default()
-            .normalized()
+        let mut state = serde_json::from_slice::<Self>(&bytes).map_err(std::io::Error::other)?;
+        state.usage_totals = state.usage_totals.normalized();
+        Ok(state)
     }
 
     fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        let mut state = self.clone();
+        state.usage_totals = state.usage_totals.normalized();
+        let bytes = serde_json::to_vec_pretty(&state).map_err(std::io::Error::other)?;
         std::fs::write(path, bytes)
     }
 }
@@ -91,7 +119,8 @@ pub struct FlowAnimSegment {
 }
 
 /// Which MCP backends to enable.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Mode {
     Computer, // run_command only
     Browser,  // chrome-devtools-mcp only
@@ -115,7 +144,8 @@ impl Mode {
 }
 
 /// Which local toolset to expose in MCP.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ToolMode {
     OneTool,    // only run_command
     MultiTools, // codex/claude-style workspace tools
@@ -176,7 +206,7 @@ pub struct AppState {
     pub session_count: usize,
     pub request_count: u64,
     pub usage_totals: UsageTotals,
-    usage_totals_path: PathBuf,
+    persisted_state_path: PathBuf,
     pub server_handle: Option<tokio::task::JoinHandle<()>>,
     pub ngrok_child: Option<tokio::process::Child>,
     pub remote_browser_child: Option<tokio::process::Child>,
@@ -198,8 +228,14 @@ fn short_session_id(sid: &str) -> String {
     sid[..sid.len().min(8)].to_string()
 }
 
-fn usage_totals_path(workspace_root: &str) -> PathBuf {
-    Path::new(workspace_root).join(USAGE_TOTALS_FILE_NAME)
+fn persisted_state_path() -> std::io::Result<PathBuf> {
+    let exe_path = std::env::current_exe()?;
+    let Some(dir) = exe_path.parent() else {
+        return Err(std::io::Error::other(
+            "failed to resolve executable directory",
+        ));
+    };
+    Ok(dir.join(APP_STATE_FILE_NAME))
 }
 
 fn now_hms() -> String {
@@ -284,13 +320,21 @@ fn enqueue_flow_segment(
 }
 
 impl AppState {
-    pub fn new(port: u16, workspace_root: String) -> Self {
-        let usage_totals_path = usage_totals_path(&workspace_root);
-        let usage_totals = UsageTotals::load_from_path(&usage_totals_path);
-        Self {
-            theme: theme::DEFAULT_THEME_ID.to_string(),
-            mode: Mode::Both,
-            tool_mode: ToolMode::OneTool,
+    pub fn new(port: u16, workspace_root: String) -> std::io::Result<Self> {
+        let persisted_state_path = persisted_state_path()?;
+        Self::from_persisted_state_path(port, workspace_root, persisted_state_path)
+    }
+
+    fn from_persisted_state_path(
+        port: u16,
+        workspace_root: String,
+        persisted_state_path: PathBuf,
+    ) -> std::io::Result<Self> {
+        let persisted = PersistedAppState::load_from_path(&persisted_state_path)?;
+        Ok(Self {
+            theme: persisted.theme,
+            mode: persisted.mode,
+            tool_mode: persisted.tool_mode,
             server_running: false,
             ngrok_running: false,
             ngrok_url: None,
@@ -300,18 +344,18 @@ impl AppState {
             port,
             workspace_root,
             detected_browsers: Vec::new(),
-            selected_browser: None,
+            selected_browser: persisted.selected_browser,
             logs: Vec::new(),
             session_flows: Vec::new(),
             session_count: 0,
             request_count: 0,
-            usage_totals,
-            usage_totals_path,
+            usage_totals: persisted.usage_totals,
+            persisted_state_path,
             server_handle: None,
             ngrok_child: None,
             remote_browser_child: None,
             devtools_child: None,
-        }
+        })
     }
 
     pub fn current_theme(&self) -> &'static theme::ThemeDef {
@@ -330,8 +374,25 @@ impl AppState {
         }
     }
 
-    pub fn persist_usage_totals(&self) -> std::io::Result<()> {
-        self.usage_totals.save_to_path(&self.usage_totals_path)
+    fn persisted_state(&self) -> PersistedAppState {
+        PersistedAppState {
+            theme: self.theme.clone(),
+            mode: self.mode,
+            tool_mode: self.tool_mode,
+            usage_totals: self.usage_totals.clone().normalized(),
+            selected_browser: self.selected_browser.clone(),
+        }
+    }
+
+    pub fn persist_state(&self) -> std::io::Result<()> {
+        self.persisted_state()
+            .save_to_path(&self.persisted_state_path)
+    }
+
+    pub fn persist_state_with_log(&mut self) {
+        if let Err(e) = self.persist_state() {
+            self.log("WARN", format!("Failed to persist app state: {e}"));
+        }
     }
 
     pub fn record_session_flow(&mut self, sid: &str, events: &[String], direction: FlowDirection) {
@@ -422,28 +483,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_state_loads_usage_totals_from_workspace_file() {
+    fn app_state_loads_persisted_state_file() {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("mcp3000-usage-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("mcp3000-state-load-{unique}"));
         std::fs::create_dir_all(&workspace).expect("create temp workspace");
-        let usage_path = workspace.join(USAGE_TOTALS_FILE_NAME);
+        let state_path = workspace.join(APP_STATE_FILE_NAME);
         std::fs::write(
-            &usage_path,
-            r#"{"inputTokens":120,"outputTokens":34,"totalTokens":154,"toolCallCount":7}"#,
+            &state_path,
+            r#"{"theme":"neon","mode":"browser","toolMode":"multiTools","usageTotals":{"inputTokens":120,"outputTokens":34,"totalTokens":154,"toolCallCount":7},"selectedBrowser":null}"#,
         )
-        .expect("write usage totals");
+        .expect("write state file");
 
-        let app = AppState::new(8787, workspace.to_string_lossy().into_owned());
+        let app = AppState::from_persisted_state_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            state_path.clone(),
+        )
+        .expect("load app state");
 
+        assert_eq!(app.theme, "neon");
+        assert!(matches!(app.mode, Mode::Browser));
+        assert!(matches!(app.tool_mode, ToolMode::MultiTools));
         assert_eq!(app.usage_totals.input_tokens, 120);
         assert_eq!(app.usage_totals.output_tokens, 34);
         assert_eq!(app.usage_totals.total_tokens, 154);
         assert_eq!(app.usage_totals.tool_call_count, 7);
 
-        let _ = std::fs::remove_file(usage_path);
+        let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn persist_state_writes_single_state_file() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("mcp3000-state-save-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let state_path = workspace.join(APP_STATE_FILE_NAME);
+
+        let mut app = AppState::from_persisted_state_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            state_path.clone(),
+        )
+        .expect("create app state");
+        app.theme = "neon".into();
+        app.mode = Mode::Computer;
+        app.tool_mode = ToolMode::ReadOnly;
+        app.usage_totals.accumulate(12, 8, 3);
+        app.persist_state().expect("persist state");
+
+        let saved = PersistedAppState::load_from_path(&state_path).expect("load state file");
+        assert_eq!(saved.theme, "neon");
+        assert!(matches!(saved.mode, Mode::Computer));
+        assert!(matches!(saved.tool_mode, ToolMode::ReadOnly));
+        assert_eq!(saved.usage_totals.input_tokens, 12);
+        assert_eq!(saved.usage_totals.output_tokens, 8);
+        assert_eq!(saved.usage_totals.total_tokens, 20);
+        assert_eq!(saved.usage_totals.tool_call_count, 3);
+
+        let _ = std::fs::remove_file(state_path);
         let _ = std::fs::remove_dir(workspace);
     }
 }

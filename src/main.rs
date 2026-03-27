@@ -331,7 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| "/tmp".into());
 
-    let state: SharedState = Arc::new(Mutex::new(AppState::new(port, workspace_root)));
+    let state: SharedState = Arc::new(Mutex::new(AppState::new(port, workspace_root)?));
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -395,6 +395,7 @@ async fn run_app(
                         app.tool_mode = app.tool_mode.next();
                         let tool_mode_label = app.tool_mode.label();
                         app.log("INFO", format!("Tool mode: {tool_mode_label}"));
+                        app.persist_state_with_log();
                         continue;
                     }
                     _ => continue,
@@ -403,6 +404,7 @@ async fn run_app(
                     let mut app = state.lock().await;
                     app.mode = mode;
                     app.log("INFO", format!("Mode: {}", mode.label()));
+                    app.persist_state_with_log();
                 }
                 break;
             }
@@ -576,6 +578,7 @@ async fn run_theme_settings(
                         let mut app = state.lock().await;
                         app.theme = picked.id.to_string();
                         app.log("INFO", format!("Theme changed to {}", picked.label));
+                        app.persist_state_with_log();
                         return Ok(());
                     }
                     _ => {}
@@ -683,18 +686,60 @@ async fn mode_is_browser_enabled(state: SharedState) -> bool {
     state.lock().await.mode.browser_enabled()
 }
 
+fn browser_identity_matches(
+    browser: &browser::DetectedBrowser,
+    selected: &browser::DetectedBrowser,
+) -> bool {
+    browser.path == selected.path && browser.binary == selected.binary
+}
+
+fn selected_supported_browser_idx(
+    browsers: &[browser::DetectedBrowser],
+    selected_browser: Option<&browser::DetectedBrowser>,
+) -> usize {
+    let supported_indices: Vec<usize> = browsers
+        .iter()
+        .enumerate()
+        .filter(|(_, browser)| browser.mcp_supported)
+        .map(|(idx, _)| idx)
+        .collect();
+    if supported_indices.is_empty() {
+        return 0;
+    }
+    let Some(selected_browser) = selected_browser else {
+        return 0;
+    };
+    let Some(browser_idx) = browsers
+        .iter()
+        .position(|browser| browser_identity_matches(browser, selected_browser))
+    else {
+        return 0;
+    };
+    supported_indices
+        .iter()
+        .position(|idx| *idx == browser_idx)
+        .unwrap_or(0)
+}
+
 async fn run_browser_select(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: SharedState,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let mut browsers = browser::detect_browsers();
-    {
+    let mut selected_supported_idx = {
         let mut app = state.lock().await;
         app.detected_browsers = browsers.clone();
-        app.selected_browser = None;
-    }
-
-    let mut selected_supported_idx: usize = 0;
+        let selected_missing = app.selected_browser.as_ref().is_some_and(|selected| {
+            !browsers
+                .iter()
+                .any(|browser| browser_identity_matches(browser, selected))
+        });
+        if selected_missing {
+            app.selected_browser = None;
+            app.persist_state_with_log();
+        }
+        selected_supported_browser_idx(&browsers, app.selected_browser.as_ref())
+    };
     loop {
         let supported_indices: Vec<usize> = browsers
             .iter()
@@ -734,6 +779,20 @@ async fn run_browser_select(
                         browsers = browser::detect_browsers();
                         let mut app = state.lock().await;
                         app.detected_browsers = browsers.clone();
+                        let selected_missing =
+                            app.selected_browser.as_ref().is_some_and(|selected| {
+                                !browsers
+                                    .iter()
+                                    .any(|browser| browser_identity_matches(browser, selected))
+                            });
+                        if selected_missing {
+                            app.selected_browser = None;
+                            app.persist_state_with_log();
+                        }
+                        selected_supported_idx = selected_supported_browser_idx(
+                            &browsers,
+                            app.selected_browser.as_ref(),
+                        );
                     }
                     KeyCode::Up => {
                         selected_supported_idx = selected_supported_idx.saturating_sub(1)
@@ -789,6 +848,7 @@ async fn persist_selected_browser(state: SharedState, selected: browser::Detecte
         "INFO",
         format!("Selected browser remote debugging: {remote_info}"),
     );
+    app.persist_state_with_log();
 }
 
 fn draw_browser_select(
@@ -1123,6 +1183,7 @@ async fn ensure_selected_browser_remote_debugging(
                     selected.name, port
                 ),
             );
+            app.persist_state_with_log();
         }
         Some(selected)
     } else {
@@ -1169,6 +1230,7 @@ async fn start_services(state: SharedState) -> Option<Arc<Mutex<DevtoolsBridge>>
         let mut app = state.lock().await;
         app.detected_browsers = detected_browsers.clone();
         app.selected_browser = selected_browser.clone();
+        app.persist_state_with_log();
     }
 
     let browser_summary = browser::format_browser_names(&detected_browsers);

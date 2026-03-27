@@ -1,8 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DetectedBrowser {
     pub name: String,
     pub binary: String,
