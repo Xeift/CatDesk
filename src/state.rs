@@ -153,6 +153,12 @@ pub enum ToolMode {
 }
 
 impl ToolMode {
+    pub fn all() -> &'static [Self] {
+        const TOOL_MODES: [ToolMode; 3] =
+            [ToolMode::OneTool, ToolMode::MultiTools, ToolMode::ReadOnly];
+        &TOOL_MODES
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ToolMode::OneTool => "1-tool",
@@ -161,11 +167,11 @@ impl ToolMode {
         }
     }
 
-    pub fn next(self) -> Self {
+    pub fn description(self) -> &'static str {
         match self {
-            ToolMode::OneTool => ToolMode::MultiTools,
-            ToolMode::MultiTools => ToolMode::ReadOnly,
-            ToolMode::ReadOnly => ToolMode::OneTool,
+            ToolMode::OneTool => "Expose only the run_command tool.",
+            ToolMode::MultiTools => "Expose workspace read/write tools plus run_command.",
+            ToolMode::ReadOnly => "Expose safe read-only workspace tools only.",
         }
     }
 

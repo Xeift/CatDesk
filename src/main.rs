@@ -387,15 +387,7 @@ async fn run_app(
                     KeyCode::Char('3') => Mode::Both,
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('s') => {
-                        run_theme_settings(terminal, state.clone()).await?;
-                        continue;
-                    }
-                    KeyCode::Tab => {
-                        let mut app = state.lock().await;
-                        app.tool_mode = app.tool_mode.next();
-                        let tool_mode_label = app.tool_mode.label();
-                        app.log("INFO", format!("Tool mode: {tool_mode_label}"));
-                        app.persist_state_with_log();
+                        run_settings(terminal, state.clone()).await?;
                         continue;
                     }
                     _ => continue,
@@ -509,20 +501,11 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
             ),
             Span::styled("Settings", Style::default().fg(palette.primary_fg)),
             Span::styled(
-                format!(" (theme: {})", theme.label),
-                Style::default().fg(palette.muted_fg),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  [Tab] ",
-                Style::default()
-                    .fg(palette.key_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Tool mode", Style::default().fg(palette.primary_fg)),
-            Span::styled(
-                format!(" ({})", tool_mode.label()),
+                format!(
+                    " (theme: {}, tool mode: {})",
+                    theme.label,
+                    tool_mode.label()
+                ),
                 Style::default().fg(palette.muted_fg),
             ),
         ]),
@@ -543,28 +526,31 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
     f.render_widget(select, chunks[1]);
 }
 
-async fn run_theme_settings(
+async fn run_settings(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: SharedState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let themes = theme::all();
+    let tool_modes = ToolMode::all();
     let mut confirm_reset_token_billing = false;
-    let mut selected_idx = {
+    let mut selected_row = {
         let app = state.lock().await;
         themes.iter().position(|t| t.id == app.theme).unwrap_or(0)
     };
+    let total_rows = themes.len() + tool_modes.len();
 
     loop {
-        let (current_theme, usage_totals) = {
+        let (current_theme, current_tool_mode, usage_totals) = {
             let app = state.lock().await;
-            (app.current_theme(), app.usage_totals.clone())
+            (app.current_theme(), app.tool_mode, app.usage_totals.clone())
         };
         terminal.draw(|f| {
-            draw_theme_settings(
+            draw_settings(
                 f,
                 current_theme,
+                current_tool_mode,
                 &usage_totals,
-                selected_idx,
+                selected_row,
                 confirm_reset_token_billing,
             )
         })?;
@@ -578,21 +564,32 @@ async fn run_theme_settings(
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Up => {
                         confirm_reset_token_billing = false;
-                        selected_idx = selected_idx.saturating_sub(1);
+                        selected_row = selected_row.saturating_sub(1);
                     }
                     KeyCode::Down => {
                         confirm_reset_token_billing = false;
-                        if selected_idx + 1 < themes.len() {
-                            selected_idx += 1;
+                        if selected_row + 1 < total_rows {
+                            selected_row += 1;
                         }
                     }
                     KeyCode::Enter => {
-                        let picked = themes[selected_idx];
+                        confirm_reset_token_billing = false;
                         let mut app = state.lock().await;
-                        app.theme = picked.id.to_string();
-                        app.log("INFO", format!("Theme changed to {}", picked.label));
-                        app.persist_state_with_log();
-                        return Ok(());
+                        if selected_row < themes.len() {
+                            let picked = themes[selected_row];
+                            if app.theme != picked.id {
+                                app.theme = picked.id.to_string();
+                                app.log("INFO", format!("Theme changed to {}", picked.label));
+                                app.persist_state_with_log();
+                            }
+                        } else {
+                            let picked = tool_modes[selected_row - themes.len()];
+                            if app.tool_mode != picked {
+                                app.tool_mode = picked;
+                                app.log("INFO", format!("Tool mode: {}", picked.label()));
+                                app.persist_state_with_log();
+                            }
+                        }
                     }
                     KeyCode::Char('r') => {
                         if !confirm_reset_token_billing {
@@ -614,14 +611,16 @@ async fn run_theme_settings(
     }
 }
 
-fn draw_theme_settings(
+fn draw_settings(
     f: &mut Frame,
     current_theme: &theme::ThemeDef,
+    current_tool_mode: ToolMode,
     usage_totals: &UsageTotals,
-    selected_idx: usize,
+    selected_row: usize,
     confirm_reset_token_billing: bool,
 ) {
     let themes = theme::all();
+    let tool_modes = ToolMode::all();
     let palette = current_theme.palette;
     let area = f.area();
     let chunks = Layout::default()
@@ -657,7 +656,7 @@ fn draw_theme_settings(
         )),
     ];
     for (idx, theme) in themes.iter().enumerate() {
-        let selected = idx == selected_idx;
+        let selected = idx == selected_row;
         let marker = if selected { ">" } else { " " };
         let name_style = if selected {
             Style::default()
@@ -667,25 +666,61 @@ fn draw_theme_settings(
             Style::default().fg(palette.primary_fg)
         };
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled(
+        let mut spans = vec![Span::styled(
             format!(" {} [{}] {}", marker, idx + 1, theme.label),
             name_style,
-        )]));
+        )];
+        if theme.id == current_theme.id {
+            spans.push(Span::styled(
+                "  [current]",
+                Style::default()
+                    .fg(palette.secondary_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(spans));
         lines.push(Line::from(vec![Span::styled(
             format!("     {}", theme.description),
             Style::default().fg(palette.muted_fg),
         )]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  Current: ", Style::default().fg(palette.muted_fg)),
-        Span::styled(
-            current_theme.label,
+    lines.push(Line::from(vec![Span::styled(
+        "  Choose a tool mode:",
+        Style::default()
+            .fg(palette.title_fg)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    for (idx, tool_mode) in tool_modes.iter().enumerate() {
+        let row_idx = themes.len() + idx;
+        let selected = row_idx == selected_row;
+        let marker = if selected { ">" } else { " " };
+        let name_style = if selected {
             Style::default()
-                .fg(palette.secondary_fg)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+                .fg(palette.key_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.primary_fg)
+        };
+        lines.push(Line::from(""));
+        let mut spans = vec![Span::styled(
+            format!(" {} [{}] {}", marker, row_idx + 1, tool_mode.label()),
+            name_style,
+        )];
+        if *tool_mode == current_tool_mode {
+            spans.push(Span::styled(
+                "  [current]",
+                Style::default()
+                    .fg(palette.secondary_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(spans));
+        lines.push(Line::from(vec![Span::styled(
+            format!("     {}", tool_mode.description()),
+            Style::default().fg(palette.muted_fg),
+        )]));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  Token billing:",
@@ -737,7 +772,7 @@ fn draw_theme_settings(
 
     let body = Paragraph::new(lines).block(
         Block::default()
-            .title(" Theme & Billing ")
+            .title(" Theme, Tool Mode & Billing ")
             .borders(Borders::ALL)
             .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
