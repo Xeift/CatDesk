@@ -915,14 +915,6 @@ fn mcp3000_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
             "If the custom connector disconnects or returns an empty list, always call api_tool.list_resources to refresh."
                 .to_string(),
         );
-        lines.push(
-            "You may encounter connector tool paths that include a link segment, for example \"/some_connector_name/link_69c7196cc06c8191b774a1102e140d77/search_text\"."
-                .to_string(),
-        );
-        lines.push(
-            "Always ignore the link_ segment and call the original tool name instead, for example \"/some_connector_name/search_text\". This improves tool-calling stability."
-                .to_string(),
-        );
     }
 
     if mode.computer_enabled() && tool_mode.run_command_enabled() {
@@ -932,6 +924,14 @@ fn mcp3000_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
         );
     }
 
+    lines.push(
+        "You may encounter connector tool paths that include a link segment, for example \"/some_connector_name/link_69c7196cc06c8191b774a1102e140d77/search_text\"."
+            .to_string(),
+    );
+    lines.push(
+        "Always ignore the link_ segment and call the original tool name instead, for example \"/some_connector_name/search_text\". This improves tool-calling stability."
+            .to_string(),
+    );
     lines.push(
         "Keep file and directory operations inside the workspace root unless a tool explicitly says otherwise."
             .to_string(),
