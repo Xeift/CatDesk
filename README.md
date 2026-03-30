@@ -64,7 +64,7 @@ So why not use your 3,000 weekly messages for coding?
    ./catdesk
    ```
 
-   By default, CatDesk listens on port `3200`, as defined in [`main()`](/home/xeift/Desktop/MCP3000/src/main.rs#L325). You can override it with `PORT`. The workspace root defaults to `HOME` and can be overridden with `WORKSPACE_ROOT`, also in [`main()`](/home/xeift/Desktop/MCP3000/src/main.rs#L325).
+   By default, CatDesk listens on port `3200`, as defined in [`main()`](/home/xeift/Desktop/MCP3000/src/main.rs#L325). You can override it with `PORT`. The workspace root defaults to the current working directory and can be overridden with `WORKSPACE_ROOT`, also in [`main()`](/home/xeift/Desktop/MCP3000/src/main.rs#L325).
 
 4. Wait for the TUI to show the MCP Server URL.
    CatDesk starts the local server and ngrok automatically in [`start_services()`](/home/xeift/Desktop/MCP3000/src/main.rs#L1425). The MCP URL is shown in the UI at [`draw_ui()`](/home/xeift/Desktop/MCP3000/src/main.rs#L1748), and the actual value includes a random runtime slug, generated in [`generate_mcp_slug()`](/home/xeift/Desktop/MCP3000/src/state.rs#L501). Because ngrok URLs and the slug both change between runs, you should treat the URL as ephemeral.

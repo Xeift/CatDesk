@@ -327,9 +327,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3200);
-    let workspace_root = std::env::var("WORKSPACE_ROOT")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| "/tmp".into());
+    let workspace_root = match std::env::var("WORKSPACE_ROOT") {
+        Ok(path) => path,
+        Err(_) => std::env::current_dir()?.to_string_lossy().into_owned(),
+    };
 
     let state: SharedState = Arc::new(Mutex::new(AppState::new(port, workspace_root)?));
 
