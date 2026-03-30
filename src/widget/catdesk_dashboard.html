@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MCP3000 Review</title>
+  <title>CatDesk Review</title>
   <style>
     :root {
       color-scheme: dark;
@@ -640,7 +640,7 @@
   <script>
     (function () {
       var view = {
-        schema: "mcp3000.review.v1",
+        schema: "catdesk.review.v1",
         panelMode: "tool_call",
         title: "Changed Files",
         state: "done",
@@ -776,7 +776,7 @@
         var toolCallCount = Number(data.toolCallCount);
         var historyToolCallCount = Number(data.historyToolCallCount);
         var next = {
-          schema: asString(data.schema, "mcp3000.review.v1"),
+          schema: asString(data.schema, "catdesk.review.v1"),
           panelMode: asString(data.panelMode, "tool_call"),
           title: asString(data.title, view.title),
           state: normalizeStatus(data.state, "done"),
@@ -841,7 +841,7 @@
           if (current.structuredContent && typeof current.structuredContent === "object") {
             return current.structuredContent;
           }
-          if (current.schema === "mcp3000.review.v1") {
+          if (current.schema === "catdesk.review.v1") {
             return current;
           }
 

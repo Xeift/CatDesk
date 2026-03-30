@@ -1,5 +1,5 @@
 [package]
-name = "mcp3000"
+name = "catdesk"
 version = "4.0.0"
 edition = "2024"
 

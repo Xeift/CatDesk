@@ -14,13 +14,13 @@ use crate::devtools::DevtoolsBridge;
 use crate::state::{Mode, ToolMode};
 use crate::workspace_tools;
 
-const SERVER_NAME: &str = "mcp3000";
+const SERVER_NAME: &str = "catdesk";
 const SERVER_VERSION: &str = "4.0.0";
 const PROTOCOL_VERSION: &str = "2025-03-26";
-const UI_TEMPLATE_URI: &str = "ui://widget/mcp3000-dashboard.html";
+const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 const RENDER_FINAL_SUMMARY_WIDGET_TOOL: &str = "render_final_summary_widget";
-const MCP3000_WIDGET_HTML: &str = include_str!("widget/mcp3000_dashboard.html");
+const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
@@ -200,7 +200,7 @@ pub async fn handle_request(
                     "params": {
                         "protocolVersion": PROTOCOL_VERSION,
                         "capabilities": {},
-                        "clientInfo": {"name": "mcp3000-bridge", "version": SERVER_VERSION}
+                        "clientInfo": {"name": "catdesk-bridge", "version": SERVER_VERSION}
                     }
                 });
                 let mut b = bridge.lock().await;
@@ -254,8 +254,8 @@ fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
         json!({
             "resources": [{
                 "uri": UI_TEMPLATE_URI,
-                "name": "MCP3000 dashboard widget",
-                "description": "Embedded ChatGPT widget for MCP3000 status and timeline data.",
+                "name": "CatDesk dashboard widget",
+                "description": "Embedded ChatGPT widget for CatDesk status and timeline data.",
                 "mimeType": UI_TEMPLATE_MIME_TYPE,
                 "_meta": { "ui": { "prefersBorder": true } }
             }],
@@ -279,7 +279,7 @@ fn handle_resources_read(req: &JsonRpcRequest) -> JsonRpcResponse {
             "contents": [{
                 "uri": UI_TEMPLATE_URI,
                 "mimeType": UI_TEMPLATE_MIME_TYPE,
-                "text": MCP3000_WIDGET_HTML,
+                "text": CATDESK_WIDGET_HTML,
                 "_meta": { "ui": { "prefersBorder": true } }
             }]
         }),
@@ -318,9 +318,9 @@ async fn handle_tools_list(
 
         if tool_mode.read_tools_enabled() {
             tools.push(json!({
-                "name": "mcp3000_instruction",
+                "name": "catdesk_instruction",
                 "title": "Get usage instructions",
-                "description": "Read MCP3000 operating guidance. Call this first if you are unsure which tool to use. Prefer dedicated tools over run_command whenever possible.",
+                "description": "Read CatDesk operating guidance. Call this first if you are unsure which tool to use. Prefer dedicated tools over run_command whenever possible.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -562,7 +562,7 @@ async fn handle_tools_call(
                 }
             } else if tool_mode.read_tools_enabled() {
                 match tool_name.as_str() {
-                    "mcp3000_instruction" => handle_mcp3000_instruction(req, mode, tool_mode),
+                    "catdesk_instruction" => handle_catdesk_instruction(req, mode, tool_mode),
                     "read_file" => handle_read_file(req, workspace_root),
                     "list_files" => handle_list_files(req, workspace_root),
                     "search_text" => handle_search_text(req, workspace_root),
@@ -827,7 +827,7 @@ fn handle_render_final_summary_widget(
         });
 
     let structured = json!({
-        "schema": "mcp3000.review.v1",
+        "schema": "catdesk.review.v1",
         "panelMode": panel_mode,
         "title": title,
         "state": state,
@@ -886,9 +886,9 @@ fn tool_name_from_request(req: &JsonRpcRequest) -> String {
         .to_string()
 }
 
-fn mcp3000_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
+fn catdesk_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
     let mut lines = vec![
-        "MCP3000 usage instructions".to_string(),
+        "CatDesk usage instructions".to_string(),
         "".to_string(),
         "Prefer dedicated MCP tools whenever a dedicated tool can complete the task.".to_string(),
     ];
@@ -943,28 +943,28 @@ fn mcp3000_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
     lines.join("\n")
 }
 
-fn mcp3000_instruction_structured(mode: Mode, tool_mode: ToolMode) -> Value {
+fn catdesk_instruction_structured(mode: Mode, tool_mode: ToolMode) -> Value {
     json!({
-        "schema": "mcp3000.review.v1",
+        "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
-        "title": "MCP3000 Instruction",
+        "title": "CatDesk Instruction",
         "state": "done",
-        "toolName": "mcp3000_instruction",
-        "instructionText": mcp3000_instruction_text(mode, tool_mode),
+        "toolName": "catdesk_instruction",
+        "instructionText": catdesk_instruction_text(mode, tool_mode),
         "changedFiles": [],
         "hasChanges": false
     })
 }
 
-fn handle_mcp3000_instruction(
+fn handle_catdesk_instruction(
     req: &JsonRpcRequest,
     mode: Mode,
     tool_mode: ToolMode,
 ) -> JsonRpcResponse {
     tool_success_response_with_structured(
         req,
-        mcp3000_instruction_text(mode, tool_mode),
-        mcp3000_instruction_structured(mode, tool_mode),
+        catdesk_instruction_text(mode, tool_mode),
+        catdesk_instruction_structured(mode, tool_mode),
     )
 }
 
@@ -1321,7 +1321,7 @@ fn build_auto_widget_structured_content(
             (if is_error { "failed" } else { "done" }, Vec::new(), false)
         };
         return json!({
-            "schema": "mcp3000.review.v1",
+            "schema": "catdesk.review.v1",
             "panelMode": "tool_call",
             "title": "Command Output",
             "state": state,
@@ -1342,7 +1342,7 @@ fn build_auto_widget_structured_content(
         let path_arg = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
         let parsed = parse_search_text_output(&extract_tool_result_text(result));
         return json!({
-            "schema": "mcp3000.review.v1",
+            "schema": "catdesk.review.v1",
             "panelMode": "tool_call",
             "title": "Search Results",
             "state": if is_error { "failed" } else { "done" },
@@ -1369,7 +1369,7 @@ fn build_auto_widget_structured_content(
         };
         let changed_files: Vec<Value> = ctx.turn_files.iter().map(file_entry_json).collect();
         return json!({
-            "schema": "mcp3000.review.v1",
+            "schema": "catdesk.review.v1",
             "panelMode": "tool_call",
             "title": "Changed Files",
             "state": state,
@@ -1380,7 +1380,7 @@ fn build_auto_widget_structured_content(
     }
 
     json!({
-        "schema": "mcp3000.review.v1",
+        "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
         "title": "Changed Files",
         "state": if is_error { "failed" } else { "done" },
@@ -2054,7 +2054,7 @@ fn handle_list_files(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
         Ok(listing) => {
             let text = listing.render_text();
             let structured = json!({
-                "schema": "mcp3000.review.v1",
+                "schema": "catdesk.review.v1",
                 "panelMode": "tool_call",
                 "title": "List Files",
                 "state": "done",

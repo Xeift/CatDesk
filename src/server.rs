@@ -192,7 +192,7 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
     let app = s.app.lock().await;
     Json(json!({
         "status": "ok",
-        "name": "MCP3000",
+        "name": "CatDesk",
         "description": "MCP Tools for ChatGPT to control your computer and browser",
         "mode": app.mode.label(),
         "tool_mode": app.tool_mode.label(),

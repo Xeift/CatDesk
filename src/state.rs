@@ -28,7 +28,7 @@ pub struct SessionFlow {
     pub closing_step_ms: u64,
 }
 
-const APP_STATE_FILE_NAME: &str = "mcp3000_state.json";
+const APP_STATE_FILE_NAME: &str = "catdesk_state.json";
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -494,7 +494,7 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("mcp3000-state-load-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("catdesk-state-load-{unique}"));
         std::fs::create_dir_all(&workspace).expect("create temp workspace");
         let state_path = workspace.join(APP_STATE_FILE_NAME);
         std::fs::write(
@@ -528,7 +528,7 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("mcp3000-state-save-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("catdesk-state-save-{unique}"));
         std::fs::create_dir_all(&workspace).expect("create temp workspace");
         let state_path = workspace.join(APP_STATE_FILE_NAME);
 

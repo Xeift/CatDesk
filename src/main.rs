@@ -431,7 +431,7 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
         .split(area);
 
     let header =
-        Paragraph::new("  MCP3000 - MCP Tools for ChatGPT to control your computer and browser")
+        Paragraph::new("  CatDesk - MCP Tools for ChatGPT to control your computer and browser")
             .style(
                 Style::default()
                     .fg(palette.header_fg)
@@ -1241,7 +1241,7 @@ async fn ensure_selected_browser_remote_debugging(
     };
 
     let user_data_dir = format!(
-        "/tmp/mcp3000-remote-debug-{}",
+        "/tmp/catdesk-remote-debug-{}",
         sanitize_for_filename(&selected.binary)
     );
     if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
@@ -1764,7 +1764,7 @@ fn draw_ui(
 
     // ── Header ──
     let header =
-        Paragraph::new("  MCP3000 - MCP Tools for ChatGPT to control your computer and browser")
+        Paragraph::new("  CatDesk - MCP Tools for ChatGPT to control your computer and browser")
             .style(
                 Style::default()
                     .fg(palette.header_fg)
@@ -2194,7 +2194,7 @@ fn draw_ui(
                 Span::styled("Fill in the form:", Style::default().fg(palette.primary_fg)),
             ]),
             Line::from(vec![Span::styled(
-                "   Name: MCP3000 (or any name you like)",
+                "   Name: CatDesk (or any name you like)",
                 Style::default().fg(palette.secondary_fg),
             )]),
             Line::from(vec![Span::styled(
