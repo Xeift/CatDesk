@@ -1075,6 +1075,7 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
     matches!(
         name,
         "run_command"
+            | "catdesk_instruction"
             | "list_files"
             | "search_text"
             | "write_file"
