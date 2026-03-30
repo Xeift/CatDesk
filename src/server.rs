@@ -25,7 +25,11 @@ struct ServerState {
 }
 
 /// Build the axum router.
-pub fn router(app_state: SharedState, devtools: Option<Arc<Mutex<DevtoolsBridge>>>) -> Router {
+pub fn router(
+    app_state: SharedState,
+    devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
+    mcp_path: String,
+) -> Router {
     let state = ServerState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         app: app_state,
@@ -33,9 +37,9 @@ pub fn router(app_state: SharedState, devtools: Option<Arc<Mutex<DevtoolsBridge>
     };
     Router::new()
         .route("/", get(health))
-        .route("/mcp", post(post_mcp))
-        .route("/mcp", get(get_mcp))
-        .route("/mcp", delete(delete_mcp))
+        .route(&mcp_path, post(post_mcp))
+        .route(&mcp_path, get(get_mcp))
+        .route(&mcp_path, delete(delete_mcp))
         .with_state(state)
 }
 
@@ -200,7 +204,7 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
     }))
 }
 
-// ── POST /mcp ───────────────────────────────────────────────
+// ── POST /<slug>/mcp ────────────────────────────────────────
 
 async fn post_mcp(
     State(s): State<ServerState>,
@@ -360,10 +364,11 @@ async fn post_mcp(
         app.session_count = sessions.len();
         app.record_session_flow(&session_id, &response_flow_events, FlowDirection::Backward);
         let response_summary: Vec<String> = responses.iter().map(summarize_response).collect();
+        let mcp_path = app.mcp_path();
         app.log(
             "INFO",
             format!(
-                "POST /mcp request sid={} [{}]",
+                "POST {mcp_path} request sid={} [{}]",
                 short_session_id(&session_id),
                 summarize_list(&request_summary, 6),
             ),
@@ -371,7 +376,7 @@ async fn post_mcp(
         app.log(
             "INFO",
             format!(
-                "POST /mcp response sid={} [{}]",
+                "POST {mcp_path} response sid={} [{}]",
                 short_session_id(&session_id),
                 summarize_list(&response_summary, 6),
             ),
@@ -406,7 +411,7 @@ async fn post_mcp(
         .unwrap()
 }
 
-// ── GET /mcp — SSE ──────────────────────────────────────────
+// ── GET /<slug>/mcp — SSE ───────────────────────────────────
 
 async fn get_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<Body> {
     let session_id = headers
@@ -433,8 +438,12 @@ async fn get_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<B
     drop(sessions);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, std::convert::Infallible>>(16);
+    let mcp_path = {
+        let app = s.app.lock().await;
+        app.mcp_path()
+    };
     let _ = tx
-        .send(Ok("event: endpoint\ndata: /mcp\n\n".to_string()))
+        .send(Ok(format!("event: endpoint\ndata: {mcp_path}\n\n")))
         .await;
 
     let sid_clone = sid.clone();
@@ -465,7 +474,7 @@ async fn get_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<B
         .unwrap()
 }
 
-// ── DELETE /mcp ─────────────────────────────────────────────
+// ── DELETE /<slug>/mcp ──────────────────────────────────────
 
 async fn delete_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<Body> {
     let session_id = headers

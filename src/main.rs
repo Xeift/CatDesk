@@ -1464,7 +1464,11 @@ async fn start_services(state: SharedState) -> Option<Arc<Mutex<DevtoolsBridge>>
         None
     };
 
-    let router = server::router(state.clone(), devtools_bridge.clone());
+    let mcp_path = {
+        let app = state.lock().await;
+        app.mcp_path()
+    };
+    let router = server::router(state.clone(), devtools_bridge.clone(), mcp_path);
     let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
         Err(e) => {
@@ -1800,11 +1804,7 @@ fn draw_ui(
             "N/A"
         }
     };
-    let mcp_url: String = app
-        .ngrok_url
-        .as_ref()
-        .map(|u| format!("{u}/mcp"))
-        .unwrap_or_else(|| "--".into());
+    let mcp_url: String = app.public_mcp_url().unwrap_or_else(|| "--".into());
     let browser_summary = browser::format_browser_names(&app.detected_browsers);
     let remote_support_summary = browser::format_remote_debug_names(&app.detected_browsers);
     let remote_active_summary = browser::format_active_remote_debug_names(&app.detected_browsers);

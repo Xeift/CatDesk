@@ -1,9 +1,11 @@
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::browser::DetectedBrowser;
 use crate::theme;
@@ -197,6 +199,7 @@ pub struct AppState {
     pub theme: String,
     pub mode: Mode,
     pub tool_mode: ToolMode,
+    pub mcp_slug: String,
     pub server_running: bool,
     pub ngrok_running: bool,
     pub ngrok_url: Option<String>,
@@ -341,6 +344,7 @@ impl AppState {
             theme: persisted.theme,
             mode: persisted.mode,
             tool_mode: persisted.tool_mode,
+            mcp_slug: generate_mcp_slug(),
             server_running: false,
             ngrok_running: false,
             ngrok_url: None,
@@ -366,6 +370,16 @@ impl AppState {
 
     pub fn current_theme(&self) -> &'static theme::ThemeDef {
         theme::resolve(&self.theme)
+    }
+
+    pub fn mcp_path(&self) -> String {
+        format!("/{}/mcp", self.mcp_slug)
+    }
+
+    pub fn public_mcp_url(&self) -> Option<String> {
+        self.ngrok_url
+            .as_ref()
+            .map(|url| format!("{url}{}", self.mcp_path()))
     }
 
     pub fn log(&mut self, level: &'static str, message: String) {
@@ -482,6 +496,11 @@ impl AppState {
             now_ms.saturating_sub(closing_started_ms) < ttl_ms
         });
     }
+}
+
+fn generate_mcp_slug() -> String {
+    let random = Uuid::new_v4();
+    URL_SAFE_NO_PAD.encode(&random.as_bytes()[..12])
 }
 
 #[cfg(test)]

@@ -42,6 +42,9 @@ pub async fn start(state: SharedState) -> Result<(), String> {
                 let mut app = state_clone.lock().await;
                 app.ngrok_url = Some(url.clone());
                 app.log("INFO", format!("ngrok URL: {url}"));
+                if let Some(mcp_url) = app.public_mcp_url() {
+                    app.log("INFO", format!("MCP Server URL: {mcp_url}"));
+                }
                 return;
             }
         }
