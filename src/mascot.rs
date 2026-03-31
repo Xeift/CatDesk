@@ -152,6 +152,9 @@ fn stable_workspace_seed(workspace_root: &str) -> u64 {
 }
 
 fn crop_frames(frames: &[RgbaImage]) -> Vec<RgbaImage> {
+    let Some((frame_width, frame_height)) = frames.first().map(RgbaImage::dimensions) else {
+        return Vec::new();
+    };
     let mut min_x = u32::MAX;
     let mut min_y = u32::MAX;
     let mut max_x = 0_u32;
@@ -178,8 +181,8 @@ fn crop_frames(frames: &[RgbaImage]) -> Vec<RgbaImage> {
 
     min_x = min_x.saturating_sub(2);
     min_y = min_y.saturating_sub(2);
-    max_x = max_x.saturating_add(2);
-    max_y = max_y.saturating_add(2);
+    max_x = max_x.saturating_add(2).min(frame_width.saturating_sub(1));
+    max_y = max_y.saturating_add(2).min(frame_height.saturating_sub(1));
 
     let width = max_x.saturating_sub(min_x).saturating_add(1);
     let height = max_y.saturating_sub(min_y).saturating_add(1);

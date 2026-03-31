@@ -1115,7 +1115,7 @@
         agentsPath: "",
         mascotWidth: 0,
         mascotHeight: 0,
-        mascotFrameMs: 180,
+        mascotFrameMs: 50,
         mascotFrames: [],
         command: "",
         output: "",
@@ -1763,6 +1763,7 @@
       }
 
       function renderInstructionMascotFrame(frame) {
+        if (!frame || !Array.isArray(frame.runs) || frame.runs.length === 0) return "";
         return frame.runs.map(function (run) {
           return (
             "<div class=\"instruction-pixel\" style=\"" +
@@ -1776,7 +1777,7 @@
       }
 
       function renderInstructionHero(current) {
-        var firstFrame = current.mascotFrames[0];
+        var firstFrame = current.mascotFrames[0] || { runs: [] };
         return (
           "<div class=\"instruction-hero\">" +
             "<div class=\"instruction-impact-flash\"></div>" +
@@ -1847,7 +1848,11 @@
         if (!grid) return;
         stopInstructionMascotAnimation();
         var frames = current.mascotFrames;
-        var frameMs = current.mascotFrameMs || 180;
+        var frameMs = current.mascotFrameMs || 50;
+        if (!Array.isArray(frames) || frames.length === 0) {
+          grid.innerHTML = "";
+          return;
+        }
         var index = 0;
 
         function applyFrame() {
