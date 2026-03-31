@@ -768,6 +768,79 @@
       align-items: stretch;
     }
 
+    .completion-shell {
+      position: relative;
+      border-radius: 10px;
+      overflow: hidden;
+      isolation: isolate;
+      transition: transform 220ms ease, box-shadow 220ms ease, border-color 220ms ease;
+    }
+
+    .completion-shell::before,
+    .completion-shell::after {
+      content: "";
+      position: absolute;
+      pointer-events: none;
+      opacity: 0;
+      z-index: 3;
+    }
+
+    .completion-shell::before {
+      inset: -1px;
+      border-radius: inherit;
+      box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0),
+        0 0 0 1px rgba(255, 255, 255, 0),
+        0 0 18px rgba(255, 255, 255, 0);
+    }
+
+    .completion-shell::after {
+      inset: -18% -28%;
+      background:
+        linear-gradient(
+          112deg,
+          transparent 30%,
+          rgba(255, 255, 255, 0.02) 42%,
+          rgba(255, 255, 255, 0.22) 49%,
+          rgba(255, 255, 255, 0.06) 56%,
+          transparent 68%
+        );
+      transform: translateX(-155%) skewX(-16deg);
+      mix-blend-mode: screen;
+    }
+
+    .completion-shell.is-playing {
+      box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.055),
+        0 0 0 1px rgba(255, 255, 255, 0.025);
+      animation: completion-settle 520ms cubic-bezier(0.18, 0.76, 0.22, 1) forwards;
+    }
+
+    .completion-shell.is-playing::before {
+      opacity: 1;
+      animation: completion-border 520ms cubic-bezier(0.18, 0.76, 0.22, 1) forwards;
+    }
+
+    .completion-shell.is-playing::after {
+      opacity: 1;
+      animation: completion-sheen 620ms cubic-bezier(0.18, 0.76, 0.22, 1) forwards;
+    }
+
+    .completion-shell.is-playing .section {
+      border-color: rgba(255, 255, 255, 0.08);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+    }
+
+    .completion-shell.is-playing .token-side {
+      border-color: rgba(255, 255, 255, 0.12);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 38%),
+        var(--panel);
+      box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+        0 0 16px rgba(255, 255, 255, 0.025);
+    }
+
     .main-stack {
       display: grid;
       gap: 8px;
@@ -956,6 +1029,38 @@
       0% { transform: translate(8px, -50%) scale(0.24); opacity: 0; }
       30% { transform: translate(8px, -50%) scale(1); opacity: 0.18; }
       100% { transform: translate(8px, -50%) scale(1.32); opacity: 0; }
+    }
+
+    @keyframes completion-sheen {
+      0% { transform: translateX(-155%) skewX(-16deg); }
+      100% { transform: translateX(138%) skewX(-16deg); }
+    }
+
+    @keyframes completion-border {
+      0% {
+        box-shadow:
+          inset 0 0 0 1px rgba(255, 255, 255, 0),
+          0 0 0 1px rgba(255, 255, 255, 0),
+          0 0 18px rgba(255, 255, 255, 0);
+      }
+      35% {
+        box-shadow:
+          inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+          0 0 0 1px rgba(255, 255, 255, 0.08),
+          0 0 20px rgba(255, 255, 255, 0.08);
+      }
+      100% {
+        box-shadow:
+          inset 0 0 0 1px rgba(255, 255, 255, 0),
+          0 0 0 1px rgba(255, 255, 255, 0),
+          0 0 18px rgba(255, 255, 255, 0);
+      }
+    }
+
+    @keyframes completion-settle {
+      0% { transform: translateY(0) scale(1); }
+      40% { transform: translateY(-1px) scale(1.004); }
+      100% { transform: translateY(0) scale(1); }
     }
 
     .token-key {
@@ -1898,6 +2003,18 @@
         return usage.inputTokens > 0 || usage.outputTokens > 0 || usage.totalTokens > 0;
       }
 
+      function playCompletionEffect(root) {
+        if (!root) return;
+        var shell = root.querySelector(".completion-shell");
+        if (!shell) return;
+        shell.classList.remove("is-playing");
+        void shell.offsetWidth;
+        shell.classList.add("is-playing");
+        tokenRollState.timers.push(window.setTimeout(function () {
+          shell.classList.remove("is-playing");
+        }, 760));
+      }
+
       function scrambleFormatted(targetText, progress) {
         var chars = String(targetText).split("");
         var digitCount = chars.filter(function (ch) { return /\d/.test(ch); }).length;
@@ -2023,6 +2140,11 @@
             tokenRollState.rafId = window.requestAnimationFrame(tick);
           } else {
             tokenRollState.rafId = 0;
+            tokenRollState.timers.push(window.setTimeout(function () {
+              if (tokenRollState.mode === "live") {
+                playCompletionEffect(root);
+              }
+            }, lockMs));
           }
         }
 
@@ -2211,11 +2333,14 @@
         } else if (tokenPanelHtml) {
           contentRowHtml = tokenPanelHtml;
         }
+        var wrappedContentHtml = contentRowHtml
+          ? "<div class=\"completion-shell\">" + contentRowHtml + "</div>"
+          : "";
         stopTokenRollAnimation();
 
         root.innerHTML =
           "<section class=\"root\">" +
-            contentRowHtml +
+            wrappedContentHtml +
           "</section>";
 
         var instructionHero = root.querySelector(".instruction-hero");
@@ -2224,6 +2349,9 @@
         }
 
         playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
+        if (fromLoading && !shouldAnimateLiveTokenFace(view)) {
+          playCompletionEffect(root);
+        }
 
         window.requestAnimationFrame(autoScrollToFirstChange);
       }
