@@ -122,7 +122,7 @@ pub fn resolve_headwear<R: Rng>(rng: &mut R, headwear_pref: &str) -> String {
 
 fn weighted_choice<R: Rng>(rng: &mut R, weights: &[f32]) -> usize {
     let total: f64 = weights.iter().map(|&w| w as f64).sum();
-    let mut value = rng.r#gen::<f64>() * total;
+    let mut value = rng.gen_range(0.0..total);
 
     for (i, &weight) in weights.iter().enumerate() {
         value -= weight as f64;
@@ -216,7 +216,7 @@ fn add_pattern_face_subtle<R: Rng>(
 
         draw_ellipse(&mut overlay, x0, y0, x0 + ww, y0 + hh, patch_color);
 
-        if rng.r#gen::<f64>() < 0.40 {
+        if rng.gen_bool(0.40) {
             let speck = tone_match_patch(
                 darken(with_alpha(patch_color, 255), 18),
                 base,
@@ -264,7 +264,7 @@ fn add_pattern_coat_subtle<R: Rng>(
     let body_y0 = (y1 - 1).max(0);
 
     // Add specks - Use Hash Noise Map for stability
-    let seed_base = rng.r#gen::<u64>();
+    let seed_base = rng.next_u64();
     for y in body_y0..(h - 2) {
         for x in 0..w {
             // Apply prob 0.02 (approx 12-20 specks in region)
@@ -286,14 +286,14 @@ fn add_pattern_coat_subtle<R: Rng>(
     }
 
     // Add stripes - Randomized but independent of mask
-    if rng.r#gen::<f64>() < 0.75 {
+    if rng.gen_bool(0.75) {
         let stripe_n = rint(rng, 2, 4);
         for _ in 0..stripe_n {
             let y = rint(rng, (body_y0 + 2).min(h - 1), (body_y0 + 2).max(h - 6));
             let x = rint(rng, 8, 8.max(w - 10));
             // Just draw line. Mask will clip it later.
             let length = rint(rng, 4, 6);
-            let dx = if rng.r#gen::<f64>() < 0.5 { 1 } else { -1 };
+            let dx = if rng.gen_bool(0.5) { 1 } else { -1 };
             let x2 = x + dx * length;
             let y2 = y + length / 2;
             line(&mut overlay, x, y, x2, y2, accent);
@@ -301,7 +301,7 @@ fn add_pattern_coat_subtle<R: Rng>(
     }
 
     // Add tail stripes - Using coordinate scan based on y to ensure stability
-    if rng.r#gen::<f64>() < 0.65 {
+    if rng.gen_bool(0.65) {
         let ys: Vec<i32> = (0..2)
             .map(|_| rint(rng, (body_y0 + 6).min(h - 1), (body_y0 + 6).max(h - 4)))
             .collect();
@@ -316,7 +316,7 @@ fn add_pattern_coat_subtle<R: Rng>(
     }
 
     // Add body patch - Single attempt, robust to mask
-    if rng.r#gen::<f64>() < 0.22 {
+    if rng.gen_bool(0.22) {
         let patch_color = pick_patch_color(rng, base, PATCH_COLORS, 90.0, 60.0, 210);
         let px = rint(rng, 10, 16);
         let py = rint(rng, (body_y0 + 4).min(h - 4), (body_y0 + 4).max(h - 4));

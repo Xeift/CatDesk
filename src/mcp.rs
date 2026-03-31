@@ -224,7 +224,7 @@ pub async fn handle_request(
             Some(handle_tools_call(req, session, workspace_root, mode, tool_mode, devtools).await)
         }
         "resources/list" => Some(handle_resources_list(req)),
-        "resources/read" => Some(handle_resources_read(req)),
+        "resources/read" => Some(handle_resources_read(req, workspace_root)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
         _ => Some(JsonRpcResponse::error(
             req.id.clone(),
@@ -265,7 +265,17 @@ fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
     )
 }
 
-fn handle_resources_read(req: &JsonRpcRequest) -> JsonRpcResponse {
+fn render_widget_html(workspace_root: &str) -> String {
+    let mascot = mascot::build_widget_mascot(workspace_root);
+    let mascot_json =
+        serde_json::to_string(&mascot).unwrap_or_else(|_| "{\"width\":0,\"height\":0,\"frameMs\":50,\"palette\":[],\"frames\":[],\"sequence\":[]}".to_string());
+    CATDESK_WIDGET_HTML.replace(
+        "{\"__catdeskEmbeddedMascotPlaceholder__\":true}",
+        &mascot_json,
+    )
+}
+
+fn handle_resources_read(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let uri = req
         .params
         .get("uri")
@@ -280,7 +290,7 @@ fn handle_resources_read(req: &JsonRpcRequest) -> JsonRpcResponse {
             "contents": [{
                 "uri": UI_TEMPLATE_URI,
                 "mimeType": UI_TEMPLATE_MIME_TYPE,
-                "text": CATDESK_WIDGET_HTML,
+                "text": render_widget_html(workspace_root),
                 "_meta": { "ui": { "prefersBorder": true } }
             }]
         }),
@@ -937,7 +947,6 @@ fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMod
 
 fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> Value {
     let agents_path = workspace_agents_path(workspace_root);
-    let mascot = mascot::build_widget_mascot(workspace_root);
     json!({
         "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
@@ -947,10 +956,6 @@ fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: T
         "instructionText": catdesk_instruction_text(workspace_root, mode, tool_mode),
         "workspacePath": workspace_root,
         "agentsPath": agents_path.to_string_lossy(),
-        "mascotWidth": mascot.width,
-        "mascotHeight": mascot.height,
-        "mascotFrameMs": mascot.frame_ms,
-        "mascotFrames": mascot.frames,
         "changedFiles": [],
         "hasChanges": false
     })

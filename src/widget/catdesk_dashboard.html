@@ -1116,7 +1116,9 @@
         mascotWidth: 0,
         mascotHeight: 0,
         mascotFrameMs: 50,
+        mascotPalette: [],
         mascotFrames: [],
+        mascotSequence: [],
         command: "",
         output: "",
         searchQuery: "",
@@ -1158,6 +1160,9 @@
         timerId: 0
       };
 
+      var MASCOT_ALPHABET = ".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
+      var EMBEDDED_WIDGET_MASCOT = {"__catdeskEmbeddedMascotPlaceholder__":true};
+
       function esc(value) {
         return String(value)
           .replace(/&/g, "&amp;")
@@ -1188,28 +1193,19 @@
         return raw;
       }
 
-      function normalizeMascotRun(value) {
-        if (!value || typeof value !== "object") return null;
-        var x = Number(value.x);
-        var y = Number(value.y);
-        var width = Number(value.width);
-        var color = asString(value.color, "");
-        if (!Number.isFinite(x) || x < 0) return null;
-        if (!Number.isFinite(y) || y < 0) return null;
-        if (!Number.isFinite(width) || width <= 0) return null;
-        if (!color) return null;
-        return {
-          x: Math.floor(x),
-          y: Math.floor(y),
-          width: Math.floor(width),
-          color: color
-        };
+      function normalizeMascotFrame(value) {
+        return typeof value === "string" && value.length > 0 ? value : null;
       }
 
-      function normalizeMascotFrame(value) {
+      function normalizeMascotSequenceStep(value) {
         if (!value || typeof value !== "object") return null;
+        var frame = Number(value.frame);
+        var repeat = Number(value.repeat);
+        if (!Number.isFinite(frame) || frame < 0) return null;
+        if (!Number.isFinite(repeat) || repeat <= 0) return null;
         return {
-          runs: asArray(value.runs).map(normalizeMascotRun).filter(Boolean)
+          frame: Math.floor(frame),
+          repeat: Math.floor(repeat)
         };
       }
 
@@ -1278,9 +1274,12 @@
         var listLimit = Number(data.listLimit);
         var toolCallCount = Number(data.toolCallCount);
         var historyToolCallCount = Number(data.historyToolCallCount);
-        var mascotWidth = Number(data.mascotWidth);
-        var mascotHeight = Number(data.mascotHeight);
-        var mascotFrameMs = Number(data.mascotFrameMs);
+        var mascot = EMBEDDED_WIDGET_MASCOT && typeof EMBEDDED_WIDGET_MASCOT === "object"
+          ? EMBEDDED_WIDGET_MASCOT
+          : null;
+        var mascotWidth = Number(mascot && mascot.width);
+        var mascotHeight = Number(mascot && mascot.height);
+        var mascotFrameMs = Number(mascot && mascot.frameMs);
         var next = {
           schema: asString(data.schema, "catdesk.review.v1"),
           panelMode: asString(data.panelMode, "tool_call"),
@@ -1294,8 +1293,12 @@
           agentsPath: asString(data.agentsPath, ""),
           mascotWidth: Number.isFinite(mascotWidth) && mascotWidth > 0 ? Math.floor(mascotWidth) : 0,
           mascotHeight: Number.isFinite(mascotHeight) && mascotHeight > 0 ? Math.floor(mascotHeight) : 0,
-          mascotFrameMs: Number.isFinite(mascotFrameMs) && mascotFrameMs > 0 ? Math.floor(mascotFrameMs) : 180,
+          mascotFrameMs: Number.isFinite(mascotFrameMs) && mascotFrameMs > 0 ? Math.floor(mascotFrameMs) : 50,
+          mascotPalette: asArray(mascot && mascot.palette).map(function (entry) {
+            return asString(entry, "");
+          }).filter(Boolean),
           mascotFrames: [],
+          mascotSequence: [],
           command: asString(data.command, ""),
           output: asString(data.output, ""),
           searchQuery: asString(data.searchQuery, ""),
@@ -1324,7 +1327,8 @@
         next.hasChanges = asBool(data.hasChanges, next.changedFiles.length > 0);
         next.searchResults = asArray(data.searchResults).map(normalizeSearchResult).filter(Boolean);
         next.listEntries = asArray(data.listEntries).map(normalizeListEntry).filter(Boolean);
-        next.mascotFrames = asArray(data.mascotFrames).map(normalizeMascotFrame).filter(Boolean);
+        next.mascotFrames = asArray(mascot && mascot.frames).map(normalizeMascotFrame).filter(Boolean);
+        next.mascotSequence = asArray(mascot && mascot.sequence).map(normalizeMascotSequenceStep).filter(Boolean);
 
         return next;
       }
@@ -1757,27 +1761,60 @@
 
       function stopInstructionMascotAnimation() {
         if (instructionMascotState.timerId) {
-          window.clearInterval(instructionMascotState.timerId);
+          window.clearTimeout(instructionMascotState.timerId);
           instructionMascotState.timerId = 0;
         }
       }
 
-      function renderInstructionMascotFrame(frame) {
-        if (!frame || !Array.isArray(frame.runs) || frame.runs.length === 0) return "";
-        return frame.runs.map(function (run) {
-          return (
-            "<div class=\"instruction-pixel\" style=\"" +
-              "--x:" + run.x + ";" +
-              "--y:" + run.y + ";" +
-              "--w:" + run.width + ";" +
-              "--instruction-color:" + esc(run.color) + ";" +
-            "\"></div>"
-          );
-        }).join("");
+      function mascotPaletteIndex(symbol) {
+        return MASCOT_ALPHABET.indexOf(symbol) - 1;
+      }
+
+      function renderInstructionMascotFrame(current, frame) {
+        if (typeof frame !== "string" || !frame) return "";
+        if (current.mascotWidth <= 0 || current.mascotHeight <= 0) return "";
+        var width = current.mascotWidth;
+        var height = current.mascotHeight;
+        if (frame.length !== width * height) return "";
+
+        var html = [];
+        for (var y = 0; y < height; y += 1) {
+          var rowOffset = y * width;
+          var x = 0;
+          while (x < width) {
+            var colorIndex = mascotPaletteIndex(frame.charAt(rowOffset + x));
+            if (colorIndex < 0) {
+              x += 1;
+              continue;
+            }
+            var color = current.mascotPalette[colorIndex];
+            if (!color) {
+              x += 1;
+              continue;
+            }
+            var runWidth = 1;
+            while (x + runWidth < width) {
+              var nextIndex = mascotPaletteIndex(frame.charAt(rowOffset + x + runWidth));
+              if (nextIndex !== colorIndex) break;
+              runWidth += 1;
+            }
+            html.push(
+              "<div class=\"instruction-pixel\" style=\"" +
+                "--x:" + x + ";" +
+                "--y:" + y + ";" +
+                "--w:" + runWidth + ";" +
+                "--instruction-color:" + esc(color) + ";" +
+              "\"></div>"
+            );
+            x += runWidth;
+          }
+        }
+        return html.join("");
       }
 
       function renderInstructionHero(current) {
-        var firstFrame = current.mascotFrames[0] || { runs: [] };
+        var firstStep = current.mascotSequence[0] || { frame: 0 };
+        var firstFrame = current.mascotFrames[firstStep.frame] || current.mascotFrames[0] || "";
         return (
           "<div class=\"instruction-hero\">" +
             "<div class=\"instruction-impact-flash\"></div>" +
@@ -1787,7 +1824,7 @@
                   "--instruction-grid-w:" + current.mascotWidth + ";" +
                   "--instruction-grid-h:" + current.mascotHeight + ";" +
                 "\">" +
-                  renderInstructionMascotFrame(firstFrame) +
+                  renderInstructionMascotFrame(current, firstFrame) +
                 "</div>" +
                 "<div class=\"instruction-dust-container\">" +
                   "<div class=\"instruction-dust\" style=\"--dx:-118px; --dy:-86px;\"></div>" +
@@ -1848,23 +1885,23 @@
         if (!grid) return;
         stopInstructionMascotAnimation();
         var frames = current.mascotFrames;
+        var sequence = current.mascotSequence;
         var frameMs = current.mascotFrameMs || 50;
-        if (!Array.isArray(frames) || frames.length === 0) {
+        if (!Array.isArray(frames) || frames.length === 0 || !Array.isArray(sequence) || sequence.length === 0) {
           grid.innerHTML = "";
           return;
         }
-        var index = 0;
+        var stepIndex = 0;
 
-        function applyFrame() {
-          var frame = frames[index];
-          grid.innerHTML = renderInstructionMascotFrame(frame);
-          index = (index + 1) % frames.length;
+        function applyStep() {
+          var step = sequence[stepIndex];
+          var frame = frames[step.frame] || frames[0] || "";
+          grid.innerHTML = renderInstructionMascotFrame(current, frame);
+          stepIndex = (stepIndex + 1) % sequence.length;
+          instructionMascotState.timerId = window.setTimeout(applyStep, Math.max(1, step.repeat) * frameMs);
         }
 
-        applyFrame();
-        if (frames.length > 1) {
-          instructionMascotState.timerId = window.setInterval(applyFrame, frameMs);
-        }
+        applyStep();
       }
 
       function bindInstructionReplay(hero, current) {
