@@ -136,6 +136,7 @@ pub const SITTING_CAT_MASK_32: &[&str] = &[
 ];
 
 pub const SITTING_CAT_HEAD_BOX_32: (i32, i32, i32, i32) = (6, 5, 24, 17);
+pub const SITTING_CAT_FACE_CENTER_X_32: i32 = 11;
 
 // Tail Animation Frames - SAFE LEFT-UP WAG (STATIC BASE)
 // Action: Upper tail bends Left-Up. Base remains COMPLETELY STATIC to prevent broken graphics.

@@ -8,7 +8,6 @@ use rand::Rng;
 pub fn render_headwear_layer<R: Rng>(
     canvas: u32,
     head_box: (i32, i32, i32, i32),
-    face_shift_x: i32,
     rng: &mut R,
     headwear: &str,
     accent: Color,
@@ -26,7 +25,6 @@ pub fn render_headwear_layer<R: Rng>(
     draw_headwear(
         &mut headwear_layer,
         head_box_hw,
-        face_shift_x,
         rng,
         headwear,
         accent,
@@ -39,7 +37,6 @@ pub fn render_headwear_layer<R: Rng>(
 fn draw_headwear<R: Rng>(
     img: &mut RgbaImage,
     head_box: (i32, i32, i32, i32),
-    face_shift_x: i32,
     mut _rng: &mut R,
     headwear: &str,
     accent: Color,
@@ -52,7 +49,7 @@ fn draw_headwear<R: Rng>(
     let (w, h) = (img.width() as i32, img.height() as i32);
     let scale = scale_factor(canvas as i32);
     let (x0, y0, x1, _) = head_box;
-    let cx = (x0 + x1) / 2 + face_shift_x;
+    let cx = super::character::face_center_x(canvas);
 
     match headwear {
         "crown" => draw_crown(img, cx, y0, scale),

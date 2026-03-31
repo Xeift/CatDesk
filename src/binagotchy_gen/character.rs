@@ -10,7 +10,6 @@ use rand::seq::SliceRandom;
 pub fn render_base_sprite<R: Rng>(
     canvas: u32,
     rng: &mut R,
-    face_shift_x: i32,
     eyes_pref: &str,
     eye_openness: f32,
     tail_state: i32,
@@ -56,7 +55,6 @@ pub fn render_base_sprite<R: Rng>(
     let eye_color_name = draw_face_features(
         &mut img,
         canvas,
-        face_shift_x,
         rng,
         eyes_pref,
         head_box,
@@ -99,6 +97,11 @@ pub fn mask_sitting_cat<R: Rng>(
     );
 
     (mask, head_box)
+}
+
+pub(super) fn face_center_x(canvas: u32) -> i32 {
+    let sx = canvas as f32 / 32.0;
+    (SITTING_CAT_FACE_CENTER_X_32 as f32 * sx).round() as i32
 }
 
 pub fn resolve_eye_mode<R: Rng>(rng: &mut R, eye_pref: &str) -> String {
@@ -345,15 +348,14 @@ fn apply_micro_shading<R: Rng>(img: &mut RgbaImage, mask: &RgbaImage, base: Colo
 
 fn draw_face_features<R: Rng>(
     img: &mut RgbaImage,
-    _canvas: u32,
-    face_shift_x: i32,
+    canvas: u32,
     rng: &mut R,
     _eyes_pref: &str,
     head_box: (i32, i32, i32, i32),
     eye_openness: f32,
 ) -> String {
-    let (x0, y0, x1, _y1) = head_box;
-    let cx = (x0 + x1) / 2 + face_shift_x;
+    let (_, y0, _, _y1) = head_box;
+    let cx = face_center_x(canvas);
     let _ = rint(rng, 4, 5); // Consume RNG
     let eye_dx = 4; // Fixed to 4px
     let eye_y = y0 + rint(rng, 2, 3);

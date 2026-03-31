@@ -20,7 +20,6 @@ pub fn create_character(
     seed: Option<u64>,
     canvas: u32,
     upscale: u32,
-    face_shift_x: i32,
     eyes: &str,
     headwear: &str,
     eye_openness: f32,
@@ -41,7 +40,6 @@ pub fn create_character(
     let (base_img, fur_color, eye_mode) = character::render_base_sprite(
         canvas,
         &mut rng,
-        face_shift_x,
         eyes,
         eye_openness,
         tail_state,
@@ -59,7 +57,6 @@ pub fn create_character(
         let headwear_layer = headwear::render_headwear_layer(
             canvas,
             head_box,
-            face_shift_x,
             &mut rng_stable,
             &headwear_name,
             accent,
