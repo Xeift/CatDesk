@@ -503,10 +503,7 @@ async fn handle_tools_list(
                         }
                     }
                 },
-                "state": { "type": "string" },
-                "showApproval": { "type": "boolean" },
-                "approvePrompt": { "type": "string" },
-                "rejectPrompt": { "type": "string" }
+                "state": { "type": "string" }
             }
         },
         "_meta": {
@@ -795,26 +792,6 @@ fn handle_render_final_summary_widget(
         .get("changedFiles")
         .cloned()
         .unwrap_or_else(|| json!([]));
-    let show_approval = arguments
-        .get("showApproval")
-        .and_then(Value::as_bool)
-        .unwrap_or_else(|| {
-            changed_files
-                .as_array()
-                .map(|arr| !arr.is_empty())
-                .unwrap_or(false)
-        });
-    let approve_prompt = arguments
-        .get("approvePrompt")
-        .and_then(Value::as_str)
-        .unwrap_or("Approve these file changes and continue.")
-        .to_string();
-    let reject_prompt = arguments
-        .get("rejectPrompt")
-        .and_then(Value::as_str)
-        .unwrap_or("Reject these file changes and ask for a safer revision.")
-        .to_string();
-
     let has_changes = changed_files
         .as_array()
         .map(|arr| !arr.is_empty())
@@ -822,11 +799,7 @@ fn handle_render_final_summary_widget(
     let state = arguments
         .get("state")
         .and_then(Value::as_str)
-        .unwrap_or(if has_changes {
-            "waiting_approval"
-        } else {
-            "done"
-        });
+        .unwrap_or("done");
 
     let structured = json!({
         "schema": "catdesk.review.v1",
@@ -835,9 +808,6 @@ fn handle_render_final_summary_widget(
         "state": state,
         "changedFiles": changed_files,
         "hasChanges": has_changes,
-        "showApproval": show_approval,
-        "approvePrompt": approve_prompt,
-        "rejectPrompt": reject_prompt,
     });
 
     let mut result = enrich_tool_result(

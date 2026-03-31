@@ -69,7 +69,6 @@
 
     .state.done,
     .state.success { color: var(--ok); }
-    .state.waiting_approval,
     .state.waiting,
     .state.pending { color: var(--warn); }
     .state.failed,
@@ -991,31 +990,6 @@
       }
     }
 
-    .actions {
-      display: flex;
-      gap: 8px;
-      justify-content: flex-end;
-    }
-
-    button {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 7px 11px;
-      background: var(--panel-2);
-      color: var(--text-2);
-      cursor: pointer;
-      font: inherit;
-    }
-
-    button:hover { border-color: var(--accent); }
-    button:active { transform: translateY(1px); }
-
-    button.approve { border-color: var(--ok); color: var(--ok); }
-    button.reject { border-color: var(--err); color: var(--err); }
-
-    @media (max-width: 850px) {
-      .actions { justify-content: flex-start; }
-    }
   </style>
 </head>
 <body>
@@ -1060,10 +1034,7 @@
           outputTokens: 0,
           totalTokens: 0
         },
-        historyToolCallCount: 0,
-        showApproval: false,
-        approvePrompt: "Approve these file changes and continue.",
-        rejectPrompt: "Reject these file changes and ask for a safer revision."
+        historyToolCallCount: 0
       };
 
       var tokenRollState = {
@@ -1198,10 +1169,7 @@
           turnTokenUsage: normalizeTurnTokenUsage(data.turnTokenUsage),
           toolCallCount: Number.isFinite(toolCallCount) && toolCallCount >= 0 ? Math.floor(toolCallCount) : 0,
           historyTurnTokenUsage: normalizeTurnTokenUsage(data.historyTurnTokenUsage),
-          historyToolCallCount: Number.isFinite(historyToolCallCount) && historyToolCallCount >= 0 ? Math.floor(historyToolCallCount) : 0,
-          showApproval: false,
-          approvePrompt: asString(data.approvePrompt, view.approvePrompt),
-          rejectPrompt: asString(data.rejectPrompt, view.rejectPrompt)
+          historyToolCallCount: Number.isFinite(historyToolCallCount) && historyToolCallCount >= 0 ? Math.floor(historyToolCallCount) : 0
         };
         if (next.panelMode !== "final_review") {
           next.panelMode = "tool_call";
@@ -1210,7 +1178,6 @@
         next.hasChanges = asBool(data.hasChanges, next.changedFiles.length > 0);
         next.searchResults = asArray(data.searchResults).map(normalizeSearchResult).filter(Boolean);
         next.listEntries = asArray(data.listEntries).map(normalizeListEntry).filter(Boolean);
-        next.showApproval = asBool(data.showApproval, next.hasChanges);
 
         return next;
       }
@@ -2220,26 +2187,11 @@
         } else if (tokenPanelHtml) {
           contentRowHtml = tokenPanelHtml;
         }
-        var approvalHtml = "";
-        if (isFinal && view.showApproval) {
-          approvalHtml =
-            "<section class=\"section\">" +
-              "<h2>Review Decision</h2>" +
-              "<div class=\"section-body\">" +
-                "<div class=\"actions\">" +
-                  "<button class=\"approve\" type=\"button\" data-action=\"approve\">Approve</button>" +
-                  "<button class=\"reject\" type=\"button\" data-action=\"reject\">Reject</button>" +
-                "</div>" +
-              "</div>" +
-            "</section>";
-        }
-
         stopTokenRollAnimation();
 
         root.innerHTML =
           "<section class=\"root\">" +
             contentRowHtml +
-            approvalHtml +
           "</section>";
 
         var instructionHero = root.querySelector(".instruction-hero");
@@ -2248,31 +2200,6 @@
         }
 
         playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
-
-        var approveBtn = root.querySelector("button[data-action='approve']");
-        var rejectBtn = root.querySelector("button[data-action='reject']");
-
-        if (approveBtn) {
-          approveBtn.addEventListener("click", function () {
-            if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
-              window.openai.sendFollowUpMessage({
-                prompt: view.approvePrompt,
-                scrollToBottom: true
-              });
-            }
-          });
-        }
-
-        if (rejectBtn) {
-          rejectBtn.addEventListener("click", function () {
-            if (window.openai && typeof window.openai.sendFollowUpMessage === "function") {
-              window.openai.sendFollowUpMessage({
-                prompt: view.rejectPrompt,
-                scrollToBottom: true
-              });
-            }
-          });
-        }
 
         window.requestAnimationFrame(autoScrollToFirstChange);
       }
