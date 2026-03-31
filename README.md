@@ -97,6 +97,26 @@ Always call catdesk_instruction after list_resources, and follow the instruction
 
 11. Start using the connector from ChatGPT Web.
 
+# Built-in tools
+
+CatDesk's built-in local tools are:
+
+| Tool | Type | What it does |
+| ----- | ----- | ----- |
+| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and reads your workspace `AGENTS.md` |
+| `read_file` | Read | Reads a text file from the workspace |
+| `list_files` | Read | Recursively lists files and directories in the workspace |
+| `search_text` | Read | Searches text across files in the workspace |
+| `write_file` | Write | Creates or overwrites a file |
+| `append_file` | Write | Appends text to a file, or creates it if missing |
+| `make_directory` | Write | Creates a directory |
+| `move_path` | Write | Moves or renames a file or directory |
+| `delete_path` | Write | Deletes a file or directory |
+| `replace_in_file` | Write | Replaces text inside a file |
+| `run_command` | Shell | Runs a shell command inside the workspace. Use it as a last resort when a dedicated tool cannot do the job |
+
+If browser mode is enabled, CatDesk can also expose extra browser/devtools tools. Those are provided by the browser bridge, so the exact list depends on your environment.
+
 # FAQ
 
 ### Can I turn off the red CSP button?
