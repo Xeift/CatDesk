@@ -562,7 +562,9 @@ async fn handle_tools_call(
                 }
             } else if tool_mode.read_tools_enabled() {
                 match tool_name.as_str() {
-                    "catdesk_instruction" => handle_catdesk_instruction(req, mode, tool_mode),
+                    "catdesk_instruction" => {
+                        handle_catdesk_instruction(req, workspace_root, mode, tool_mode)
+                    }
                     "read_file" => handle_read_file(req, workspace_root),
                     "list_files" => handle_list_files(req, workspace_root),
                     "search_text" => handle_search_text(req, workspace_root),
@@ -886,7 +888,21 @@ fn tool_name_from_request(req: &JsonRpcRequest) -> String {
         .to_string()
 }
 
-fn catdesk_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
+fn workspace_agents_path(workspace_root: &str) -> PathBuf {
+    Path::new(workspace_root).join("AGENTS.md")
+}
+
+fn workspace_agents_text(workspace_root: &str) -> Option<String> {
+    let content = workspace_tools::read_file(workspace_root, "AGENTS.md").ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> String {
     let mut lines = vec![
         "CatDesk usage instructions".to_string(),
         "".to_string(),
@@ -936,6 +952,11 @@ fn catdesk_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
         "Keep file and directory operations inside the workspace root unless a tool explicitly says otherwise."
             .to_string(),
     );
+    if let Some(agents_text) = workspace_agents_text(workspace_root) {
+        lines.push("".to_string());
+        lines.push("Workspace-specific instructions from AGENTS.md:".to_string());
+        lines.push(agents_text);
+    }
     lines.push(
         "When the work is complete and you are ready to report back, always call render_final_summary_widget."
             .to_string(),
@@ -943,14 +964,17 @@ fn catdesk_instruction_text(mode: Mode, tool_mode: ToolMode) -> String {
     lines.join("\n")
 }
 
-fn catdesk_instruction_structured(mode: Mode, tool_mode: ToolMode) -> Value {
+fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> Value {
+    let agents_path = workspace_agents_path(workspace_root);
     json!({
         "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
         "title": "CatDesk Instruction",
         "state": "done",
         "toolName": "catdesk_instruction",
-        "instructionText": catdesk_instruction_text(mode, tool_mode),
+        "instructionText": catdesk_instruction_text(workspace_root, mode, tool_mode),
+        "workspacePath": workspace_root,
+        "agentsPath": agents_path.to_string_lossy(),
         "changedFiles": [],
         "hasChanges": false
     })
@@ -958,13 +982,14 @@ fn catdesk_instruction_structured(mode: Mode, tool_mode: ToolMode) -> Value {
 
 fn handle_catdesk_instruction(
     req: &JsonRpcRequest,
+    workspace_root: &str,
     mode: Mode,
     tool_mode: ToolMode,
 ) -> JsonRpcResponse {
     tool_success_response_with_structured(
         req,
-        catdesk_instruction_text(mode, tool_mode),
-        catdesk_instruction_structured(mode, tool_mode),
+        catdesk_instruction_text(workspace_root, mode, tool_mode),
+        catdesk_instruction_structured(workspace_root, mode, tool_mode),
     )
 }
 

@@ -500,6 +500,11 @@
       padding: 10px 12px 12px;
     }
 
+    .instruction-paths {
+      display: grid;
+      gap: 8px;
+    }
+
     .instruction-hero {
       position: relative;
       overflow: hidden;
@@ -911,6 +916,8 @@
         hasChanges: false,
         toolName: "",
         instructionText: "",
+        workspacePath: "",
+        agentsPath: "",
         command: "",
         output: "",
         searchQuery: "",
@@ -1048,6 +1055,8 @@
           hasChanges: false,
           toolName: asString(data.toolName, ""),
           instructionText: asString(data.instructionText, ""),
+          workspacePath: asString(data.workspacePath, ""),
+          agentsPath: asString(data.agentsPath, ""),
           command: asString(data.command, ""),
           output: asString(data.output, ""),
           searchQuery: asString(data.searchQuery, ""),
@@ -1566,10 +1575,29 @@
         );
       }
 
-      function renderCatDeskInstructionPanel() {
+      function renderCatDeskInstructionPanel(current) {
+        var pathsHtml = "";
+        if (current.workspacePath || current.agentsPath) {
+          pathsHtml =
+            "<div class=\"instruction-paths\">" +
+              "<div class=\"summary-row\">" +
+                "<span class=\"summary-stat path\">" +
+                  "<span class=\"listing-kind\">" + listingIconSvg("dir") + "</span>" +
+                  "<span class=\"summary-value\">workspace: " + esc(current.workspacePath || "-") + "</span>" +
+                "</span>" +
+              "</div>" +
+              "<div class=\"summary-row\">" +
+                "<span class=\"summary-stat path\">" +
+                  "<span class=\"listing-kind\">" + listingIconSvg("file") + "</span>" +
+                  "<span class=\"summary-value\">AGENTS.md: " + esc(current.agentsPath || "-") + "</span>" +
+                "</span>" +
+              "</div>" +
+            "</div>";
+        }
         return (
           "<div class=\"instruction-panel\">" +
             renderInstructionHero() +
+            pathsHtml +
           "</div>"
         );
       }
@@ -1722,7 +1750,7 @@
           instructionSectionHtml =
             "<section class=\"section\">" +
               "<div class=\"section-body\">" +
-                renderCatDeskInstructionPanel() +
+                renderCatDeskInstructionPanel(view) +
               "</div>" +
             "</section>";
         }
