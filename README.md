@@ -99,19 +99,67 @@ Always call catdesk_instruction after list_resources, and follow the instruction
 
 # FAQ
 
-### Can I turn off the logo CSP?
+### Can I turn off the red CSP button?
 
-No. That button is not part of the widget, so CatDesk cannot control it. I agree it looks bad, but there is nothing this project can do about it right now.
+No. That button is not part of the widget, so CatDesk cannot control it. I agree it looks annoying, but there is nothing this project can do about it right now.
 
 ### Can I skip approval? Like `--yolo` or `--dangerously-skip-permissions`?
 
-No.
-
-This restriction comes from the ChatGPT Web side. There is not much CatDesk can do about it. They probably use an LLM or some internal policy layer to detect higher-risk operations and require manual approval. Sometimes it is annoying, but there is no good workaround right now.
+No. This restriction comes from the ChatGPT Web side. There is not much CatDesk can do about it. They probably use an LLM or some internal policy layer to detect higher-risk operations and require manual approval. Sometimes it is annoying, but there is no good workaround right now.
 
 ### Can CatDesk be used in other apps?
 
-No.
+No. CatDesk is built around ChatGPT Web and its Custom Connector (They call it _Apps_ now, but to prevent confusion with _Application_, I still prefer call it _Connector_) flow. In practice, that means this project is not just a plain standalone MCP server. Also, there still are not many AI apps that support custom remote MCP servers well. Even if they support, they probably does not provide such generous (3000 messages) weekly quota.
 
-CatDesk is built around ChatGPT Web and its Custom Connector flow. In practice, that means this project is not just a plain standalone MCP server. Also, there still are not many AI apps that support custom remote MCP servers well. Even if they support, they probably does not provide such generous(3000 messages) weekly quota.
 For Claude, web and Claude Code share same quota, so just simply use Claude Code, no need to use CatDesk.
+
+### How does the input/output token be calculated?
+
+CatDesk does not get official token usage numbers from ChatGPT Web. It estimates them locally with `o200k_base`, the same tokenizer family used by GPT-5.4-style models, so the numbers are useful, but still only estimates.
+
+| Field          | Symbol | What it means                | Price                         |
+| -------------- | ------ | ---------------------------- | ----------------------------- |
+| `inputTokens`  | `↓`    | Tool input ≈ LLM output      | ≈ `$15.00 / 1M` output tokens |
+| `outputTokens` | `↑`    | Tool output ≈ LLM input      | ≈ `$2.50 / 1M` input tokens   |
+| `totalTokens`  | `Σ`    | `inputTokens + outputTokens` | `input price + output price`  |
+
+CatDesk does not count:
+
+- the full ChatGPT conversation
+- hidden prompts or reasoning tokens
+- other internal tokens on OpenAI's side
+
+The loading animation is only a visual effect. ChatGPT Web does not stream partial MCP tool input/output into CatDesk, so the widget animates locally first and then locks to the estimated values when the real tool result arrives.
+
+### What is workspace?
+
+Workspace is the root directory CatDesk is allowed to work in.
+
+By default, it is the directory where you launch CatDesk. You can also override it with `WORKSPACE_ROOT`.
+
+File tools use this directory as their base path, and paths outside the workspace are rejected.
+
+### Where to put my AGENTS.md?
+
+Put it in the workspace root. CatDesk reads `AGENTS.md` every time `catdesk_instruction` is called.
+
+# Safety
+
+> [!CAUTION]
+> Do **NOT** share the `MCP Server URL` with anyone. Anyone with the URL can access your computer.
+
+The URL is made of these parts:
+
+| Part         | Example                       | What it means                          |
+| ------------ | ----------------------------- | -------------------------------------- |
+| Public URL   | `https://xxxx.ngrok-free.app` | The temporary ngrok address            |
+| Random path  | `/Ab3kL9xQ2pTm7VhC`           | A random per-run path added by CatDesk |
+| MCP endpoint | `/mcp`                        | The actual MCP endpoint                |
+
+So the full URL looks like this:
+
+```text
+https://xxxx.ngrok-free.app/Ab3kL9xQ2pTm7VhC/mcp
+```
+
+The URL changes every time you start CatDesk. ChatGPT Web does not provide an edit button for Custom Connectors, so you need to delete the old connector and create a new one with the new URL.

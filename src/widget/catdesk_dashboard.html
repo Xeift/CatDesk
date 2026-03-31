@@ -844,6 +844,121 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .token-line.value-preview {
+      position: relative;
+      overflow: hidden;
+      isolation: isolate;
+    }
+
+    .token-line.value-preview::before {
+      content: "";
+      position: absolute;
+      inset: -2px -4px;
+      border-radius: 6px;
+      background: radial-gradient(circle at center, rgba(250, 250, 250, 0.08), transparent 68%);
+      opacity: 0;
+      transition: opacity 140ms ease;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .token-line.value-preview.is-rolling::before,
+    .token-line.value-preview.is-locking::before {
+      opacity: 1;
+    }
+
+    .token-line.value-preview .token-key,
+    .token-line.value-preview .token-value-wrap {
+      position: relative;
+      z-index: 1;
+    }
+
+    .token-value-wrap {
+      display: inline-grid;
+      align-items: center;
+      justify-items: end;
+      min-width: 0;
+    }
+
+    .token-value-text,
+    .token-value-ghost {
+      grid-area: 1 / 1;
+      font: inherit;
+      font-variant-numeric: tabular-nums;
+      line-height: inherit;
+      white-space: nowrap;
+    }
+
+    .token-value-text {
+      color: var(--text-2);
+      transform-origin: center center;
+      text-shadow: 0 0 8px rgba(250, 250, 250, 0.06);
+    }
+
+    .token-value-ghost {
+      color: rgba(205, 205, 205, 0.18);
+      opacity: 0;
+    }
+
+    .token-line.value-preview.is-rolling .token-value-text {
+      animation: token-roll-jitter 84ms steps(1) infinite;
+    }
+
+    .token-line.value-preview.is-rolling .token-value-ghost {
+      opacity: 1;
+      animation: token-roll-ghost-jitter 128ms linear infinite;
+    }
+
+    .token-line.value-preview.is-locking .token-value-text {
+      animation: token-roll-lock 260ms cubic-bezier(0.18, 0.88, 0.22, 1) forwards;
+    }
+
+    .token-value-impact {
+      position: absolute;
+      right: 0;
+      top: 50%;
+      width: 54px;
+      height: 54px;
+      border: 1px solid rgba(250, 250, 250, 0.18);
+      border-radius: 999px;
+      transform: translate(8px, -50%) scale(0.24);
+      opacity: 0;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .token-line.value-preview.is-locking .token-value-impact {
+      animation: token-roll-impact 260ms cubic-bezier(0.18, 0.88, 0.22, 1) forwards;
+    }
+
+    @keyframes token-roll-jitter {
+      0% { transform: translateX(-0.5px) scale(1); }
+      25% { transform: translateX(0.75px) scale(1.01); }
+      50% { transform: translateX(-1px) scale(0.985); }
+      75% { transform: translateX(0.5px) scale(1.02); }
+      100% { transform: translateX(-0.3px) scale(1); }
+    }
+
+    @keyframes token-roll-ghost-jitter {
+      0% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.15; }
+      25% { transform: translate3d(1px, -1px, 0) scale(1.01); opacity: 0.2; }
+      50% { transform: translate3d(-1px, 1px, 0) scale(0.99); opacity: 0.12; }
+      75% { transform: translate3d(1px, 0, 0) scale(1.015); opacity: 0.18; }
+      100% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.14; }
+    }
+
+    @keyframes token-roll-lock {
+      0% { transform: scale(1.06); letter-spacing: 0.04em; color: var(--text-inverted); }
+      45% { transform: scale(0.88); letter-spacing: -0.01em; color: var(--text); }
+      100% { transform: scale(1); letter-spacing: 0; color: var(--text-2); }
+    }
+
+    @keyframes token-roll-impact {
+      0% { transform: translate(8px, -50%) scale(0.24); opacity: 0; }
+      30% { transform: translate(8px, -50%) scale(1); opacity: 0.18; }
+      100% { transform: translate(8px, -50%) scale(1.32); opacity: 0; }
+    }
+
     .token-key {
       color: var(--text-3);
       display: inline-flex;
@@ -949,6 +1064,13 @@
         showApproval: false,
         approvePrompt: "Approve these file changes and continue.",
         rejectPrompt: "Reject these file changes and ask for a safer revision."
+      };
+
+      var tokenRollState = {
+        signature: "",
+        rafId: 0,
+        timers: [],
+        mode: ""
       };
 
       function esc(value) {
@@ -1630,6 +1752,10 @@
         return usd.toFixed(6).replace(/\.?0+$/, "");
       }
 
+      function formatTokenNumber(value) {
+        return Number(value).toLocaleString("en-US");
+      }
+
       function tokenKeySvg(kind) {
         if (kind === "input") {
           return (
@@ -1669,7 +1795,31 @@
         );
       }
 
-      function renderTokenFace(usage, callCount, label) {
+      function renderTokenLine(kind, valueText, animate) {
+        var priceClass = kind === "price" ? " token-price" : "";
+        if (!animate) {
+          return (
+            "<div class=\"token-line" + priceClass + "\">" +
+              "<span class=\"token-key\">" + tokenKeySvg(kind) + "</span><span>" + esc(valueText) + "</span>" +
+            "</div>"
+          );
+        }
+        return (
+          "<div class=\"token-line" + priceClass + " value-preview\" data-token-kind=\"" + esc(kind) + "\">" +
+            "<span class=\"token-value-impact\"></span>" +
+            "<span class=\"token-key\">" + tokenKeySvg(kind) + "</span>" +
+            "<span class=\"token-value-wrap\">" +
+              "<span class=\"token-value-ghost\">" + esc(valueText) + "</span>" +
+              "<span class=\"token-value-text\">" + esc(valueText) + "</span>" +
+            "</span>" +
+          "</div>"
+        );
+      }
+
+      function renderTokenFace(usage, callCount, label, options) {
+        options = options || {};
+        var faceClass = options.faceClass ? " " + options.faceClass : "";
+        var animate = !!options.animate;
         var estimatedUsd = estimateGpt54TurnCostUsd(usage);
         var callsHtml = callCount > 0
           ? "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("calls") + "</span><span>" + esc(callCount) + "</span></div>"
@@ -1678,12 +1828,12 @@
           ? "<div class=\"token-face-label\">" + esc(label) + "</div>"
           : "";
         return (
-          "<div class=\"token-face\">" +
+          "<div class=\"token-face" + faceClass + "\">" +
             labelHtml +
-            "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("input") + "</span><span>" + esc(usage.inputTokens) + "</span></div>" +
-            "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("output") + "</span><span>" + esc(usage.outputTokens) + "</span></div>" +
-            "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("total") + "</span><span>" + esc(usage.totalTokens) + "</span></div>" +
-            "<div class=\"token-line token-price\"><span class=\"token-key\">" + tokenKeySvg("price") + "</span><span>" + esc(formatUsdCompact(estimatedUsd)) + "</span></div>" +
+            renderTokenLine("input", formatTokenNumber(usage.inputTokens), animate) +
+            renderTokenLine("output", formatTokenNumber(usage.outputTokens), animate) +
+            renderTokenLine("total", formatTokenNumber(usage.totalTokens), animate) +
+            renderTokenLine("price", formatUsdCompact(estimatedUsd), animate) +
             callsHtml +
           "</div>"
         );
@@ -1704,20 +1854,285 @@
         if (!hasHistory) {
           return (
             "<div class=\"token-side\">" +
-              renderTokenFace(usage, callCount, "") +
+              renderTokenFace(usage, callCount, "", { faceClass: "token-face-live", animate: true }) +
             "</div>"
           );
         }
         return (
           "<div class=\"token-side token-side-hover\" tabindex=\"0\" aria-label=\"Hover to show historical totals\">" +
-            "<div class=\"token-face token-face-live\">" +
-              renderTokenFace(usage, callCount, currentLabel) +
-            "</div>" +
-            "<div class=\"token-face token-face-history\">" +
-              renderTokenFace(historyUsage, historyCallCount, "History total") +
-            "</div>" +
+            renderTokenFace(usage, callCount, currentLabel, { faceClass: "token-face-live", animate: true }) +
+            renderTokenFace(historyUsage, historyCallCount, "History total", { faceClass: "token-face-history", animate: false }) +
           "</div>"
         );
+      }
+
+      function stopTokenRollAnimation() {
+        if (tokenRollState.rafId) {
+          window.cancelAnimationFrame(tokenRollState.rafId);
+          tokenRollState.rafId = 0;
+        }
+        tokenRollState.timers.forEach(function (timerId) {
+          window.clearTimeout(timerId);
+        });
+        tokenRollState.timers = [];
+        tokenRollState.mode = "";
+      }
+
+      function tokenAnimationSignature(current) {
+        if (!current) return "";
+        var usage = current.turnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+        var changedFilesSignature = current.changedFiles.map(function (file) {
+          return [file.path, file.status, file.added, file.removed].join(":");
+        }).join("|");
+        return [
+          current.panelMode,
+          current.toolName,
+          current.title,
+          current.state,
+          current.command,
+          current.searchQuery,
+          current.searchPath,
+          current.listPath,
+          usage.inputTokens,
+          usage.outputTokens,
+          usage.totalTokens,
+          current.toolCallCount,
+          changedFilesSignature
+        ].join("\u0001");
+      }
+
+      function shouldAnimateLiveTokenFace(current) {
+        if (!current) return false;
+        var usage = current.turnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+        return usage.inputTokens > 0 || usage.outputTokens > 0 || usage.totalTokens > 0;
+      }
+
+      function scrambleFormatted(targetText, progress) {
+        var chars = String(targetText).split("");
+        var digitCount = chars.filter(function (ch) { return /\d/.test(ch); }).length;
+        var settledDigits = Math.max(0, Math.floor(progress * digitCount) - 1);
+        var seenDigits = 0;
+        var out = "";
+        for (var i = 0; i < chars.length; i += 1) {
+          var ch = chars[i];
+          if (!/\d/.test(ch)) {
+            out += ch;
+            continue;
+          }
+          if (seenDigits < settledDigits) {
+            out += ch;
+          } else {
+            out += String(seenDigits === 0 ? 1 + Math.floor(Math.random() * 9) : Math.floor(Math.random() * 10));
+          }
+          seenDigits += 1;
+        }
+        return out;
+      }
+
+      function playLiveTokenAnimation(root, current, options) {
+        options = options || {};
+        stopTokenRollAnimation();
+        if (!shouldAnimateLiveTokenFace(current)) return;
+
+        var signature = tokenAnimationSignature(current);
+        if (tokenRollState.signature === signature) return;
+        tokenRollState.signature = signature;
+        tokenRollState.mode = "live";
+
+        var liveFace = root.querySelector(".token-face-live");
+        if (!liveFace) return;
+
+        var usage = current.turnTokenUsage || { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+        var lines = {
+          input: liveFace.querySelector('.token-line[data-token-kind="input"]'),
+          output: liveFace.querySelector('.token-line[data-token-kind="output"]'),
+          total: liveFace.querySelector('.token-line[data-token-kind="total"]'),
+          price: liveFace.querySelector('.token-line[data-token-kind="price"]')
+        };
+        var finalText = {
+          input: formatTokenNumber(usage.inputTokens),
+          output: formatTokenNumber(usage.outputTokens),
+          total: formatTokenNumber(usage.totalTokens),
+          price: formatUsdCompact(estimateGpt54TurnCostUsd(usage))
+        };
+        var locked = {
+          input: false,
+          output: false,
+          total: false,
+          price: false
+        };
+        var lineKeys = Object.keys(lines).filter(function (key) {
+          return !!lines[key];
+        });
+        if (lineKeys.length === 0) return;
+
+        lineKeys.forEach(function (key) {
+          var line = lines[key];
+          var value = line.querySelector(".token-value-text");
+          var ghost = line.querySelector(".token-value-ghost");
+          line.classList.add("is-rolling");
+          value.textContent = scrambleFormatted(finalText[key], 0);
+          ghost.textContent = scrambleFormatted(finalText[key], 0);
+        });
+
+        var started = performance.now();
+        var rollMs = options.fromLoading ? 320 : 1680;
+        var lockMs = 230;
+        var delays = {
+          input: 0,
+          output: options.fromLoading ? 0.06 : 0.12,
+          total: options.fromLoading ? 0.12 : 0.24,
+          price: options.fromLoading ? 0.18 : 0.34
+        };
+
+        function phaseProgress(progress, delay) {
+          if (progress <= delay) return 0;
+          return Math.min(1, (progress - delay) / (1 - delay));
+        }
+
+        function beginLock(key) {
+          if (locked[key]) return;
+          locked[key] = true;
+          var line = lines[key];
+          var value = line.querySelector(".token-value-text");
+          var ghost = line.querySelector(".token-value-ghost");
+          line.classList.remove("is-rolling");
+          line.classList.add("is-locking");
+          ghost.textContent = finalText[key];
+          tokenRollState.timers.push(window.setTimeout(function () {
+            line.classList.remove("is-locking");
+            value.textContent = finalText[key];
+          }, lockMs));
+        }
+
+        function tick(now) {
+          var elapsed = now - started;
+          var progress = Math.min(1, elapsed / rollMs);
+          var allDone = true;
+
+          lineKeys.forEach(function (key) {
+            var localProgress = phaseProgress(progress, delays[key]);
+            var eased = Math.pow(localProgress, 0.68);
+            var line = lines[key];
+            var value = line.querySelector(".token-value-text");
+            var ghost = line.querySelector(".token-value-ghost");
+            if (!locked[key]) {
+              value.textContent = scrambleFormatted(finalText[key], eased);
+              ghost.textContent = scrambleFormatted(finalText[key], 0);
+            }
+            if (localProgress >= 1) {
+              beginLock(key);
+            }
+            if (!locked[key]) {
+              allDone = false;
+            }
+          });
+
+          if (!allDone) {
+            tokenRollState.rafId = window.requestAnimationFrame(tick);
+          } else {
+            tokenRollState.rafId = 0;
+          }
+        }
+
+        tokenRollState.rafId = window.requestAnimationFrame(tick);
+      }
+
+      function renderLoadingTokenPanel() {
+        return (
+          "<div class=\"token-side\">" +
+            renderTokenFace(
+              { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+              0,
+              "This tool call",
+              { faceClass: "token-face-live token-face-loading", animate: true }
+            ) +
+          "</div>"
+        );
+      }
+
+      function playLoadingTokenAnimation(root) {
+        stopTokenRollAnimation();
+        tokenRollState.signature = "";
+        tokenRollState.mode = "loading";
+
+        var loadingFace = root.querySelector(".token-face-loading");
+        if (!loadingFace) return;
+
+        var lines = {
+          input: loadingFace.querySelector('.token-line[data-token-kind="input"]'),
+          output: loadingFace.querySelector('.token-line[data-token-kind="output"]'),
+          total: loadingFace.querySelector('.token-line[data-token-kind="total"]'),
+          price: loadingFace.querySelector('.token-line[data-token-kind="price"]')
+        };
+        var lineKeys = Object.keys(lines).filter(function (key) {
+          return !!lines[key];
+        });
+        if (lineKeys.length === 0) return;
+        var started = performance.now();
+
+        lineKeys.forEach(function (key) {
+          lines[key].classList.add("is-rolling");
+        });
+
+        function loadingUsage(elapsed) {
+          var seconds = Math.max(0, elapsed) / 1000;
+          var input = 1 + Math.floor(seconds * 3 + Math.pow(seconds, 1.22) * 4);
+          var output = 1 + Math.floor(seconds * 5 + Math.pow(seconds, 1.28) * 7);
+          return {
+            input: input,
+            output: output,
+            total: input + output
+          };
+        }
+
+        function applyFrame(now) {
+          var usage = loadingUsage(now - started);
+          var ghostUsage = {
+            input: usage.input + Math.max(1, Math.floor(2 + usage.input * 0.08)),
+            output: usage.output + Math.max(2, Math.floor(4 + usage.output * 0.08))
+          };
+          ghostUsage.total = ghostUsage.input + ghostUsage.output;
+
+          var nextText = {
+            input: formatTokenNumber(usage.input),
+            output: formatTokenNumber(usage.output),
+            total: formatTokenNumber(usage.total),
+            price: formatUsdCompact(estimateGpt54TurnCostUsd({
+              inputTokens: usage.input,
+              outputTokens: usage.output
+            }))
+          };
+          var ghostText = {
+            input: formatTokenNumber(ghostUsage.input),
+            output: formatTokenNumber(ghostUsage.output),
+            total: formatTokenNumber(ghostUsage.total),
+            price: formatUsdCompact(estimateGpt54TurnCostUsd({
+              inputTokens: ghostUsage.input,
+              outputTokens: ghostUsage.output
+            }))
+          };
+
+          lineKeys.forEach(function (key) {
+            var line = lines[key];
+            var value = line.querySelector(".token-value-text");
+            var ghost = line.querySelector(".token-value-ghost");
+            value.textContent = nextText[key];
+            ghost.textContent = ghostText[key];
+          });
+        }
+
+        function tick(now) {
+          if (tokenRollState.mode !== "loading") {
+            tokenRollState.rafId = 0;
+            return;
+          }
+          applyFrame(now);
+          tokenRollState.rafId = window.requestAnimationFrame(tick);
+        }
+
+        applyFrame(started);
+        tokenRollState.rafId = window.requestAnimationFrame(tick);
       }
 
       function autoScrollToFirstChange() {
@@ -1737,6 +2152,7 @@
       function render() {
         var root = document.getElementById("root");
         if (!root) return;
+        var fromLoading = tokenRollState.mode === "loading";
 
         var isFinal = view.panelMode === "final_review";
         var isCatDeskInstruction = view.panelMode === "tool_call" && view.toolName === "catdesk_instruction";
@@ -1818,6 +2234,8 @@
             "</section>";
         }
 
+        stopTokenRollAnimation();
+
         root.innerHTML =
           "<section class=\"root\">" +
             contentRowHtml +
@@ -1828,6 +2246,8 @@
         if (instructionHero) {
           bindInstructionReplay(instructionHero);
         }
+
+        playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
 
         var approveBtn = root.querySelector("button[data-action='approve']");
         var rejectBtn = root.querySelector("button[data-action='reject']");
@@ -1860,14 +2280,22 @@
       function renderLoading(text) {
         var root = document.getElementById("root");
         if (!root) return;
+        stopTokenRollAnimation();
+        tokenRollState.signature = "";
         root.innerHTML =
           "<section class=\"root\">" +
-            "<section class=\"section\">" +
-              "<div class=\"section-body\">" +
-                "<div class=\"empty loading\">" + esc(text) + "</div>" +
+            "<div class=\"files-token-row\">" +
+              "<div class=\"main-stack\">" +
+                "<section class=\"section\">" +
+                  "<div class=\"section-body\">" +
+                    "<div class=\"empty loading\">" + esc(text) + "</div>" +
+                  "</div>" +
+                "</section>" +
               "</div>" +
-            "</section>" +
+              renderLoadingTokenPanel() +
+            "</div>" +
           "</section>";
+        playLoadingTokenAnimation(root);
       }
 
       function currentToolOutput() {
@@ -1896,6 +2324,7 @@
           normalized.turnTokenUsage.totalTokens <= 0 &&
           normalized.toolCallCount <= 0
         ) {
+          stopTokenRollAnimation();
           root.innerHTML = "";
           return true;
         }
