@@ -1,6 +1,8 @@
+mod binagotchy_gen;
 mod browser;
 mod command;
 mod devtools;
+mod mascot;
 mod mcp;
 mod ngrok;
 mod server;
@@ -17,6 +19,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use devtools::DevtoolsBridge;
+use mascot::render_tui_lines;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
@@ -2257,13 +2260,30 @@ fn draw_ui(
         ]));
     }
 
+    let status_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(42)])
+        .split(chunks[1]);
     let status_block = Block::default()
         .title(" Status ")
         .borders(Borders::ALL)
         .border_type(palette.border_type)
         .border_style(Style::default().fg(palette.border_fg));
-    let status_inner = status_block.inner(chunks[1]);
-    f.render_widget(status_block, chunks[1]);
+    let status_inner = status_block.inner(status_columns[0]);
+    f.render_widget(status_block, status_columns[0]);
+    let mascot_block = Block::default()
+        .title(" Binagotchy ")
+        .borders(Borders::ALL)
+        .border_type(palette.border_type)
+        .border_style(Style::default().fg(palette.border_fg));
+    let mascot_inner = mascot_block.inner(status_columns[1]);
+    f.render_widget(mascot_block, status_columns[1]);
+    let mascot = Paragraph::new(render_tui_lines(
+        app.mascot.current_tui_frame(now_millis),
+        mascot_inner.height,
+    ))
+    .alignment(Alignment::Center);
+    f.render_widget(mascot, mascot_inner);
 
     if show_guide {
         let top_height = (status_lines.len() as u16).min(status_inner.height.saturating_sub(1));
@@ -2277,7 +2297,6 @@ fn draw_ui(
                 Constraint::Min(0),
             ])
             .split(status_inner);
-
         let status_summary = Paragraph::new(status_lines);
         f.render_widget(status_summary, status_parts[0]);
 

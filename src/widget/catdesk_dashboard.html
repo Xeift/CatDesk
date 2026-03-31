@@ -573,22 +573,23 @@
     }
 
     .instruction-grid {
-      position: relative;
-      width: 100%;
-      height: 100%;
+      --instruction-pixel: calc(var(--instruction-sz) * 0.5);
+      position: absolute;
+      left: 50%;
+      bottom: 0;
+      transform: translateX(-50%);
+      width: calc(var(--instruction-grid-w) * var(--instruction-pixel));
+      height: calc(var(--instruction-grid-h) * var(--instruction-pixel));
     }
 
     .instruction-pixel {
       position: absolute;
-      width: var(--instruction-sz);
-      height: var(--instruction-sz);
+      left: calc(var(--instruction-pixel) * var(--x));
+      top: calc(var(--instruction-pixel) * var(--y));
+      width: calc(var(--instruction-pixel) * var(--w));
+      height: var(--instruction-pixel);
+      background: var(--instruction-color);
     }
-
-    .instruction-b { background: #728292; }
-    .instruction-w { background: #ffffff; }
-    .instruction-e { background: #40c977; }
-    .instruction-k { background: #000000; }
-    .instruction-pink { background: #cf6a87; }
 
     .instruction-dust-container {
       position: absolute;
@@ -1112,6 +1113,10 @@
         instructionText: "",
         workspacePath: "",
         agentsPath: "",
+        mascotWidth: 0,
+        mascotHeight: 0,
+        mascotFrameMs: 180,
+        mascotFrames: [],
         command: "",
         output: "",
         searchQuery: "",
@@ -1149,6 +1154,10 @@
         mode: ""
       };
 
+      var instructionMascotState = {
+        timerId: 0
+      };
+
       function esc(value) {
         return String(value)
           .replace(/&/g, "&amp;")
@@ -1177,6 +1186,31 @@
         if (raw === "ok") return "success";
         if (raw === "completed") return "done";
         return raw;
+      }
+
+      function normalizeMascotRun(value) {
+        if (!value || typeof value !== "object") return null;
+        var x = Number(value.x);
+        var y = Number(value.y);
+        var width = Number(value.width);
+        var color = asString(value.color, "");
+        if (!Number.isFinite(x) || x < 0) return null;
+        if (!Number.isFinite(y) || y < 0) return null;
+        if (!Number.isFinite(width) || width <= 0) return null;
+        if (!color) return null;
+        return {
+          x: Math.floor(x),
+          y: Math.floor(y),
+          width: Math.floor(width),
+          color: color
+        };
+      }
+
+      function normalizeMascotFrame(value) {
+        if (!value || typeof value !== "object") return null;
+        return {
+          runs: asArray(value.runs).map(normalizeMascotRun).filter(Boolean)
+        };
       }
 
       function normalizeFile(entry) {
@@ -1244,6 +1278,9 @@
         var listLimit = Number(data.listLimit);
         var toolCallCount = Number(data.toolCallCount);
         var historyToolCallCount = Number(data.historyToolCallCount);
+        var mascotWidth = Number(data.mascotWidth);
+        var mascotHeight = Number(data.mascotHeight);
+        var mascotFrameMs = Number(data.mascotFrameMs);
         var next = {
           schema: asString(data.schema, "catdesk.review.v1"),
           panelMode: asString(data.panelMode, "tool_call"),
@@ -1255,6 +1292,10 @@
           instructionText: asString(data.instructionText, ""),
           workspacePath: asString(data.workspacePath, ""),
           agentsPath: asString(data.agentsPath, ""),
+          mascotWidth: Number.isFinite(mascotWidth) && mascotWidth > 0 ? Math.floor(mascotWidth) : 0,
+          mascotHeight: Number.isFinite(mascotHeight) && mascotHeight > 0 ? Math.floor(mascotHeight) : 0,
+          mascotFrameMs: Number.isFinite(mascotFrameMs) && mascotFrameMs > 0 ? Math.floor(mascotFrameMs) : 180,
+          mascotFrames: [],
           command: asString(data.command, ""),
           output: asString(data.output, ""),
           searchQuery: asString(data.searchQuery, ""),
@@ -1283,6 +1324,7 @@
         next.hasChanges = asBool(data.hasChanges, next.changedFiles.length > 0);
         next.searchResults = asArray(data.searchResults).map(normalizeSearchResult).filter(Boolean);
         next.listEntries = asArray(data.listEntries).map(normalizeListEntry).filter(Boolean);
+        next.mascotFrames = asArray(data.mascotFrames).map(normalizeMascotFrame).filter(Boolean);
 
         return next;
       }
@@ -1713,34 +1755,38 @@
         );
       }
 
-      function renderInstructionHero() {
+      function stopInstructionMascotAnimation() {
+        if (instructionMascotState.timerId) {
+          window.clearInterval(instructionMascotState.timerId);
+          instructionMascotState.timerId = 0;
+        }
+      }
+
+      function renderInstructionMascotFrame(frame) {
+        return frame.runs.map(function (run) {
+          return (
+            "<div class=\"instruction-pixel\" style=\"" +
+              "--x:" + run.x + ";" +
+              "--y:" + run.y + ";" +
+              "--w:" + run.width + ";" +
+              "--instruction-color:" + esc(run.color) + ";" +
+            "\"></div>"
+          );
+        }).join("");
+      }
+
+      function renderInstructionHero(current) {
+        var firstFrame = current.mascotFrames[0];
         return (
           "<div class=\"instruction-hero\">" +
             "<div class=\"instruction-impact-flash\"></div>" +
             "<div class=\"instruction-scene instruction-is-shaking\">" +
               "<div class=\"instruction-cat-wrap\">" +
-                "<div class=\"instruction-grid\">" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*11.5); top:calc(var(--instruction-sz)*13.5); width:calc(var(--instruction-sz)*1.5); height:calc(var(--instruction-sz)*1.5);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*13); top:calc(var(--instruction-sz)*12.5); width:calc(var(--instruction-sz)*1.5); height:calc(var(--instruction-sz)*1.5);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*14); top:calc(var(--instruction-sz)*11); width:calc(var(--instruction-sz)*1.5); height:calc(var(--instruction-sz)*2);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*14.5); top:calc(var(--instruction-sz)*9.5); width:calc(var(--instruction-sz)*1.5); height:calc(var(--instruction-sz)*1.5);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*2); top:0;\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*13); top:0;\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*2); top:var(--instruction-sz); width:calc(var(--instruction-sz)*2);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*12); top:var(--instruction-sz); width:calc(var(--instruction-sz)*2);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*1); top:calc(var(--instruction-sz)*2); width:calc(var(--instruction-sz)*14); height:calc(var(--instruction-sz)*7);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-e\" style=\"left:calc(var(--instruction-sz)*4); top:calc(var(--instruction-sz)*4); width:calc(var(--instruction-sz)*2); height:calc(var(--instruction-sz)*2);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-k\" style=\"left:calc(var(--instruction-sz)*4.5); top:calc(var(--instruction-sz)*4.5); width:calc(var(--instruction-sz)*1); height:calc(var(--instruction-sz)*1.5);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-w\" style=\"left:calc(var(--instruction-sz)*4); top:calc(var(--instruction-sz)*4); width:calc(var(--instruction-sz)*0.5); height:calc(var(--instruction-sz)*0.5);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-e\" style=\"left:calc(var(--instruction-sz)*10); top:calc(var(--instruction-sz)*4); width:calc(var(--instruction-sz)*2); height:calc(var(--instruction-sz)*2);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-k\" style=\"left:calc(var(--instruction-sz)*10.5); top:calc(var(--instruction-sz)*4.5); width:calc(var(--instruction-sz)*1); height:calc(var(--instruction-sz)*1.5);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-w\" style=\"left:calc(var(--instruction-sz)*10); top:calc(var(--instruction-sz)*4); width:calc(var(--instruction-sz)*0.5); height:calc(var(--instruction-sz)*0.5);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-pink\" style=\"left:calc(var(--instruction-sz)*7.5); top:calc(var(--instruction-sz)*6.5); width:calc(var(--instruction-sz)*1); height:calc(var(--instruction-sz)*1);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-w\" style=\"left:calc(var(--instruction-sz)*0); top:calc(var(--instruction-sz)*6.5); width:calc(var(--instruction-sz)*2); height:calc(var(--instruction-sz)*0.2); opacity:0.3;\"></div>" +
-                  "<div class=\"instruction-pixel instruction-w\" style=\"left:calc(var(--instruction-sz)*14); top:calc(var(--instruction-sz)*6.5); width:calc(var(--instruction-sz)*2); height:calc(var(--instruction-sz)*0.2); opacity:0.3;\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*4); top:calc(var(--instruction-sz)*9 + 2px); width:calc(var(--instruction-sz)*8); height:calc(var(--instruction-sz)*6.5 - 2px);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*4); top:calc(var(--instruction-sz)*15.5); width:calc(var(--instruction-sz)*2.5); height:calc(var(--instruction-sz)*1);\"></div>" +
-                  "<div class=\"instruction-pixel instruction-b\" style=\"left:calc(var(--instruction-sz)*9.5); top:calc(var(--instruction-sz)*15.5); width:calc(var(--instruction-sz)*2.5); height:calc(var(--instruction-sz)*1);\"></div>" +
+                "<div class=\"instruction-grid\" style=\"" +
+                  "--instruction-grid-w:" + current.mascotWidth + ";" +
+                  "--instruction-grid-h:" + current.mascotHeight + ";" +
+                "\">" +
+                  renderInstructionMascotFrame(firstFrame) +
                 "</div>" +
                 "<div class=\"instruction-dust-container\">" +
                   "<div class=\"instruction-dust\" style=\"--dx:-118px; --dy:-86px;\"></div>" +
@@ -1790,18 +1836,40 @@
         }
         return (
           "<div class=\"instruction-panel\">" +
-            renderInstructionHero() +
+            renderInstructionHero(current) +
             pathsHtml +
           "</div>"
         );
       }
 
-      function bindInstructionReplay(hero) {
+      function startInstructionMascotAnimation(hero, current) {
+        var grid = hero.querySelector(".instruction-grid");
+        if (!grid) return;
+        stopInstructionMascotAnimation();
+        var frames = current.mascotFrames;
+        var frameMs = current.mascotFrameMs || 180;
+        var index = 0;
+
+        function applyFrame() {
+          var frame = frames[index];
+          grid.innerHTML = renderInstructionMascotFrame(frame);
+          index = (index + 1) % frames.length;
+        }
+
+        applyFrame();
+        if (frames.length > 1) {
+          instructionMascotState.timerId = window.setInterval(applyFrame, frameMs);
+        }
+      }
+
+      function bindInstructionReplay(hero, current) {
         if (!hero) return;
+        startInstructionMascotAnimation(hero, current);
         hero.addEventListener("click", function () {
+          stopInstructionMascotAnimation();
           var replacement = hero.cloneNode(true);
           hero.replaceWith(replacement);
-          bindInstructionReplay(replacement);
+          bindInstructionReplay(replacement, current);
         });
       }
 
@@ -2337,6 +2405,7 @@
           ? "<div class=\"completion-shell\">" + contentRowHtml + "</div>"
           : "";
         stopTokenRollAnimation();
+        stopInstructionMascotAnimation();
 
         root.innerHTML =
           "<section class=\"root\">" +
@@ -2345,7 +2414,7 @@
 
         var instructionHero = root.querySelector(".instruction-hero");
         if (instructionHero) {
-          bindInstructionReplay(instructionHero);
+          bindInstructionReplay(instructionHero, view);
         }
 
         playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
@@ -2360,6 +2429,7 @@
         var root = document.getElementById("root");
         if (!root) return;
         stopTokenRollAnimation();
+        stopInstructionMascotAnimation();
         tokenRollState.signature = "";
         root.innerHTML =
           "<section class=\"root\">" +

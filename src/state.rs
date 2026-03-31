@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::browser::DetectedBrowser;
+use crate::mascot::{self, MascotPack};
 use crate::theme;
 
 /// Log entry displayed in the TUI.
@@ -208,6 +209,7 @@ pub struct AppState {
     pub devtools_running: bool,
     pub port: u16,
     pub workspace_root: String,
+    pub mascot: MascotPack,
     pub detected_browsers: Vec<DetectedBrowser>,
     pub selected_browser: Option<DetectedBrowser>,
     pub logs: Vec<LogEntry>,
@@ -352,6 +354,7 @@ impl AppState {
             last_remote_activity_ms: None,
             devtools_running: false,
             port,
+            mascot: mascot::build_workspace_mascot(&workspace_root),
             workspace_root,
             detected_browsers: Vec::new(),
             selected_browser: persisted.selected_browser,

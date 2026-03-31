@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::command;
 use crate::devtools::DevtoolsBridge;
+use crate::mascot;
 use crate::state::{Mode, ToolMode};
 use crate::workspace_tools;
 
@@ -936,6 +937,7 @@ fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMod
 
 fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> Value {
     let agents_path = workspace_agents_path(workspace_root);
+    let mascot = mascot::build_widget_mascot(workspace_root);
     json!({
         "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
@@ -945,6 +947,10 @@ fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: T
         "instructionText": catdesk_instruction_text(workspace_root, mode, tool_mode),
         "workspacePath": workspace_root,
         "agentsPath": agents_path.to_string_lossy(),
+        "mascotWidth": mascot.width,
+        "mascotHeight": mascot.height,
+        "mascotFrameMs": mascot.frame_ms,
+        "mascotFrames": mascot.frames,
         "changedFiles": [],
         "hasChanges": false
     })
