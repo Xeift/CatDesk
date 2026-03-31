@@ -1723,6 +1723,26 @@
         return Number(value).toLocaleString("en-US");
       }
 
+      function formatTokenCompact(value) {
+        var number = Number(value);
+        if (!Number.isFinite(number)) return "0";
+        var abs = Math.abs(number);
+        if (abs < 1000) return formatTokenNumber(number);
+        var units = [
+          { value: 1000000000, suffix: "B" },
+          { value: 1000000, suffix: "M" },
+          { value: 1000, suffix: "K" }
+        ];
+        for (var i = 0; i < units.length; i += 1) {
+          var unit = units[i];
+          if (abs < unit.value) continue;
+          var scaled = number / unit.value;
+          var decimals = Math.abs(scaled) >= 100 ? 0 : 1;
+          return scaled.toFixed(decimals).replace(/\.0$/, "") + unit.suffix;
+        }
+        return formatTokenNumber(number);
+      }
+
       function tokenKeySvg(kind) {
         if (kind === "input") {
           return (
@@ -1762,17 +1782,18 @@
         );
       }
 
-      function renderTokenLine(kind, valueText, animate) {
+      function renderTokenLine(kind, valueText, animate, titleText) {
         var priceClass = kind === "price" ? " token-price" : "";
+        var titleAttr = titleText ? " title=\"" + esc(titleText) + "\"" : "";
         if (!animate) {
           return (
-            "<div class=\"token-line" + priceClass + "\">" +
+            "<div class=\"token-line" + priceClass + "\"" + titleAttr + ">" +
               "<span class=\"token-key\">" + tokenKeySvg(kind) + "</span><span>" + esc(valueText) + "</span>" +
             "</div>"
           );
         }
         return (
-          "<div class=\"token-line" + priceClass + " value-preview\" data-token-kind=\"" + esc(kind) + "\">" +
+          "<div class=\"token-line" + priceClass + " value-preview\" data-token-kind=\"" + esc(kind) + "\"" + titleAttr + ">" +
             "<span class=\"token-value-impact\"></span>" +
             "<span class=\"token-key\">" + tokenKeySvg(kind) + "</span>" +
             "<span class=\"token-value-wrap\">" +
@@ -1788,8 +1809,11 @@
         var faceClass = options.faceClass ? " " + options.faceClass : "";
         var animate = !!options.animate;
         var estimatedUsd = estimateGpt54TurnCostUsd(usage);
+        var inputFull = formatTokenNumber(usage.inputTokens);
+        var outputFull = formatTokenNumber(usage.outputTokens);
+        var totalFull = formatTokenNumber(usage.totalTokens);
         var callsHtml = callCount > 0
-          ? "<div class=\"token-line\"><span class=\"token-key\">" + tokenKeySvg("calls") + "</span><span>" + esc(callCount) + "</span></div>"
+          ? "<div class=\"token-line\" title=\"" + esc(formatTokenNumber(callCount)) + "\"><span class=\"token-key\">" + tokenKeySvg("calls") + "</span><span>" + esc(formatTokenCompact(callCount)) + "</span></div>"
           : "";
         var labelHtml = label
           ? "<div class=\"token-face-label\">" + esc(label) + "</div>"
@@ -1797,9 +1821,9 @@
         return (
           "<div class=\"token-face" + faceClass + "\">" +
             labelHtml +
-            renderTokenLine("input", formatTokenNumber(usage.inputTokens), animate) +
-            renderTokenLine("output", formatTokenNumber(usage.outputTokens), animate) +
-            renderTokenLine("total", formatTokenNumber(usage.totalTokens), animate) +
+            renderTokenLine("input", formatTokenCompact(usage.inputTokens), animate, inputFull) +
+            renderTokenLine("output", formatTokenCompact(usage.outputTokens), animate, outputFull) +
+            renderTokenLine("total", formatTokenCompact(usage.totalTokens), animate, totalFull) +
             renderTokenLine("price", formatUsdCompact(estimatedUsd), animate) +
             callsHtml +
           "</div>"
@@ -1917,9 +1941,9 @@
           price: liveFace.querySelector('.token-line[data-token-kind="price"]')
         };
         var finalText = {
-          input: formatTokenNumber(usage.inputTokens),
-          output: formatTokenNumber(usage.outputTokens),
-          total: formatTokenNumber(usage.totalTokens),
+          input: formatTokenCompact(usage.inputTokens),
+          output: formatTokenCompact(usage.outputTokens),
+          total: formatTokenCompact(usage.totalTokens),
           price: formatUsdCompact(estimateGpt54TurnCostUsd(usage))
         };
         var locked = {
@@ -2062,18 +2086,18 @@
           ghostUsage.total = ghostUsage.input + ghostUsage.output;
 
           var nextText = {
-            input: formatTokenNumber(usage.input),
-            output: formatTokenNumber(usage.output),
-            total: formatTokenNumber(usage.total),
+            input: formatTokenCompact(usage.input),
+            output: formatTokenCompact(usage.output),
+            total: formatTokenCompact(usage.total),
             price: formatUsdCompact(estimateGpt54TurnCostUsd({
               inputTokens: usage.input,
               outputTokens: usage.output
             }))
           };
           var ghostText = {
-            input: formatTokenNumber(ghostUsage.input),
-            output: formatTokenNumber(ghostUsage.output),
-            total: formatTokenNumber(ghostUsage.total),
+            input: formatTokenCompact(ghostUsage.input),
+            output: formatTokenCompact(ghostUsage.output),
+            total: formatTokenCompact(ghostUsage.total),
             price: formatUsdCompact(estimateGpt54TurnCostUsd({
               inputTokens: ghostUsage.input,
               outputTokens: ghostUsage.output
