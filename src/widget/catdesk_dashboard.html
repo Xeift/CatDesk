@@ -1917,6 +1917,7 @@
 
       var GPT54_INPUT_USD_PER_1M = 2.5;
       var GPT54_OUTPUT_USD_PER_1M = 15.0;
+      var PRICE_ANIMATION_DECIMALS = 6;
 
       function estimateGpt54TurnCostUsd(usage) {
         if (!usage) return 0;
@@ -1927,11 +1928,13 @@
         return (input * GPT54_OUTPUT_USD_PER_1M + output * GPT54_INPUT_USD_PER_1M) / 1000000;
       }
 
+      function formatUsdAnimated(usd) {
+        if (!Number.isFinite(usd) || usd <= 0) return "0." + "0".repeat(PRICE_ANIMATION_DECIMALS);
+        return usd.toFixed(PRICE_ANIMATION_DECIMALS);
+      }
+
       function formatUsdCompact(usd) {
-        if (!Number.isFinite(usd) || usd <= 0) return "0";
-        if (usd >= 1) return usd.toFixed(4).replace(/\.?0+$/, "");
-        if (usd >= 0.01) return usd.toFixed(5).replace(/\.?0+$/, "");
-        return usd.toFixed(6).replace(/\.?0+$/, "");
+        return formatUsdAnimated(usd).replace(/\.?0+$/, "");
       }
 
       function formatTokenNumber(value) {
@@ -2030,6 +2033,7 @@
         var callsHtml = callCount > 0
           ? "<div class=\"token-line\" title=\"" + esc(formatTokenNumber(callCount)) + "\"><span class=\"token-key\">" + tokenKeySvg("calls") + "</span><span>" + esc(formatTokenCompact(callCount)) + "</span></div>"
           : "";
+        var priceText = animate ? formatUsdAnimated(estimatedUsd) : formatUsdCompact(estimatedUsd);
         var labelHtml = label
           ? "<div class=\"token-face-label\">" + esc(label) + "</div>"
           : "";
@@ -2039,7 +2043,7 @@
             renderTokenLine("input", formatTokenCompact(usage.inputTokens), animate, inputFull) +
             renderTokenLine("output", formatTokenCompact(usage.outputTokens), animate, outputFull) +
             renderTokenLine("total", formatTokenCompact(usage.totalTokens), animate, totalFull) +
-            renderTokenLine("price", formatUsdCompact(estimatedUsd), animate) +
+            renderTokenLine("price", priceText, animate) +
             callsHtml +
           "</div>"
         );
@@ -2173,6 +2177,12 @@
           total: formatTokenCompact(usage.totalTokens),
           price: formatUsdCompact(estimateGpt54TurnCostUsd(usage))
         };
+        var animatedText = {
+          input: finalText.input,
+          output: finalText.output,
+          total: finalText.total,
+          price: formatUsdAnimated(estimateGpt54TurnCostUsd(usage))
+        };
         var locked = {
           input: false,
           output: false,
@@ -2189,8 +2199,8 @@
           var value = line.querySelector(".token-value-text");
           var ghost = line.querySelector(".token-value-ghost");
           line.classList.add("is-rolling");
-          value.textContent = scrambleFormatted(finalText[key], 0);
-          ghost.textContent = scrambleFormatted(finalText[key], 0);
+          value.textContent = scrambleFormatted(animatedText[key], 0);
+          ghost.textContent = scrambleFormatted(animatedText[key], 0);
         });
 
         var started = performance.now();
@@ -2235,8 +2245,8 @@
             var value = line.querySelector(".token-value-text");
             var ghost = line.querySelector(".token-value-ghost");
             if (!locked[key]) {
-              value.textContent = scrambleFormatted(finalText[key], eased);
-              ghost.textContent = scrambleFormatted(finalText[key], 0);
+              value.textContent = scrambleFormatted(animatedText[key], eased);
+              ghost.textContent = scrambleFormatted(animatedText[key], 0);
             }
             if (localProgress >= 1) {
               beginLock(key);
@@ -2321,7 +2331,7 @@
             input: formatTokenCompact(usage.input),
             output: formatTokenCompact(usage.output),
             total: formatTokenCompact(usage.total),
-            price: formatUsdCompact(estimateGpt54TurnCostUsd({
+            price: formatUsdAnimated(estimateGpt54TurnCostUsd({
               inputTokens: usage.input,
               outputTokens: usage.output
             }))
@@ -2330,7 +2340,7 @@
             input: formatTokenCompact(ghostUsage.input),
             output: formatTokenCompact(ghostUsage.output),
             total: formatTokenCompact(ghostUsage.total),
-            price: formatUsdCompact(estimateGpt54TurnCostUsd({
+            price: formatUsdAnimated(estimateGpt54TurnCostUsd({
               inputTokens: ghostUsage.input,
               outputTokens: ghostUsage.output
             }))
