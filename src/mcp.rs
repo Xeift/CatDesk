@@ -19,9 +19,13 @@ const SERVER_NAME: &str = "catdesk";
 const SERVER_VERSION: &str = "4.0.0";
 const PROTOCOL_VERSION: &str = "2025-03-26";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
+const FINAL_SUMMARY_UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard-final-summary.html";
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
+const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const RENDER_FINAL_SUMMARY_WIDGET_TOOL: &str = "render_final_summary_widget";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
+const EMBEDDED_WIDGET_MASCOT_PLACEHOLDER: &str = "{\"__catdeskEmbeddedMascotPlaceholder__\":true}";
+const WIDGET_RESOURCE_URI_PLACEHOLDER: &str = "__catdeskWidgetResourceUriPlaceholder__";
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
@@ -253,26 +257,36 @@ fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
-            "resources": [{
-                "uri": UI_TEMPLATE_URI,
-                "name": "CatDesk dashboard widget",
-                "description": "Embedded ChatGPT widget for CatDesk status and timeline data.",
-                "mimeType": UI_TEMPLATE_MIME_TYPE,
-                "_meta": { "ui": { "prefersBorder": true } }
-            }],
+            "resources": [
+                {
+                    "uri": UI_TEMPLATE_URI,
+                    "name": "CatDesk dashboard widget",
+                    "description": "Embedded ChatGPT widget for CatDesk status and timeline data.",
+                    "mimeType": UI_TEMPLATE_MIME_TYPE,
+                    "_meta": { "ui": { "prefersBorder": true } }
+                },
+                {
+                    "uri": FINAL_SUMMARY_UI_TEMPLATE_URI,
+                    "name": "CatDesk final summary widget",
+                    "description": "Embedded ChatGPT widget for CatDesk final summary review data.",
+                    "mimeType": UI_TEMPLATE_MIME_TYPE,
+                    "_meta": { "ui": { "prefersBorder": true } }
+                }
+            ],
             "nextCursor": null
         }),
     )
 }
 
-fn render_widget_html(workspace_root: &str) -> String {
+fn render_widget_html(workspace_root: &str, resource_uri: &str) -> String {
     let mascot = mascot::build_widget_mascot(workspace_root);
-    let mascot_json =
-        serde_json::to_string(&mascot).unwrap_or_else(|_| "{\"width\":0,\"height\":0,\"frameMs\":50,\"palette\":[],\"frames\":[],\"sequence\":[]}".to_string());
-    CATDESK_WIDGET_HTML.replace(
-        "{\"__catdeskEmbeddedMascotPlaceholder__\":true}",
-        &mascot_json,
-    )
+    let mascot_json = serde_json::to_string(&mascot).unwrap_or_else(|_| {
+        "{\"width\":0,\"height\":0,\"frameMs\":50,\"palette\":[],\"frames\":[],\"sequence\":[]}"
+            .to_string()
+    });
+    CATDESK_WIDGET_HTML
+        .replace(EMBEDDED_WIDGET_MASCOT_PLACEHOLDER, &mascot_json)
+        .replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
 }
 
 fn handle_resources_read(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
@@ -281,16 +295,20 @@ fn handle_resources_read(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcR
         .get("uri")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if uri != UI_TEMPLATE_URI {
+    let text = if uri == UI_TEMPLATE_URI {
+        render_widget_html(workspace_root, UI_TEMPLATE_URI)
+    } else if uri == FINAL_SUMMARY_UI_TEMPLATE_URI {
+        render_widget_html(workspace_root, FINAL_SUMMARY_UI_TEMPLATE_URI)
+    } else {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
-    }
+    };
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
             "contents": [{
-                "uri": UI_TEMPLATE_URI,
+                "uri": uri,
                 "mimeType": UI_TEMPLATE_MIME_TYPE,
-                "text": render_widget_html(workspace_root),
+                "text": text,
                 "_meta": { "ui": { "prefersBorder": true } }
             }]
         }),
@@ -494,32 +512,18 @@ async fn handle_tools_list(
     tools.push(json!({
         "name": RENDER_FINAL_SUMMARY_WIDGET_TOOL,
         "title": "Render final summary panel",
-        "description": "Render the final summary UI with current tool call diff and cumulative changed files.",
+        "description": "Render the final summary UI from the session's cumulative changed files.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "title": { "type": "string", "description": "Optional panel title." },
                 "panelMode": { "type": "string", "description": "tool_call or final_review" },
-                "changedFiles": {
-                    "type": "array",
-                    "description": "Changed files to render in the panel.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string" },
-                            "status": { "type": "string" },
-                            "added": { "type": "number" },
-                            "removed": { "type": "number" },
-                            "diff": { "type": "string" }
-                        }
-                    }
-                },
                 "state": { "type": "string" }
             }
         },
         "_meta": {
-            "ui": { "resourceUri": UI_TEMPLATE_URI },
-            "openai/outputTemplate": UI_TEMPLATE_URI,
+            "ui": { "resourceUri": FINAL_SUMMARY_UI_TEMPLATE_URI },
+            "openai/outputTemplate": FINAL_SUMMARY_UI_TEMPLATE_URI,
             "openai/toolInvocation/invoking": "Rendering widget...",
             "openai/toolInvocation/invoked": "Widget rendered."
         },
@@ -799,26 +803,39 @@ fn handle_render_final_summary_widget(
         .and_then(Value::as_str)
         .unwrap_or("final_review")
         .to_string();
-    let changed_files = arguments
-        .get("changedFiles")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let has_changes = changed_files
-        .as_array()
-        .map(|arr| !arr.is_empty())
-        .unwrap_or(false);
     let state = arguments
         .get("state")
         .and_then(Value::as_str)
-        .unwrap_or("done");
+        .unwrap_or("done")
+        .to_string();
+    let changed_files = session_changed_files_json(session);
+    let changed_file_count = changed_files.len() as u64;
+    let has_changes = changed_file_count > 0;
+    let turn_token_usage = session.pending_turn_token_usage.clone();
+    let tool_call_count = session.pending_tool_call_count;
+    let widget_payload = json!({
+        "schema": "catdesk.review.v1",
+        "panelMode": panel_mode.clone(),
+        "title": title.clone(),
+        "state": state.clone(),
+        "changedFiles": changed_files,
+        "hasChanges": has_changes,
+        "changedFileCount": changed_file_count,
+        "turnTokenUsage": {
+            "inputTokens": turn_token_usage.input_tokens,
+            "outputTokens": turn_token_usage.output_tokens,
+            "totalTokens": turn_token_usage.total_tokens,
+        },
+        "toolCallCount": tool_call_count,
+    });
 
     let structured = json!({
         "schema": "catdesk.review.v1",
-        "panelMode": panel_mode,
-        "title": title,
-        "state": state,
-        "changedFiles": changed_files,
+        "panelMode": panel_mode.clone(),
+        "title": title.clone(),
+        "state": state.clone(),
         "hasChanges": has_changes,
+        "changedFileCount": changed_file_count,
     });
 
     let mut result = enrich_tool_result(
@@ -832,9 +849,10 @@ fn handle_render_final_summary_widget(
         }),
         None,
     );
-    let turn_token_usage = session.pending_turn_token_usage.clone();
     attach_turn_token_usage(&mut result, &turn_token_usage);
-    attach_tool_call_count(&mut result, session.pending_tool_call_count);
+    attach_tool_call_count(&mut result, tool_call_count);
+    attach_output_template_uri(&mut result, FINAL_SUMMARY_UI_TEMPLATE_URI);
+    attach_widget_payload_meta(&mut result, widget_payload);
     session.pending_turn_token_usage = TokenUsage::default();
     session.pending_tool_call_count = 0;
     JsonRpcResponse::success(req.id.clone(), result)
@@ -1053,6 +1071,10 @@ fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
 }
 
 fn ensure_output_template_meta(meta_value: &mut Value) {
+    ensure_output_template_meta_with_uri(meta_value, UI_TEMPLATE_URI);
+}
+
+fn ensure_output_template_meta_with_uri(meta_value: &mut Value, resource_uri: &str) {
     if !meta_value.is_object() {
         *meta_value = json!({});
     }
@@ -1061,7 +1083,7 @@ fn ensure_output_template_meta(meta_value: &mut Value) {
     };
     meta_obj.insert(
         "openai/outputTemplate".to_string(),
-        Value::String(UI_TEMPLATE_URI.to_string()),
+        Value::String(resource_uri.to_string()),
     );
     let ui_entry = meta_obj
         .entry("ui".to_string())
@@ -1072,9 +1094,31 @@ fn ensure_output_template_meta(meta_value: &mut Value) {
     if let Some(ui_obj) = ui_entry.as_object_mut() {
         ui_obj.insert(
             "resourceUri".to_string(),
-            Value::String(UI_TEMPLATE_URI.to_string()),
+            Value::String(resource_uri.to_string()),
         );
     }
+}
+
+fn attach_output_template_uri(result: &mut Value, resource_uri: &str) {
+    let Some(obj) = result.as_object_mut() else {
+        return;
+    };
+    let meta_value = obj.entry("_meta".to_string()).or_insert_with(|| json!({}));
+    ensure_output_template_meta_with_uri(meta_value, resource_uri);
+}
+
+fn attach_widget_payload_meta(result: &mut Value, payload: Value) {
+    let Some(obj) = result.as_object_mut() else {
+        return;
+    };
+    let meta_value = obj.entry("_meta".to_string()).or_insert_with(|| json!({}));
+    if !meta_value.is_object() {
+        *meta_value = json!({});
+    }
+    let Some(meta_obj) = meta_value.as_object_mut() else {
+        return;
+    };
+    meta_obj.insert(WIDGET_PAYLOAD_META_KEY.to_string(), payload);
 }
 
 fn tool_descriptor_should_attach_widget(name: &str) -> bool {
@@ -1094,6 +1138,14 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
     )
 }
 
+fn tool_descriptor_template_uri(name: &str) -> &'static str {
+    if name == RENDER_FINAL_SUMMARY_WIDGET_TOOL {
+        FINAL_SUMMARY_UI_TEMPLATE_URI
+    } else {
+        UI_TEMPLATE_URI
+    }
+}
+
 fn ensure_tool_descriptor_widget_template(tool: &mut Value) {
     let Some(tool_obj) = tool.as_object_mut() else {
         return;
@@ -1104,10 +1156,11 @@ fn ensure_tool_descriptor_widget_template(tool: &mut Value) {
     if !tool_descriptor_should_attach_widget(name) {
         return;
     }
+    let template_uri = tool_descriptor_template_uri(name);
     let meta_value = tool_obj
         .entry("_meta".to_string())
         .or_insert_with(|| json!({}));
-    ensure_output_template_meta(meta_value);
+    ensure_output_template_meta_with_uri(meta_value, template_uri);
 }
 
 fn extract_tool_result_text(result: &Value) -> String {
@@ -1191,6 +1244,12 @@ fn file_entry_json(file: &FileDiffEntry) -> Value {
         "removed": file.removed,
         "diff": file.diff,
     })
+}
+
+fn session_changed_files_json(session: &Session) -> Vec<Value> {
+    let mut changed_files: Vec<&FileDiffEntry> = session.changed_files.values().collect();
+    changed_files.sort_by(|left, right| left.path.cmp(&right.path));
+    changed_files.into_iter().map(file_entry_json).collect()
 }
 
 fn search_result_entry_json(entry: &SearchResultEntry) -> Value {
@@ -2198,11 +2257,21 @@ mod tests {
         }
     }
 
+    fn resources_read_request(uri: &str) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-resource")),
+            method: "resources/read".into(),
+            params: json!({
+                "uri": uri,
+            }),
+        }
+    }
+
     #[test]
     fn final_summary_uses_accumulated_token_usage_and_resets_session_state() {
         let req = render_final_summary_request(json!({
             "title": "Summary",
-            "changedFiles": [],
         }));
         let mut session = Session::new();
         session.pending_turn_token_usage = TokenUsage::from_counts(123, 45);
@@ -2231,5 +2300,92 @@ mod tests {
         assert_eq!(session.pending_turn_token_usage.output_tokens, 0);
         assert_eq!(session.pending_turn_token_usage.total_tokens, 0);
         assert_eq!(session.pending_tool_call_count, 0);
+    }
+
+    #[test]
+    fn final_summary_puts_changed_files_in_meta_only() {
+        let req = render_final_summary_request(json!({
+            "title": "Summary",
+        }));
+        let mut session = Session::new();
+        session.changed_files.insert(
+            "src/main.rs".to_string(),
+            FileDiffEntry {
+                path: "src/main.rs".to_string(),
+                status: "modified".to_string(),
+                added: 2,
+                removed: 1,
+                diff: "@@ -1 +1 @@\n-old\n+new".to_string(),
+            },
+        );
+
+        let resp = handle_render_final_summary_widget(&req, &mut session);
+        let structured = resp
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .cloned()
+            .expect("missing structuredContent");
+        let meta_payload = resp
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .cloned()
+            .expect("missing widget payload meta");
+        let resource_uri = resp
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get("openai/outputTemplate"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .expect("missing widget resource uri");
+        let resource_resp =
+            handle_resources_read(&resources_read_request(&resource_uri), "/workspace/demo");
+        let resource_html = resource_resp
+            .result
+            .as_ref()
+            .and_then(|result| result.get("contents"))
+            .and_then(Value::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(|entry| entry.get("text"))
+            .and_then(Value::as_str)
+            .expect("missing widget html");
+
+        assert!(structured.get("changedFiles").is_none());
+        assert!(
+            resp.result
+                .as_ref()
+                .and_then(|result| result.get("widgetPayload"))
+                .is_none()
+        );
+        assert_eq!(
+            structured.get("changedFileCount").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            meta_payload.get("changedFileCount").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            meta_payload
+                .get("changedFiles")
+                .and_then(Value::as_array)
+                .map(|files| files.len()),
+            Some(1)
+        );
+        assert_eq!(
+            meta_payload
+                .get("changedFiles")
+                .and_then(Value::as_array)
+                .and_then(|files| files.first())
+                .and_then(|entry| entry.get("path"))
+                .and_then(Value::as_str),
+            Some("src/main.rs")
+        );
+        assert_eq!(resource_uri, FINAL_SUMMARY_UI_TEMPLATE_URI);
+        assert!(!resource_html.contains("var EMBEDDED_WIDGET_PAYLOAD = "));
+        assert!(!resource_html.contains("\"changedFiles\":"));
     }
 }

@@ -1162,6 +1162,9 @@
 
       var MASCOT_ALPHABET = ".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
       var EMBEDDED_WIDGET_MASCOT = {"__catdeskEmbeddedMascotPlaceholder__":true};
+      var FINAL_SUMMARY_TEMPLATE_URI = "ui://widget/catdesk-dashboard-final-summary.html";
+      var WIDGET_RESOURCE_URI = "__catdeskWidgetResourceUriPlaceholder__";
+      var WIDGET_PAYLOAD_META_KEY = "catdesk/widgetPayload";
 
       function esc(value) {
         return String(value)
@@ -1335,11 +1338,40 @@
 
       function extractStructured(payload) {
         if (!payload || typeof payload !== "object") return null;
+        var finalSummaryOnly = WIDGET_RESOURCE_URI === FINAL_SUMMARY_TEMPLATE_URI;
+
+        function extractWidgetPayload(current) {
+          if (
+            current[WIDGET_PAYLOAD_META_KEY] &&
+            typeof current[WIDGET_PAYLOAD_META_KEY] === "object" &&
+            current[WIDGET_PAYLOAD_META_KEY].schema === "catdesk.review.v1"
+          ) {
+            return current[WIDGET_PAYLOAD_META_KEY];
+          }
+          if (
+            current._meta &&
+            typeof current._meta === "object" &&
+            current._meta[WIDGET_PAYLOAD_META_KEY] &&
+            typeof current._meta[WIDGET_PAYLOAD_META_KEY] === "object" &&
+            current._meta[WIDGET_PAYLOAD_META_KEY].schema === "catdesk.review.v1"
+          ) {
+            return current._meta[WIDGET_PAYLOAD_META_KEY];
+          }
+          return null;
+        }
+
+        function isFinalSummaryTransport(current) {
+          return (
+            current["openai/outputTemplate"] === FINAL_SUMMARY_TEMPLATE_URI ||
+            (current.ui &&
+              typeof current.ui === "object" &&
+              current.ui.resourceUri === FINAL_SUMMARY_TEMPLATE_URI)
+          );
+        }
 
         var queue = [payload];
         var seen = [];
         var maxNodes = 96;
-
         function pushCandidate(candidate) {
           if (!candidate || typeof candidate !== "object") return;
           if (seen.indexOf(candidate) >= 0) return;
@@ -1352,13 +1384,25 @@
           var current = queue.shift();
           if (!current || typeof current !== "object") continue;
 
+          var widgetPayload = extractWidgetPayload(current);
+          if (widgetPayload) {
+            return widgetPayload;
+          }
           if (current.structuredContent && typeof current.structuredContent === "object") {
+            if (finalSummaryOnly || isFinalSummaryTransport(current)) {
+              return null;
+            }
             return current.structuredContent;
           }
           if (current.schema === "catdesk.review.v1") {
+            if (finalSummaryOnly || isFinalSummaryTransport(current)) {
+              return null;
+            }
             return current;
           }
 
+          pushCandidate(current.toolResponseMetadata);
+          pushCandidate(current._meta);
           pushCandidate(current.result);
           pushCandidate(current.output);
           pushCandidate(current.toolOutput);
@@ -2546,9 +2590,12 @@
       window.addEventListener(
         "openai:set_globals",
         function (event) {
-          var toolOutput = event && event.detail && event.detail.globals
-            ? event.detail.globals.toolOutput
-            : window.openai && window.openai.toolOutput;
+          var globals = event && event.detail ? event.detail.globals : null;
+          if (globals) {
+            applyPayload(globals);
+            return;
+          }
+          var toolOutput = window.openai && window.openai.toolOutput;
           if (toolOutput) applyPayload(toolOutput);
         },
         { passive: true }
@@ -2556,7 +2603,9 @@
 
       renderLoading("Waiting for tool output...");
       var initialPayload = currentToolOutput();
-      if (initialPayload) applyPayload(initialPayload);
+      if (initialPayload) {
+        applyPayload(initialPayload);
+      }
     })();
   </script>
 </body>
