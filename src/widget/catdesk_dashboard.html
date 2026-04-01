@@ -1116,6 +1116,7 @@
         mascotWidth: 0,
         mascotHeight: 0,
         mascotFrameMs: 50,
+        mascotSpiritHeroBackground: "",
         mascotPalette: [],
         mascotFrames: [],
         mascotSequence: [],
@@ -1283,6 +1284,7 @@
         var mascotWidth = Number(mascot && mascot.width);
         var mascotHeight = Number(mascot && mascot.height);
         var mascotFrameMs = Number(mascot && mascot.frameMs);
+        var mascotSpiritHeroBackground = asString(mascot && mascot.spiritHeroBackground, "");
         var next = {
           schema: asString(data.schema, "catdesk.review.v1"),
           panelMode: asString(data.panelMode, "tool_call"),
@@ -1297,6 +1299,7 @@
           mascotWidth: Number.isFinite(mascotWidth) && mascotWidth > 0 ? Math.floor(mascotWidth) : 0,
           mascotHeight: Number.isFinite(mascotHeight) && mascotHeight > 0 ? Math.floor(mascotHeight) : 0,
           mascotFrameMs: Number.isFinite(mascotFrameMs) && mascotFrameMs > 0 ? Math.floor(mascotFrameMs) : 50,
+          mascotSpiritHeroBackground: mascotSpiritHeroBackground,
           mascotPalette: asArray(mascot && mascot.palette).map(function (entry) {
             return asString(entry, "");
           }).filter(Boolean),
@@ -1859,8 +1862,11 @@
       function renderInstructionHero(current) {
         var firstStep = current.mascotSequence[0] || { frame: 0 };
         var firstFrame = current.mascotFrames[firstStep.frame] || current.mascotFrames[0] || "";
+        var heroStyle = current.mascotSpiritHeroBackground
+          ? " style=\"background:#141b25 url('" + esc(current.mascotSpiritHeroBackground) + "') center / cover no-repeat;\""
+          : "";
         return (
-          "<div class=\"instruction-hero\">" +
+          "<div class=\"instruction-hero\"" + heroStyle + ">" +
             "<div class=\"instruction-impact-flash\"></div>" +
             "<div class=\"instruction-scene instruction-is-shaking\">" +
               "<div class=\"instruction-cat-wrap\">" +
