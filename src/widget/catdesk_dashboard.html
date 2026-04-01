@@ -504,6 +504,34 @@
       gap: 8px;
     }
 
+    .instruction-path-stat {
+      width: 100%;
+      gap: 8px;
+    }
+
+    .instruction-path-label {
+      color: var(--text-3);
+      font-size: 11px;
+      line-height: 1.2;
+      text-transform: lowercase;
+      flex: 0 0 auto;
+    }
+
+    .instruction-path-code {
+      flex: 0 1 auto;
+      min-width: 0;
+      max-width: min(100%, 440px);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding: 4px 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text-2);
+      font: 11px/1.35 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+      white-space: nowrap;
+    }
+
     .instruction-hero {
       position: relative;
       overflow: hidden;
@@ -1919,20 +1947,21 @@
       function renderCatDeskInstructionPanel(current) {
         var pathsHtml = "";
         if (current.workspacePath || current.agentsPath) {
+          function renderInstructionPathRow(iconKind, label, value) {
+            return (
+              "<div class=\"summary-row\">" +
+                "<span class=\"summary-stat path instruction-path-stat\">" +
+                  "<span class=\"listing-kind\">" + listingIconSvg(iconKind) + "</span>" +
+                  "<span class=\"instruction-path-label\">" + esc(label) + "</span>" +
+                  "<span class=\"instruction-path-code\">" + esc(value || "-") + "</span>" +
+                "</span>" +
+              "</div>"
+            );
+          }
           pathsHtml =
             "<div class=\"instruction-paths\">" +
-              "<div class=\"summary-row\">" +
-                "<span class=\"summary-stat path\">" +
-                  "<span class=\"listing-kind\">" + listingIconSvg("dir") + "</span>" +
-                  "<span class=\"summary-value\">workspace: " + esc(current.workspacePath || "-") + "</span>" +
-                "</span>" +
-              "</div>" +
-              "<div class=\"summary-row\">" +
-                "<span class=\"summary-stat path\">" +
-                  "<span class=\"listing-kind\">" + listingIconSvg("file") + "</span>" +
-                  "<span class=\"summary-value\">AGENTS.md: " + esc(current.agentsPath || "-") + "</span>" +
-                "</span>" +
-              "</div>" +
+              renderInstructionPathRow("dir", "workspace", current.workspacePath) +
+              renderInstructionPathRow("file", "AGENTS.md", current.agentsPath) +
             "</div>";
         }
         return (
