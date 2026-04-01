@@ -1755,7 +1755,9 @@ fn draw_ui(
     } else {
         0
     };
+    let mascot_block_height = app.mascot.required_tui_block_height();
     let desired_status_height = if show_guide { 20 } else { 17 + flow_lines };
+    let desired_status_height = desired_status_height.max(mascot_block_height);
     let logs_min_height = if show_guide { 3 } else { 5 };
     let max_status_height = area.height.saturating_sub(6 + logs_min_height).max(17);
     let status_height = desired_status_height.min(max_status_height);

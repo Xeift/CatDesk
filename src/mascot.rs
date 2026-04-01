@@ -79,6 +79,16 @@ impl MascotPack {
         };
         &self.tui_frames[idx]
     }
+
+    pub fn required_tui_block_height(&self) -> u16 {
+        let rows = self
+            .tui_frames
+            .iter()
+            .map(|frame| frame.rows.len() as u16)
+            .max()
+            .unwrap_or(0);
+        rows.saturating_add(2)
+    }
 }
 
 pub fn build_workspace_mascot(workspace_root: &str) -> MascotPack {
@@ -129,6 +139,7 @@ pub fn render_tui_lines(frame: &TuiMascotFrame, area_height: u16) -> Vec<Line<'s
 fn mascot_source_frames(workspace_root: &str) -> Vec<RgbaImage> {
     let seed = stable_workspace_seed(workspace_root);
     let use_spirit = mascot_use_spirit(seed);
+    let headwear_pref = mascot_headwear_preference(use_spirit);
     MASCOT_SEQUENCE
         .iter()
         .flat_map(|&(eye_openness, tail_state, repeat)| {
@@ -137,7 +148,7 @@ fn mascot_source_frames(workspace_root: &str) -> Vec<RgbaImage> {
                 MASCOT_CANVAS,
                 MASCOT_UPSCALE,
                 "normal",
-                "none",
+                headwear_pref,
                 0.0,
                 openness_value(eye_openness),
                 tail_state,
@@ -162,6 +173,7 @@ fn mascot_widget_source(
 ) -> (Vec<RgbaImage>, Vec<WidgetMascotSequenceStep>, String) {
     let seed = stable_workspace_seed(workspace_root);
     let use_spirit = mascot_use_spirit(seed);
+    let headwear_pref = mascot_headwear_preference(use_spirit);
     let mut poses: Vec<(u8, i32)> = Vec::new();
     let mut sequence = Vec::new();
 
@@ -188,7 +200,7 @@ fn mascot_widget_source(
                 MASCOT_CANVAS,
                 MASCOT_UPSCALE,
                 "normal",
-                "none",
+                headwear_pref,
                 0.0,
                 openness_value(eye_openness),
                 tail_state,
@@ -222,6 +234,10 @@ fn stable_workspace_seed(workspace_root: &str) -> u64 {
 
 fn mascot_use_spirit(seed: u64) -> bool {
     seed % 100 < MASCOT_SPIRIT_PERCENT
+}
+
+fn mascot_headwear_preference(use_spirit: bool) -> &'static str {
+    if use_spirit { "none" } else { "random" }
 }
 
 fn mt_key_from_seed(seed_val: u64) -> Vec<u32> {
@@ -972,7 +988,15 @@ fn build_tui_cell(top: image::Rgba<u8>, bottom: image::Rgba<u8>) -> TuiMascotCel
 
 #[cfg(test)]
 mod tests {
-    use super::{build_widget_mascot, mascot_use_spirit, stable_workspace_seed, WIDGET_MASCOT_ALPHABET};
+    use super::{
+        build_widget_mascot,
+        mascot_headwear_preference,
+        mascot_use_spirit,
+        openness_value,
+        stable_workspace_seed,
+        WIDGET_MASCOT_ALPHABET,
+    };
+    use crate::binagotchy_gen;
 
     #[test]
     fn widget_mascot_palette_fits_alphabet() {
@@ -998,6 +1022,43 @@ mod tests {
             .expect("expected a workspace path that does not trigger spirit");
         let mascot = build_widget_mascot(&normal_workspace);
         assert!(mascot.spirit_hero_background.is_empty());
+    }
+
+    #[test]
+    fn mascot_non_spirit_can_generate_headwear() {
+        let workspace = (0..10_000)
+            .map(|idx| format!("/tmp/catdesk-headwear-test-{idx}"))
+            .find(|path| {
+                let seed = stable_workspace_seed(path);
+                if mascot_use_spirit(seed) {
+                    return false;
+                }
+                let (_, traits) = binagotchy_gen::create_character(
+                    Some(seed),
+                    super::MASCOT_CANVAS,
+                    super::MASCOT_UPSCALE,
+                    "normal",
+                    mascot_headwear_preference(false),
+                    0.0,
+                    openness_value(10),
+                    1,
+                );
+                traits.get("headwear").is_some_and(|value| value != "none")
+            })
+            .expect("expected a non-spirit workspace path that generates headwear");
+
+        let seed = stable_workspace_seed(&workspace);
+        let (_, traits) = binagotchy_gen::create_character(
+            Some(seed),
+            super::MASCOT_CANVAS,
+            super::MASCOT_UPSCALE,
+            "normal",
+            mascot_headwear_preference(false),
+            0.0,
+            openness_value(10),
+            1,
+        );
+        assert_ne!(traits.get("headwear").map(String::as_str), Some("none"));
     }
 }
 
