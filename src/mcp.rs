@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::command;
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
-use crate::state::{Mode, ToolMode};
+use crate::state::{Mode, ToolMode, app_config_path};
 use crate::workspace_tools;
 
 const SERVER_NAME: &str = "catdesk";
@@ -891,14 +891,36 @@ fn workspace_agents_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root).join("AGENTS.md")
 }
 
-fn workspace_agents_text(workspace_root: &str) -> Option<String> {
-    let content = workspace_tools::read_file(workspace_root, "AGENTS.md").ok()?;
+fn codex_agents_path() -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".codex").join("AGENTS.md")
+}
+
+fn preferred_agents_path(workspace_root: &str) -> Option<PathBuf> {
+    let workspace_path = workspace_agents_path(workspace_root);
+    if workspace_path.is_file() {
+        return Some(workspace_path);
+    }
+    let codex_path = codex_agents_path();
+    if codex_path.is_file() {
+        return Some(codex_path);
+    }
+    None
+}
+
+fn read_agents_text(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn preferred_agents_text(workspace_root: &str) -> Option<String> {
+    let path = preferred_agents_path(workspace_root)?;
+    read_agents_text(&path)
 }
 
 fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> String {
@@ -951,7 +973,7 @@ fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMod
         "Keep file and directory operations inside the workspace root unless a tool explicitly says otherwise."
             .to_string(),
     );
-    if let Some(agents_text) = workspace_agents_text(workspace_root) {
+    if let Some(agents_text) = preferred_agents_text(workspace_root) {
         lines.push("".to_string());
         lines.push("Workspace-specific instructions from AGENTS.md:".to_string());
         lines.push(agents_text);
@@ -964,7 +986,12 @@ fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMod
 }
 
 fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> Value {
-    let agents_path = workspace_agents_path(workspace_root);
+    let agents_path = preferred_agents_path(workspace_root)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let config_path = app_config_path()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "-".to_string());
     json!({
         "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
@@ -973,7 +1000,8 @@ fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: T
         "toolName": "catdesk_instruction",
         "instructionText": catdesk_instruction_text(workspace_root, mode, tool_mode),
         "workspacePath": workspace_root,
-        "agentsPath": agents_path.to_string_lossy(),
+        "agentsPath": agents_path,
+        "configPath": config_path,
         "changedFiles": [],
         "hasChanges": false
     })
