@@ -190,6 +190,7 @@ pub async fn handle_request(
     req: &JsonRpcRequest,
     session: &mut Session,
     workspace_root: &str,
+    mascot_seed: u64,
     mode: Mode,
     tool_mode: ToolMode,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
@@ -228,7 +229,7 @@ pub async fn handle_request(
             Some(handle_tools_call(req, session, workspace_root, mode, tool_mode, devtools).await)
         }
         "resources/list" => Some(handle_resources_list(req)),
-        "resources/read" => Some(handle_resources_read(req, workspace_root)),
+        "resources/read" => Some(handle_resources_read(req, mascot_seed)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
         _ => Some(JsonRpcResponse::error(
             req.id.clone(),
@@ -278,8 +279,8 @@ fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
     )
 }
 
-fn render_widget_html(workspace_root: &str, resource_uri: &str) -> String {
-    let mascot = mascot::build_widget_mascot(workspace_root);
+fn render_widget_html(mascot_seed: u64, resource_uri: &str) -> String {
+    let mascot = mascot::build_widget_mascot(mascot_seed);
     let mascot_json = serde_json::to_string(&mascot).unwrap_or_else(|_| {
         "{\"width\":0,\"height\":0,\"frameMs\":50,\"palette\":[],\"frames\":[],\"sequence\":[]}"
             .to_string()
@@ -289,16 +290,16 @@ fn render_widget_html(workspace_root: &str, resource_uri: &str) -> String {
         .replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
 }
 
-fn handle_resources_read(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+fn handle_resources_read(req: &JsonRpcRequest, mascot_seed: u64) -> JsonRpcResponse {
     let uri = req
         .params
         .get("uri")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let text = if uri == UI_TEMPLATE_URI {
-        render_widget_html(workspace_root, UI_TEMPLATE_URI)
+        render_widget_html(mascot_seed, UI_TEMPLATE_URI)
     } else if uri == FINAL_SUMMARY_UI_TEMPLATE_URI {
-        render_widget_html(workspace_root, FINAL_SUMMARY_UI_TEMPLATE_URI)
+        render_widget_html(mascot_seed, FINAL_SUMMARY_UI_TEMPLATE_URI)
     } else {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
     };
@@ -2369,8 +2370,7 @@ mod tests {
             .and_then(Value::as_str)
             .map(str::to_string)
             .expect("missing widget resource uri");
-        let resource_resp =
-            handle_resources_read(&resources_read_request(&resource_uri), "/workspace/demo");
+        let resource_resp = handle_resources_read(&resources_read_request(&resource_uri), 1);
         let resource_html = resource_resp
             .result
             .as_ref()

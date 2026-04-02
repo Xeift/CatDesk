@@ -309,10 +309,11 @@ async fn post_mcp(
         app.request_count += 1;
     }
 
-    let (workspace_root, mode, tool_mode, mut usage_totals) = {
+    let (workspace_root, mascot_seed, mode, tool_mode, mut usage_totals) = {
         let app = s.app.lock().await;
         (
             app.workspace_root.clone(),
+            app.mascot_seed,
             app.mode,
             app.tool_mode,
             app.usage_totals.clone(),
@@ -419,7 +420,16 @@ async fn post_mcp(
         let session = sessions.get_mut(&session_id).unwrap();
         let tool_name = tool_name_from_jsonrpc_request(&req).to_string();
         if let Some(resp) =
-            mcp::handle_request(&req, session, &workspace_root, mode, tool_mode, &s.devtools).await
+            mcp::handle_request(
+                &req,
+                session,
+                &workspace_root,
+                mascot_seed,
+                mode,
+                tool_mode,
+                &s.devtools,
+            )
+            .await
         {
             let mut resp = resp;
             if req.method == "tools/call" {

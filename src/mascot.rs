@@ -91,8 +91,8 @@ impl MascotPack {
     }
 }
 
-pub fn build_workspace_mascot(workspace_root: &str) -> MascotPack {
-    let frames = mascot_source_frames(workspace_root);
+pub fn build_workspace_mascot(seed: u64) -> MascotPack {
+    let frames = mascot_source_frames(seed);
     let cropped = crop_frames(&frames);
     let tui_frames = cropped.iter().map(build_tui_frame).collect();
     MascotPack {
@@ -101,8 +101,8 @@ pub fn build_workspace_mascot(workspace_root: &str) -> MascotPack {
     }
 }
 
-pub fn build_widget_mascot(workspace_root: &str) -> WidgetMascot {
-    let (frames, sequence, spirit_hero_background) = mascot_widget_source(workspace_root);
+pub fn build_widget_mascot(seed: u64) -> WidgetMascot {
+    let (frames, sequence, spirit_hero_background) = mascot_widget_source(seed);
     let cropped = crop_frames(&frames);
     build_widget_mascot_from_frames(&cropped, sequence, spirit_hero_background)
 }
@@ -136,8 +136,7 @@ pub fn render_tui_lines(frame: &TuiMascotFrame, area_height: u16) -> Vec<Line<'s
     lines
 }
 
-fn mascot_source_frames(workspace_root: &str) -> Vec<RgbaImage> {
-    let seed = stable_workspace_seed(workspace_root);
+fn mascot_source_frames(seed: u64) -> Vec<RgbaImage> {
     let use_spirit = mascot_use_spirit(seed);
     let headwear_pref = mascot_headwear_preference(use_spirit);
     MASCOT_SEQUENCE
@@ -169,9 +168,8 @@ fn mascot_source_frames(workspace_root: &str) -> Vec<RgbaImage> {
 }
 
 fn mascot_widget_source(
-    workspace_root: &str,
+    seed: u64,
 ) -> (Vec<RgbaImage>, Vec<WidgetMascotSequenceStep>, String) {
-    let seed = stable_workspace_seed(workspace_root);
     let use_spirit = mascot_use_spirit(seed);
     let headwear_pref = mascot_headwear_preference(use_spirit);
     let mut poses: Vec<(u8, i32)> = Vec::new();
@@ -221,15 +219,6 @@ fn mascot_widget_source(
     };
 
     (frames, sequence, spirit_hero_background)
-}
-
-fn stable_workspace_seed(workspace_root: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in workspace_root.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
 
 fn mascot_use_spirit(seed: u64) -> bool {
@@ -993,48 +982,41 @@ mod tests {
         mascot_headwear_preference,
         mascot_use_spirit,
         openness_value,
-        stable_workspace_seed,
         WIDGET_MASCOT_ALPHABET,
     };
     use crate::binagotchy_gen;
 
     #[test]
     fn widget_mascot_palette_fits_alphabet() {
-        let mascot = build_widget_mascot("/tmp/catdesk-spirit-test");
+        let mascot = build_widget_mascot(1);
         assert!(mascot.palette.len() < WIDGET_MASCOT_ALPHABET.len());
     }
 
     #[test]
     fn widget_mascot_embeds_spirit_hero_background() {
-        let spirit_workspace = (0..10_000)
-            .map(|idx| format!("/tmp/catdesk-spirit-test-{idx}"))
-            .find(|path| mascot_use_spirit(stable_workspace_seed(path)))
-            .expect("expected a workspace path that triggers spirit");
-        let mascot = build_widget_mascot(&spirit_workspace);
+        let spirit_seed = 0;
+        assert!(mascot_use_spirit(spirit_seed));
+        let mascot = build_widget_mascot(spirit_seed);
         assert!(mascot.spirit_hero_background.starts_with("data:image/png;base64,"));
     }
 
     #[test]
     fn widget_mascot_keeps_normal_background_when_spirit_not_selected() {
-        let normal_workspace = (0..10_000)
-            .map(|idx| format!("/tmp/catdesk-normal-test-{idx}"))
-            .find(|path| !mascot_use_spirit(stable_workspace_seed(path)))
-            .expect("expected a workspace path that does not trigger spirit");
-        let mascot = build_widget_mascot(&normal_workspace);
+        let normal_seed = 1;
+        assert!(!mascot_use_spirit(normal_seed));
+        let mascot = build_widget_mascot(normal_seed);
         assert!(mascot.spirit_hero_background.is_empty());
     }
 
     #[test]
     fn mascot_non_spirit_can_generate_headwear() {
-        let workspace = (0..10_000)
-            .map(|idx| format!("/tmp/catdesk-headwear-test-{idx}"))
-            .find(|path| {
-                let seed = stable_workspace_seed(path);
-                if mascot_use_spirit(seed) {
+        let seed = (1..10_000_u64)
+            .find(|seed| {
+                if mascot_use_spirit(*seed) {
                     return false;
                 }
                 let (_, traits) = binagotchy_gen::create_character(
-                    Some(seed),
+                    Some(*seed),
                     super::MASCOT_CANVAS,
                     super::MASCOT_UPSCALE,
                     "normal",
@@ -1045,9 +1027,8 @@ mod tests {
                 );
                 traits.get("headwear").is_some_and(|value| value != "none")
             })
-            .expect("expected a non-spirit workspace path that generates headwear");
+            .expect("expected a non-spirit mascot seed that generates headwear");
 
-        let seed = stable_workspace_seed(&workspace);
         let (_, traits) = binagotchy_gen::create_character(
             Some(seed),
             super::MASCOT_CANVAS,

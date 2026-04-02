@@ -247,6 +247,7 @@ pub struct AppState {
     pub devtools_running: bool,
     pub port: u16,
     pub workspace_root: String,
+    pub mascot_seed: u64,
     pub mascot: MascotPack,
     pub detected_browsers: Vec<DetectedBrowser>,
     pub selected_browser: Option<DetectedBrowser>,
@@ -395,6 +396,7 @@ impl AppState {
         config_path: PathBuf,
     ) -> std::io::Result<Self> {
         let config = AppConfig::load_from_path(&config_path)?;
+        let mascot_seed = rand::random::<u64>();
         Ok(Self {
             theme: config.theme,
             mode: config.mode,
@@ -407,7 +409,8 @@ impl AppState {
             last_remote_activity_ms: None,
             devtools_running: false,
             port,
-            mascot: mascot::build_workspace_mascot(&workspace_root),
+            mascot_seed,
+            mascot: mascot::build_workspace_mascot(mascot_seed),
             workspace_root,
             detected_browsers: Vec::new(),
             selected_browser: config.selected_browser,
