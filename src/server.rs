@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::devtools::DevtoolsBridge;
-use crate::mcp::{self, JsonRpcRequest, Session};
+use crate::mcp::{self, JsonRpcRequest, Session, WIDGET_PAYLOAD_META_KEY};
 use crate::state::{FlowDirection, SharedState, UsageTotals};
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
@@ -170,6 +170,12 @@ fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) 
     let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
         return;
     };
+    let history_usage = json!({
+        "inputTokens": usage_totals.input_tokens,
+        "outputTokens": usage_totals.output_tokens,
+        "totalTokens": usage_totals.total_tokens,
+    });
+    let history_tool_call_count = json!(usage_totals.tool_call_count);
     let Some(structured) = result_obj
         .get_mut("structuredContent")
         .and_then(Value::as_object_mut)
@@ -178,16 +184,21 @@ fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) 
     };
     structured.insert(
         "historyTurnTokenUsage".to_string(),
-        json!({
-            "inputTokens": usage_totals.input_tokens,
-            "outputTokens": usage_totals.output_tokens,
-            "totalTokens": usage_totals.total_tokens,
-        }),
+        history_usage.clone(),
     );
     structured.insert(
         "historyToolCallCount".to_string(),
-        json!(usage_totals.tool_call_count),
+        history_tool_call_count.clone(),
     );
+    if let Some(widget_payload) = result_obj
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
+        .and_then(Value::as_object_mut)
+    {
+        widget_payload.insert("historyTurnTokenUsage".to_string(), history_usage);
+        widget_payload.insert("historyToolCallCount".to_string(), history_tool_call_count);
+    }
 }
 
 // ── GET / — health ──────────────────────────────────────────
@@ -202,6 +213,76 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
         "tool_mode": app.tool_mode.label(),
         "workspace": app.workspace_root,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_history_usage_updates_widget_payload_meta() {
+        let mut result = Some(json!({
+            "structuredContent": {
+                "schema": "catdesk.review.v1"
+            },
+            "_meta": {
+                "catdesk/widgetPayload": {
+                    "schema": "catdesk.review.v1",
+                    "turnTokenUsage": {
+                        "inputTokens": 11,
+                        "outputTokens": 22,
+                        "totalTokens": 33
+                    },
+                    "toolCallCount": 4
+                }
+            }
+        }));
+        let usage_totals = UsageTotals {
+            input_tokens: 120,
+            output_tokens: 34,
+            total_tokens: 154,
+            tool_call_count: 7,
+        };
+
+        attach_history_usage(&mut result, &usage_totals);
+
+        let structured = result
+            .as_ref()
+            .and_then(|value| value.get("structuredContent"))
+            .expect("missing structuredContent");
+        let widget_payload = result
+            .as_ref()
+            .and_then(|value| value.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+
+        assert_eq!(
+            structured
+                .get("historyTurnTokenUsage")
+                .and_then(|usage| usage.get("inputTokens"))
+                .and_then(Value::as_u64),
+            Some(120)
+        );
+        assert_eq!(
+            structured
+                .get("historyToolCallCount")
+                .and_then(Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            widget_payload
+                .get("historyTurnTokenUsage")
+                .and_then(|usage| usage.get("totalTokens"))
+                .and_then(Value::as_u64),
+            Some(154)
+        );
+        assert_eq!(
+            widget_payload
+                .get("historyToolCallCount")
+                .and_then(Value::as_u64),
+            Some(7)
+        );
+    }
 }
 
 // ── POST /<slug>/mcp ────────────────────────────────────────

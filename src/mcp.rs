@@ -21,7 +21,7 @@ const PROTOCOL_VERSION: &str = "2025-03-26";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
 const FINAL_SUMMARY_UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard-final-summary.html";
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
-const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
+pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const RENDER_FINAL_SUMMARY_WIDGET_TOOL: &str = "render_final_summary_widget";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
 const EMBEDDED_WIDGET_MASCOT_PLACEHOLDER: &str = "{\"__catdeskEmbeddedMascotPlaceholder__\":true}";
