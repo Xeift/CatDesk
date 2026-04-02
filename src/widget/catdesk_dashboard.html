@@ -506,20 +506,25 @@
 
     .instruction-path-stat {
       width: 100%;
-      gap: 8px;
+      display: grid;
+      grid-template-columns: 14px 74px minmax(0, 1fr);
+      align-items: center;
+      column-gap: 6px;
     }
 
     .instruction-path-label {
       color: var(--text-3);
       font-size: 11px;
       line-height: 1.2;
-      flex: 0 0 auto;
+      text-align: left;
+      white-space: nowrap;
     }
 
     .instruction-path-code {
-      flex: 0 1 auto;
       min-width: 0;
+      width: fit-content;
       max-width: min(100%, 440px);
+      justify-self: start;
       overflow: hidden;
       text-overflow: ellipsis;
       padding: 4px 6px;
