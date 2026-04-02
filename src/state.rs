@@ -32,7 +32,6 @@ pub struct SessionFlow {
     pub closing_step_ms: u64,
 }
 
-const APP_STATE_FILE_NAME: &str = "catdesk_state.json";
 const APP_CONFIG_DIR_NAME: &str = ".catdesk";
 const APP_CONFIG_FILE_NAME: &str = "config.toml";
 
@@ -61,17 +60,19 @@ impl UsageTotals {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PersistedAppState {
-    theme: String,
-    mode: Mode,
-    tool_mode: ToolMode,
-    usage_totals: UsageTotals,
-    selected_browser: Option<DetectedBrowser>,
+pub struct AppConfig {
+    pub ngrok_authtoken: Option<String>,
+    pub theme: String,
+    pub mode: Mode,
+    pub tool_mode: ToolMode,
+    pub usage_totals: UsageTotals,
+    pub selected_browser: Option<DetectedBrowser>,
 }
 
-impl Default for PersistedAppState {
+impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            ngrok_authtoken: None,
             theme: theme::DEFAULT_THEME_ID.to_string(),
             mode: Mode::Both,
             tool_mode: ToolMode::OneTool,
@@ -81,31 +82,6 @@ impl Default for PersistedAppState {
     }
 }
 
-impl PersistedAppState {
-    fn load_from_path(path: &Path) -> std::io::Result<Self> {
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e),
-        };
-        let mut state = serde_json::from_slice::<Self>(&bytes).map_err(std::io::Error::other)?;
-        state.usage_totals = state.usage_totals.normalized();
-        Ok(state)
-    }
-
-    fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
-        let mut state = self.clone();
-        state.usage_totals = state.usage_totals.normalized();
-        let bytes = serde_json::to_vec_pretty(&state).map_err(std::io::Error::other)?;
-        std::fs::write(path, bytes)
-    }
-}
-
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AppConfig {
-    pub ngrok_authtoken: Option<String>,
-}
-
 impl AppConfig {
     fn normalized(mut self) -> Self {
         self.ngrok_authtoken = self
@@ -113,6 +89,7 @@ impl AppConfig {
             .take()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        self.usage_totals = self.usage_totals.normalized();
         self
     }
 
@@ -278,7 +255,7 @@ pub struct AppState {
     pub session_count: usize,
     pub request_count: u64,
     pub usage_totals: UsageTotals,
-    persisted_state_path: PathBuf,
+    config_path: PathBuf,
     pub server_handle: Option<tokio::task::JoinHandle<()>>,
     pub ngrok_task: Option<tokio::task::JoinHandle<()>>,
     pub remote_browser_child: Option<tokio::process::Child>,
@@ -298,16 +275,6 @@ const FLOW_CLOSE_PRUNE_MULTIPLIER: u64 = 3;
 
 fn short_session_id(sid: &str) -> String {
     sid[..sid.len().min(8)].to_string()
-}
-
-fn persisted_state_path() -> std::io::Result<PathBuf> {
-    let exe_path = std::env::current_exe()?;
-    let Some(dir) = exe_path.parent() else {
-        return Err(std::io::Error::other(
-            "failed to resolve executable directory",
-        ));
-    };
-    Ok(dir.join(APP_STATE_FILE_NAME))
 }
 
 pub fn app_config_path() -> std::io::Result<PathBuf> {
@@ -418,20 +385,20 @@ fn enqueue_flow_segment(
 
 impl AppState {
     pub fn new(port: u16, workspace_root: String) -> std::io::Result<Self> {
-        let persisted_state_path = persisted_state_path()?;
-        Self::from_persisted_state_path(port, workspace_root, persisted_state_path)
+        let config_path = app_config_path()?;
+        Self::from_config_path(port, workspace_root, config_path)
     }
 
-    fn from_persisted_state_path(
+    fn from_config_path(
         port: u16,
         workspace_root: String,
-        persisted_state_path: PathBuf,
+        config_path: PathBuf,
     ) -> std::io::Result<Self> {
-        let persisted = PersistedAppState::load_from_path(&persisted_state_path)?;
+        let config = AppConfig::load_from_path(&config_path)?;
         Ok(Self {
-            theme: persisted.theme,
-            mode: persisted.mode,
-            tool_mode: persisted.tool_mode,
+            theme: config.theme,
+            mode: config.mode,
+            tool_mode: config.tool_mode,
             mcp_slug: generate_mcp_slug(),
             server_running: false,
             ngrok_running: false,
@@ -443,13 +410,13 @@ impl AppState {
             mascot: mascot::build_workspace_mascot(&workspace_root),
             workspace_root,
             detected_browsers: Vec::new(),
-            selected_browser: persisted.selected_browser,
+            selected_browser: config.selected_browser,
             logs: Vec::new(),
             session_flows: Vec::new(),
             session_count: 0,
             request_count: 0,
-            usage_totals: persisted.usage_totals,
-            persisted_state_path,
+            usage_totals: config.usage_totals,
+            config_path,
             server_handle: None,
             ngrok_task: None,
             remote_browser_child: None,
@@ -483,19 +450,18 @@ impl AppState {
         }
     }
 
-    fn persisted_state(&self) -> PersistedAppState {
-        PersistedAppState {
-            theme: self.theme.clone(),
-            mode: self.mode,
-            tool_mode: self.tool_mode,
-            usage_totals: self.usage_totals.clone().normalized(),
-            selected_browser: self.selected_browser.clone(),
-        }
+    fn app_config(&self) -> std::io::Result<AppConfig> {
+        let mut config = AppConfig::load_from_path(&self.config_path)?;
+        config.theme = self.theme.clone();
+        config.mode = self.mode;
+        config.tool_mode = self.tool_mode;
+        config.usage_totals = self.usage_totals.clone().normalized();
+        config.selected_browser = self.selected_browser.clone();
+        Ok(config.normalized())
     }
 
     pub fn persist_state(&self) -> std::io::Result<()> {
-        self.persisted_state()
-            .save_to_path(&self.persisted_state_path)
+        self.app_config()?.save_to_path(&self.config_path)
     }
 
     pub fn persist_state_with_log(&mut self) {
@@ -503,7 +469,9 @@ impl AppState {
             self.log("WARN", format!("Failed to persist app state: {e}"));
         }
     }
+}
 
+impl AppState {
     pub fn record_session_flow(&mut self, sid: &str, events: &[String], direction: FlowDirection) {
         if events.is_empty() {
             return;
@@ -597,24 +565,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_state_loads_persisted_state_file() {
+    fn app_state_loads_persisted_config_file() {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("catdesk-state-load-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-load-{unique}"));
         std::fs::create_dir_all(&workspace).expect("create temp workspace");
-        let state_path = workspace.join(APP_STATE_FILE_NAME);
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
         std::fs::write(
-            &state_path,
-            r#"{"theme":"neon","mode":"browser","toolMode":"multiTools","usageTotals":{"inputTokens":120,"outputTokens":34,"totalTokens":154,"toolCallCount":7},"selectedBrowser":null}"#,
-        )
-        .expect("write state file");
+            &config_path,
+            r#"theme = "neon"
+mode = "browser"
+toolMode = "multiTools"
 
-        let app = AppState::from_persisted_state_path(
+[usageTotals]
+inputTokens = 120
+outputTokens = 34
+totalTokens = 154
+toolCallCount = 7
+"#,
+        )
+        .expect("write config file");
+
+        let app = AppState::from_config_path(
             8787,
             workspace.to_string_lossy().into_owned(),
-            state_path.clone(),
+            config_path.clone(),
         )
         .expect("load app state");
 
@@ -626,24 +603,24 @@ mod tests {
         assert_eq!(app.usage_totals.total_tokens, 154);
         assert_eq!(app.usage_totals.tool_call_count, 7);
 
-        let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
     }
 
     #[test]
-    fn persist_state_writes_single_state_file() {
+    fn persist_state_writes_single_config_file() {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("catdesk-state-save-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-save-{unique}"));
         std::fs::create_dir_all(&workspace).expect("create temp workspace");
-        let state_path = workspace.join(APP_STATE_FILE_NAME);
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
 
-        let mut app = AppState::from_persisted_state_path(
+        let mut app = AppState::from_config_path(
             8787,
             workspace.to_string_lossy().into_owned(),
-            state_path.clone(),
+            config_path.clone(),
         )
         .expect("create app state");
         app.theme = "neon".into();
@@ -652,7 +629,7 @@ mod tests {
         app.usage_totals.accumulate(12, 8, 3);
         app.persist_state().expect("persist state");
 
-        let saved = PersistedAppState::load_from_path(&state_path).expect("load state file");
+        let saved = AppConfig::load_from_path(&config_path).expect("load config file");
         assert_eq!(saved.theme, "neon");
         assert!(matches!(saved.mode, Mode::Computer));
         assert!(matches!(saved.tool_mode, ToolMode::ReadOnly));
@@ -661,7 +638,7 @@ mod tests {
         assert_eq!(saved.usage_totals.total_tokens, 20);
         assert_eq!(saved.usage_totals.tool_call_count, 3);
 
-        let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
     }
 
@@ -671,12 +648,13 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("catdesk-config-save-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-token-{unique}"));
         std::fs::create_dir_all(&workspace).expect("create temp config dir");
         let config_path = workspace.join(APP_CONFIG_FILE_NAME);
 
         let config = AppConfig {
             ngrok_authtoken: Some("test-token-123".into()),
+            ..AppConfig::default()
         };
         config.save_to_path(&config_path).expect("save config");
 
