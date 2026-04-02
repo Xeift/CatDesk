@@ -13,8 +13,8 @@ mod workspace_tools;
 use crossterm::{
     ExecutableCommand,
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -22,11 +22,12 @@ use devtools::DevtoolsBridge;
 use mascot::render_tui_lines;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use state::{
     AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, Mode, SessionFlow,
-    SharedState, ToolMode, UsageTotals,
+    SharedState, ToolMode, UsageTotals, app_config_path, load_ngrok_authtoken,
+    save_ngrok_authtoken,
 };
 use std::io::{Write, stdout};
 use std::sync::Arc;
@@ -339,12 +340,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableBracketedPaste)?;
     stdout().execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_app(&mut terminal, state.clone()).await;
 
+    stdout().execute(DisableBracketedPaste)?;
     stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
@@ -352,8 +355,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cleanup
     {
         let mut app = state.lock().await;
-        if let Some(ref mut child) = app.ngrok_child {
-            let _ = child.kill().await;
+        if let Some(handle) = app.ngrok_task.take() {
+            handle.abort();
         }
         if let Some(ref mut child) = app.remote_browser_child {
             let _ = child.kill().await;
@@ -412,6 +415,11 @@ async fn run_app(
         if !continue_run {
             return Ok(());
         }
+    }
+
+    let continue_run = run_ngrok_auth_setup(terminal, state.clone()).await?;
+    if !continue_run {
+        return Ok(());
     }
 
     // Start services
@@ -528,6 +536,239 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(select, chunks[1]);
+}
+
+async fn run_ngrok_auth_setup(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    state: SharedState,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if load_ngrok_authtoken()?.is_some() {
+        return Ok(true);
+    }
+
+    let config_path = app_config_path()?;
+    let config_path_text = config_path.to_string_lossy().into_owned();
+    let mut input = String::new();
+    let mut error_message: Option<String> = None;
+
+    loop {
+        let (
+            current_theme,
+            current_tool_mode,
+            current_mode,
+            browsers,
+            selected_browser,
+        ) = {
+            let app = state.lock().await;
+            (
+                app.current_theme(),
+                app.tool_mode,
+                app.mode,
+                app.detected_browsers.clone(),
+                app.selected_browser.clone(),
+            )
+        };
+        let supported_indices: Vec<usize> = browsers
+            .iter()
+            .enumerate()
+            .filter(|(_, browser)| browser.mcp_supported)
+            .map(|(idx, _)| idx)
+            .collect();
+        let selected_supported_idx =
+            selected_supported_browser_idx(&browsers, selected_browser.as_ref());
+        terminal.draw(|f| {
+            let anchor_area = if current_mode.browser_enabled() {
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(10),
+                        Constraint::Length(3),
+                    ])
+                    .split(f.area())[1]
+            } else {
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Length(16),
+                        Constraint::Min(0),
+                    ])
+                    .split(f.area())[1]
+            };
+            if current_mode.browser_enabled() {
+                draw_browser_select(
+                    f,
+                    &browsers,
+                    &supported_indices,
+                    selected_supported_idx,
+                    current_theme,
+                );
+            } else {
+                draw_mode_select(f, current_theme, current_tool_mode);
+            }
+            draw_ngrok_auth_setup(
+                f,
+                current_theme,
+                anchor_area,
+                &config_path_text,
+                &masked_secret_preview(&input),
+                error_message.as_deref(),
+            )
+        })?;
+
+        if !event::poll(UI_POLL_INTERVAL)? {
+            continue;
+        }
+        match event::read()? {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(false),
+                    KeyCode::Enter => {
+                        let token = input.trim();
+                        if token.is_empty() {
+                            error_message = Some("NGROK_AUTHTOKEN cannot be empty".into());
+                            continue;
+                        }
+                        match save_ngrok_authtoken(token) {
+                            Ok(saved_path) => {
+                                let mut app = state.lock().await;
+                                app.log(
+                                    "INFO",
+                                    format!(
+                                        "Saved ngrok authtoken to {}",
+                                        saved_path.to_string_lossy()
+                                    ),
+                                );
+                                return Ok(true);
+                            }
+                            Err(e) => {
+                                error_message =
+                                    Some(format!("Failed to save ~/.catdesk/config.toml: {e}"));
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        error_message = None;
+                    }
+                    KeyCode::Char(c) => {
+                        input.push(c);
+                        error_message = None;
+                    }
+                    _ => {}
+                }
+            }
+            Event::Paste(text) => {
+                input.push_str(&text);
+                error_message = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn masked_secret_preview(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = value.chars().collect();
+    let visible = chars.len().min(4);
+    let masked_len = chars.len().saturating_sub(visible);
+    let mut preview = "*".repeat(masked_len);
+    preview.extend(chars[chars.len() - visible..].iter());
+    preview
+}
+
+fn draw_ngrok_auth_setup(
+    f: &mut Frame,
+    theme: &theme::ThemeDef,
+    anchor_area: Rect,
+    _config_path: &str,
+    masked_value: &str,
+    error_message: Option<&str>,
+) {
+    let palette = theme.palette;
+    let modal_bg = Color::Rgb(34, 38, 47);
+    let modal_fg = Color::Rgb(232, 236, 242);
+
+    let modal_area = centered_rect(72, 10, anchor_area);
+    f.render_widget(Clear, modal_area);
+    let modal_block = Block::default()
+        .title(" ngrok auth ")
+        .borders(Borders::ALL)
+        .border_type(palette.border_type)
+        .border_style(Style::default().fg(palette.border_fg))
+        .style(Style::default().bg(modal_bg));
+    let modal_inner = modal_block.inner(modal_area);
+    f.render_widget(modal_block, modal_area);
+
+    let modal_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Length(2),
+        ])
+        .split(modal_inner);
+
+    let body_lines = vec![
+        Line::from(Span::styled(
+            "ngrok setup required",
+            Style::default()
+                .fg(palette.title_fg)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Open https://dashboard.ngrok.com/get-started/setup to get your authtoken."),
+        Line::from("Paste the token from `ngrok config add-authtoken ...` below."),
+    ];
+    let body = Paragraph::new(body_lines)
+        .style(Style::default().fg(modal_fg).bg(modal_bg))
+        .wrap(Wrap { trim: false });
+    f.render_widget(body, modal_chunks[0]);
+
+    let input_line = if masked_value.is_empty() {
+        "_".to_string()
+    } else {
+        masked_value.to_string()
+    };
+    let input = Paragraph::new(format!("  {input_line}"))
+        .style(Style::default().fg(palette.title_fg).bg(modal_bg))
+        .block(
+            Block::default()
+                .title(" NGROK_AUTHTOKEN ")
+                .borders(Borders::ALL)
+                .border_type(palette.border_type)
+                .border_style(Style::default().fg(palette.border_fg))
+                .style(Style::default().bg(modal_bg)),
+        );
+    f.render_widget(input, modal_chunks[1]);
+
+    let footer = if let Some(message) = error_message {
+        Paragraph::new(Line::from(Span::styled(
+            message.to_string(),
+            Style::default().fg(palette.danger_fg).bg(modal_bg),
+        )))
+    } else {
+        Paragraph::new(Line::from(Span::styled(
+            "[Enter] Save  [q/Esc] Quit  [Paste] Insert token",
+            Style::default().fg(palette.muted_fg).bg(modal_bg),
+        )))
+    };
+    f.render_widget(footer, modal_chunks[2]);
+}
+
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let width = area.width.saturating_mul(percent_x).saturating_div(100).max(44);
+    let width = width.min(area.width.saturating_sub(2).max(1));
+    let popup_height = height.min(area.height.saturating_sub(2).max(1));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(popup_height) / 2;
+    Rect::new(x, y, width, popup_height)
 }
 
 async fn run_settings(

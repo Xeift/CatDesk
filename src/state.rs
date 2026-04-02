@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -32,6 +33,8 @@ pub struct SessionFlow {
 }
 
 const APP_STATE_FILE_NAME: &str = "catdesk_state.json";
+const APP_CONFIG_DIR_NAME: &str = ".catdesk";
+const APP_CONFIG_FILE_NAME: &str = "config.toml";
 
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +98,64 @@ impl PersistedAppState {
         state.usage_totals = state.usage_totals.normalized();
         let bytes = serde_json::to_vec_pretty(&state).map_err(std::io::Error::other)?;
         std::fs::write(path, bytes)
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub ngrok_authtoken: Option<String>,
+}
+
+impl AppConfig {
+    fn normalized(mut self) -> Self {
+        self.ngrok_authtoken = self
+            .ngrok_authtoken
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self
+    }
+
+    fn load_from_path(path: &Path) -> std::io::Result<Self> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e),
+        };
+        let config = toml::from_str::<Self>(&text).map_err(std::io::Error::other)?;
+        Ok(config.normalized())
+    }
+
+    fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
+        let config = self.clone().normalized();
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::other("failed to resolve config directory for config.toml")
+        })?;
+        fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+
+        let text = toml::to_string_pretty(&config).map_err(std::io::Error::other)?;
+        let mut options = OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        use std::io::Write as _;
+        file.write_all(text.as_bytes())?;
+        file.flush()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
     }
 }
 
@@ -219,7 +280,7 @@ pub struct AppState {
     pub usage_totals: UsageTotals,
     persisted_state_path: PathBuf,
     pub server_handle: Option<tokio::task::JoinHandle<()>>,
-    pub ngrok_child: Option<tokio::process::Child>,
+    pub ngrok_task: Option<tokio::task::JoinHandle<()>>,
     pub remote_browser_child: Option<tokio::process::Child>,
     pub devtools_child: Option<tokio::process::Child>,
 }
@@ -247,6 +308,31 @@ fn persisted_state_path() -> std::io::Result<PathBuf> {
         ));
     };
     Ok(dir.join(APP_STATE_FILE_NAME))
+}
+
+pub fn app_config_path() -> std::io::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        std::io::Error::other("HOME is not set; cannot resolve ~/.catdesk/config.toml")
+    })?;
+    Ok(PathBuf::from(home)
+        .join(APP_CONFIG_DIR_NAME)
+        .join(APP_CONFIG_FILE_NAME))
+}
+
+pub fn load_app_config() -> std::io::Result<AppConfig> {
+    AppConfig::load_from_path(&app_config_path()?)
+}
+
+pub fn load_ngrok_authtoken() -> std::io::Result<Option<String>> {
+    Ok(load_app_config()?.ngrok_authtoken)
+}
+
+pub fn save_ngrok_authtoken(token: &str) -> std::io::Result<PathBuf> {
+    let path = app_config_path()?;
+    let mut config = AppConfig::load_from_path(&path)?;
+    config.ngrok_authtoken = Some(token.to_string());
+    config.save_to_path(&path)?;
+    Ok(path)
 }
 
 fn now_hms() -> String {
@@ -365,7 +451,7 @@ impl AppState {
             usage_totals: persisted.usage_totals,
             persisted_state_path,
             server_handle: None,
-            ngrok_child: None,
+            ngrok_task: None,
             remote_browser_child: None,
             devtools_child: None,
         })
@@ -576,6 +662,28 @@ mod tests {
         assert_eq!(saved.usage_totals.tool_call_count, 3);
 
         let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_config_round_trips_ngrok_authtoken() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-save-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp config dir");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let config = AppConfig {
+            ngrok_authtoken: Some("test-token-123".into()),
+        };
+        config.save_to_path(&config_path).expect("save config");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("load config");
+        assert_eq!(saved.ngrok_authtoken.as_deref(), Some("test-token-123"));
+
+        let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
     }
 }

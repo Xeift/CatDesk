@@ -53,7 +53,7 @@ So why not use your 3,000 weekly messages for coding?
 > Treat it like OpenClaw, keep it containerized and isolated.
 
 1. Install prerequisites.
-   You need `ngrok` available in your `PATH`. CatDesk launches ngrok itself from the local machine, see [`ngrok::start()`](/home/xeift/Desktop/MCP3000/src/ngrok.rs#L5).
+   You do not need a local `ngrok` binary in your `PATH`. CatDesk opens the tunnel itself through the embedded Rust ngrok SDK in [`start()`](/home/xeift/Desktop/CatDesk/src/ngrok.rs#L5). On first launch, CatDesk prompts for your ngrok token in the TUI and saves it to `~/.catdesk/config.toml`.
 
 2. Download the CatDesk binary for your platform.
    Put it anywhere you want. If your platform requires it, make the binary executable first.
