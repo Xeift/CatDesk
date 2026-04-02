@@ -1423,16 +1423,14 @@
             return widgetPayload;
           }
           if (current.structuredContent && typeof current.structuredContent === "object") {
-            if (finalSummaryOnly || isFinalSummaryTransport(current)) {
-              return null;
+            if (!(finalSummaryOnly || isFinalSummaryTransport(current))) {
+              return current.structuredContent;
             }
-            return current.structuredContent;
           }
           if (current.schema === "catdesk.review.v1") {
-            if (finalSummaryOnly || isFinalSummaryTransport(current)) {
-              return null;
+            if (!(finalSummaryOnly || isFinalSummaryTransport(current))) {
+              return current;
             }
-            return current;
           }
 
           pushCandidate(current.toolResponseMetadata);
