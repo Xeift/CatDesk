@@ -165,11 +165,7 @@ fn archive_startup_mascot_to_root(seed: u64, root: &Path) -> std::io::Result<()>
     if frames.is_empty() {
         return Err(std::io::Error::other("generated mascot archive has no frames"));
     }
-    let cropped_frames = crop_frames(&frames);
-    if cropped_frames.is_empty() {
-        return Err(std::io::Error::other("cropped mascot archive has no frames"));
-    }
-    let archive_frames = prepare_archive_frames(&cropped_frames)?;
+    let archive_frames = prepare_archive_frames(&frames)?;
 
     write_png(&archive_dir.join(CHARACTER_PNG_FILE_NAME), &archive_frames[0])?;
     write_gif(&archive_dir.join(ANIMATION_GIF_FILE_NAME), &archive_frames, &delays_ms)?;
