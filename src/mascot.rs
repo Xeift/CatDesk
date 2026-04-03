@@ -30,6 +30,8 @@ const SPIRIT_HERO_BG_HEIGHT: u32 = 420;
 const CATDESK_DIR_NAME: &str = ".catdesk";
 #[cfg_attr(test, allow(dead_code))]
 const BINAGOTCHY_DIR_NAME: &str = "binagotchy";
+#[cfg_attr(test, allow(dead_code))]
+const DOWNLOADS_DIR_NAME: &str = "downloads";
 const METADATA_FILE_NAME: &str = "metadata.toml";
 const CHARACTER_PNG_FILE_NAME: &str = "character.png";
 const ANIMATION_GIF_FILE_NAME: &str = "animation.gif";
@@ -362,6 +364,15 @@ pub(crate) fn catdesk_binagotchy_root() -> std::io::Result<PathBuf> {
         .join(BINAGOTCHY_DIR_NAME))
 }
 
+pub(crate) fn catdesk_downloads_root() -> std::io::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        std::io::Error::other("HOME is not set; cannot resolve ~/.catdesk/downloads")
+    })?;
+    Ok(PathBuf::from(home)
+        .join(CATDESK_DIR_NAME)
+        .join(DOWNLOADS_DIR_NAME))
+}
+
 pub(crate) fn load_archived_binagotchy_cards() -> std::io::Result<Vec<ArchivedBinagotchyCard>> {
     let root = catdesk_binagotchy_root()?;
     let mut entries: Vec<PathBuf> = fs::read_dir(&root)?
@@ -395,6 +406,32 @@ pub(crate) fn load_archived_binagotchy_cards() -> std::io::Result<Vec<ArchivedBi
         .collect()
 }
 
+pub(crate) fn save_archived_binagotchy_folder(folder: &str) -> std::io::Result<PathBuf> {
+    save_archived_binagotchy_folder_from_roots(
+        folder,
+        &catdesk_binagotchy_root()?,
+        &catdesk_downloads_root()?,
+    )
+}
+
+fn save_archived_binagotchy_folder_from_roots(
+    folder: &str,
+    archive_root: &Path,
+    downloads_root: &Path,
+) -> std::io::Result<PathBuf> {
+    let source_dir = resolve_archived_binagotchy_dir_from_root(folder, archive_root)?;
+    create_archive_dir(downloads_root)?;
+    let destination_dir = downloads_root.join(folder);
+    if destination_dir.exists() {
+        return Err(std::io::Error::other(format!(
+            "binagotchy download folder already exists: {}",
+            destination_dir.display()
+        )));
+    }
+    copy_archive_dir_recursive(&source_dir, &destination_dir)?;
+    Ok(destination_dir)
+}
+
 fn archive_timestamp(created_at: OffsetDateTime) -> std::io::Result<String> {
     created_at
         .format(format_description!(
@@ -417,12 +454,57 @@ fn required_trait(
         .ok_or_else(|| std::io::Error::other(format!("missing mascot trait: {key}")))
 }
 
+fn resolve_archived_binagotchy_dir_from_root(folder: &str, root: &Path) -> std::io::Result<PathBuf> {
+    if folder.is_empty() || folder == "." || folder == ".." {
+        return Err(std::io::Error::other(
+            "binagotchy folder name must not be empty or traversal-only",
+        ));
+    }
+    if folder.contains('/') || folder.contains('\\') {
+        return Err(std::io::Error::other(
+            "binagotchy folder name must be a single path segment",
+        ));
+    }
+    let archive_dir = root.join(folder);
+    if !archive_dir.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "binagotchy archive folder not found: {folder}"
+        )));
+    }
+    Ok(archive_dir)
+}
+
 fn create_archive_dir(path: &Path) -> std::io::Result<()> {
     fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn copy_archive_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
+    create_archive_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_archive_dir_recursive(&source_path, &destination_path)?;
+        } else if source_path.is_file() {
+            fs::copy(&source_path, &destination_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&destination_path, fs::Permissions::from_mode(0o600))?;
+            }
+        } else {
+            return Err(std::io::Error::other(format!(
+                "unsupported archive entry type: {}",
+                source_path.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -1259,6 +1341,7 @@ mod tests {
         mascot_headwear_preference,
         mascot_use_spirit,
         openness_value,
+        save_archived_binagotchy_folder_from_roots,
         WIDGET_MASCOT_ALPHABET,
     };
     use crate::binagotchy_gen;
@@ -1353,6 +1436,44 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&archive_root);
+    }
+
+    #[test]
+    fn save_archived_binagotchy_folder_copies_expected_files() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("catdesk-binagotchy-save-{unique}"));
+        let archive_root = temp_root.join("archives");
+        let downloads_root = temp_root.join("downloads");
+        std::fs::create_dir_all(&archive_root).expect("create archive root");
+        archive_startup_mascot_to_root(1, &archive_root).expect("archive mascot");
+
+        let archive_dir = std::fs::read_dir(&archive_root)
+            .expect("read archive root")
+            .map(|entry| entry.expect("dir entry").path())
+            .next()
+            .expect("archive dir");
+        let folder = archive_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("folder name")
+            .to_string();
+
+        let saved_dir = save_archived_binagotchy_folder_from_roots(
+            &folder,
+            &archive_root,
+            &downloads_root,
+        )
+        .expect("save archived folder");
+
+        assert_eq!(saved_dir, downloads_root.join(&folder));
+        assert!(saved_dir.join(super::METADATA_FILE_NAME).is_file());
+        assert!(saved_dir.join(super::CHARACTER_PNG_FILE_NAME).is_file());
+        assert!(saved_dir.join(super::ANIMATION_GIF_FILE_NAME).is_file());
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 }
 

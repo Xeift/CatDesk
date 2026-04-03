@@ -62,6 +62,8 @@ impl UsageTotals {
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub ngrok_authtoken: Option<String>,
+    #[serde(default)]
+    pub partner_binagotchy_seed: Option<String>,
     pub theme: String,
     pub mode: Mode,
     pub tool_mode: ToolMode,
@@ -73,6 +75,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             ngrok_authtoken: None,
+            partner_binagotchy_seed: None,
             theme: theme::DEFAULT_THEME_ID.to_string(),
             mode: Mode::Both,
             tool_mode: ToolMode::OneTool,
@@ -88,6 +91,11 @@ impl AppConfig {
             .ngrok_authtoken
             .take()
             .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self.partner_binagotchy_seed = self
+            .partner_binagotchy_seed
+            .take()
+            .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty());
         self.usage_totals = self.usage_totals.normalized();
         self
@@ -248,6 +256,7 @@ pub struct AppState {
     pub port: u16,
     pub workspace_root: String,
     pub mascot_seed: u64,
+    pub partner_binagotchy_seed: Option<String>,
     pub mascot: MascotPack,
     pub detected_browsers: Vec<DetectedBrowser>,
     pub selected_browser: Option<DetectedBrowser>,
@@ -301,6 +310,12 @@ pub fn save_ngrok_authtoken(token: &str) -> std::io::Result<PathBuf> {
     config.ngrok_authtoken = Some(token.to_string());
     config.save_to_path(&path)?;
     Ok(path)
+}
+
+pub(crate) fn parse_seed_hex(seed: &str) -> std::io::Result<u64> {
+    u64::from_str_radix(seed, 16).map_err(|error| {
+        std::io::Error::other(format!("invalid partner Binagotchy seed `{seed}`: {error}"))
+    })
 }
 
 fn now_hms() -> String {
@@ -396,10 +411,17 @@ impl AppState {
         config_path: PathBuf,
     ) -> std::io::Result<Self> {
         let config = AppConfig::load_from_path(&config_path)?;
-        let mascot_seed = rand::random::<u64>();
+        let partner_binagotchy_seed = config.partner_binagotchy_seed.clone();
+        let mascot_seed = if let Some(seed) = partner_binagotchy_seed.as_deref() {
+            parse_seed_hex(seed)?
+        } else {
+            rand::random::<u64>()
+        };
         let mascot = mascot::build_workspace_mascot(mascot_seed);
         #[cfg(not(test))]
-        mascot::archive_startup_mascot(mascot_seed)?;
+        if partner_binagotchy_seed.is_none() {
+            mascot::archive_startup_mascot(mascot_seed)?;
+        }
         Ok(Self {
             theme: config.theme,
             mode: config.mode,
@@ -413,6 +435,7 @@ impl AppState {
             devtools_running: false,
             port,
             mascot_seed,
+            partner_binagotchy_seed,
             mascot,
             workspace_root,
             detected_browsers: Vec::new(),
@@ -458,6 +481,7 @@ impl AppState {
 
     fn app_config(&self) -> std::io::Result<AppConfig> {
         let mut config = AppConfig::load_from_path(&self.config_path)?;
+        config.partner_binagotchy_seed = self.partner_binagotchy_seed.clone();
         config.theme = self.theme.clone();
         config.mode = self.mode;
         config.tool_mode = self.tool_mode;
@@ -666,6 +690,47 @@ toolCallCount = 7
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
         assert_eq!(saved.ngrok_authtoken.as_deref(), Some("test-token-123"));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_state_loads_partner_binagotchy_seed() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-partner-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        std::fs::write(
+            &config_path,
+            r#"
+theme = "concise"
+mode = "both"
+toolMode = "oneTool"
+partnerBinagotchySeed = "00000000000000ff"
+
+[usageTotals]
+inputTokens = 0
+outputTokens = 0
+totalTokens = 0
+toolCallCount = 0
+"#,
+        )
+        .expect("write config file");
+
+        let app = AppState::from_config_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("load app state");
+
+        assert_eq!(app.partner_binagotchy_seed.as_deref(), Some("00000000000000ff"));
+        assert_eq!(app.mascot_seed, 0xff);
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);

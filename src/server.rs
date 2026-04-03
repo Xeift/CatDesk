@@ -1,7 +1,7 @@
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::State,
+    extract::{Form, Path, State},
     http::{HeaderMap, Response, StatusCode, header},
     response::Json,
     routing::{delete, get, post},
@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, Session, WIDGET_PAYLOAD_META_KEY};
-use crate::state::{FlowDirection, SharedState, UsageTotals};
+use crate::state::{FlowDirection, SharedState, UsageTotals, parse_seed_hex};
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
@@ -37,10 +37,27 @@ pub fn router(
     };
     Router::new()
         .route("/", get(health))
+        .route(
+            "/binagotchy/archive/{folder}/save",
+            post(post_save_binagotchy_folder).options(options_binagotchy_archive_save),
+        )
+        .route("/binagotchy/partner", post(post_binagotchy_partner))
         .route(&mcp_path, post(post_mcp))
         .route(&mcp_path, get(get_mcp))
         .route(&mcp_path, delete(delete_mcp))
         .with_state(state)
+}
+
+fn with_binagotchy_action_cors(
+    mut builder: axum::http::response::Builder,
+) -> axum::http::response::Builder {
+    builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+    builder = builder.header(header::ACCESS_CONTROL_ALLOW_METHODS, "POST, OPTIONS");
+    builder = builder.header(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        "content-type",
+    );
+    builder
 }
 
 fn sse_error_response(
@@ -215,6 +232,177 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
     }))
 }
 
+fn attach_catdesk_instruction_actions(
+    result: &mut Option<Value>,
+    public_base_url: Option<&str>,
+    partner_binagotchy_seed: Option<&str>,
+) {
+    let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(structured) = result_obj
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(tool_name) = structured.get("toolName").and_then(Value::as_str) else {
+        return;
+    };
+    if tool_name != "catdesk_instruction" {
+        return;
+    }
+
+    let Some(widget_payload) = result_obj
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    let action_base_url = public_base_url.map(|base| format!("{base}/binagotchy"));
+    widget_payload.insert(
+        "binagotchyApiBaseUrl".to_string(),
+        json!(action_base_url.clone().unwrap_or_default()),
+    );
+    widget_payload.insert(
+        "partnerBinagotchySeed".to_string(),
+        json!(partner_binagotchy_seed.unwrap_or("")),
+    );
+
+    if let Some(cards) = widget_payload
+        .get_mut("binagotchyCards")
+        .and_then(Value::as_array_mut)
+    {
+        for card in cards.iter_mut() {
+            let Some(card_obj) = card.as_object_mut() else {
+                continue;
+            };
+            let Some(folder) = card_obj
+                .get("folder")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let is_partner = partner_binagotchy_seed
+                .zip(card_obj.get("seed").and_then(Value::as_str))
+                .is_some_and(|(partner_seed, card_seed)| partner_seed == card_seed);
+            card_obj.insert("isPartner".to_string(), json!(is_partner));
+            if let Some(base) = action_base_url.as_deref() {
+                card_obj.insert(
+                    "saveFolderUrl".to_string(),
+                    json!(format!("{base}/archive/{folder}/save")),
+                );
+                card_obj.insert(
+                    "setPartnerUrl".to_string(),
+                    json!(format!("{base}/partner")),
+                );
+            }
+        }
+    }
+}
+
+async fn post_save_binagotchy_folder(
+    Path(folder): Path<String>,
+    State(_s): State<ServerState>,
+) -> Response<Body> {
+    match crate::mascot::save_archived_binagotchy_folder(&folder) {
+        Ok(saved_path) => with_binagotchy_action_cors(Response::builder())
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "ok": true,
+                    "folder": folder,
+                    "savedPath": saved_path.to_string_lossy(),
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        Err(error) => with_binagotchy_action_cors(Response::builder())
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": error.to_string() }).to_string(),
+            ))
+            .unwrap(),
+    }
+}
+
+async fn options_binagotchy_archive_save(
+    Path(_folder): Path<String>,
+    State(_s): State<ServerState>,
+) -> Response<Body> {
+    with_binagotchy_action_cors(Response::builder())
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn post_binagotchy_partner(
+    State(s): State<ServerState>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response<Body> {
+    let Some(seed) = form.get("seed").map(|value| value.trim().to_ascii_lowercase()) else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": "missing seed" }).to_string(),
+            ))
+            .unwrap();
+    };
+
+    let parsed_seed = match parse_seed_hex(&seed) {
+        Ok(value) => value,
+        Err(error) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": error.to_string() }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let mut app = s.app.lock().await;
+    app.partner_binagotchy_seed = Some(seed.clone());
+    app.mascot_seed = parsed_seed;
+    app.mascot = crate::mascot::build_workspace_mascot(parsed_seed);
+    let widget_mascot = crate::mascot::build_widget_mascot(parsed_seed);
+    if let Err(error) = app.persist_state() {
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": error.to_string() }).to_string(),
+            ))
+            .unwrap();
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "ok": true,
+                "seed": seed,
+                "message": "partner updated",
+                "widgetMascot": widget_mascot
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +471,72 @@ mod tests {
             Some(7)
         );
     }
+
+    #[test]
+    fn attach_catdesk_instruction_actions_injects_partner_and_urls() {
+        let mut result = Some(json!({
+            "structuredContent": {
+                "schema": "catdesk.review.v1",
+                "toolName": "catdesk_instruction"
+            },
+            "_meta": {
+                WIDGET_PAYLOAD_META_KEY: {
+                    "schema": "catdesk.review.v1",
+                    "toolName": "catdesk_instruction",
+                    "binagotchyCards": [{
+                        "folder": "20260403T010203000Z_deadbeef",
+                        "seed": "deadbeef"
+                    }]
+                }
+            }
+        }));
+
+        attach_catdesk_instruction_actions(
+            &mut result,
+            Some("https://example.ngrok.app"),
+            Some("deadbeef"),
+        );
+
+        let structured = result
+            .as_ref()
+            .and_then(|value| value.get("structuredContent"))
+            .expect("missing structuredContent");
+        let widget_payload = result
+            .as_ref()
+            .and_then(|value| value.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        let card = widget_payload
+            .get("binagotchyCards")
+            .and_then(Value::as_array)
+            .and_then(|cards| cards.first())
+            .expect("missing card");
+
+        assert!(structured.get("binagotchyCards").is_none());
+        assert!(structured.get("binagotchyApiBaseUrl").is_none());
+        assert!(structured.get("partnerBinagotchySeed").is_none());
+        assert_eq!(
+            widget_payload
+                .get("binagotchyApiBaseUrl")
+                .and_then(Value::as_str),
+            Some("https://example.ngrok.app/binagotchy")
+        );
+        assert_eq!(
+            widget_payload
+                .get("partnerBinagotchySeed")
+                .and_then(Value::as_str),
+            Some("deadbeef")
+        );
+        assert_eq!(card.get("isPartner").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            card.get("saveFolderUrl").and_then(Value::as_str),
+            Some("https://example.ngrok.app/binagotchy/archive/20260403T010203000Z_deadbeef/save")
+        );
+        assert_eq!(
+            card.get("setPartnerUrl").and_then(Value::as_str),
+            Some("https://example.ngrok.app/binagotchy/partner")
+        );
+    }
 }
 
 // ── POST /<slug>/mcp ────────────────────────────────────────
@@ -309,7 +563,15 @@ async fn post_mcp(
         app.request_count += 1;
     }
 
-    let (workspace_root, mascot_seed, mode, tool_mode, mut usage_totals) = {
+    let (
+        workspace_root,
+        mascot_seed,
+        mode,
+        tool_mode,
+        mut usage_totals,
+        ngrok_url,
+        partner_binagotchy_seed,
+    ) = {
         let app = s.app.lock().await;
         (
             app.workspace_root.clone(),
@@ -317,6 +579,8 @@ async fn post_mcp(
             app.mode,
             app.tool_mode,
             app.usage_totals.clone(),
+            app.ngrok_url.clone(),
+            app.partner_binagotchy_seed.clone(),
         )
     };
 
@@ -441,6 +705,11 @@ async fn post_mcp(
                     }
                 }
                 attach_history_usage(&mut resp.result, &usage_totals);
+                attach_catdesk_instruction_actions(
+                    &mut resp.result,
+                    ngrok_url.as_deref(),
+                    partner_binagotchy_seed.as_deref(),
+                );
             }
             responses.push(serde_json::to_value(resp).unwrap());
         }

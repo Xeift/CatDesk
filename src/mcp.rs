@@ -672,6 +672,7 @@ async fn handle_tools_call(
             .accumulate(&turn_token_usage);
         session.pending_tool_call_count = session.pending_tool_call_count.saturating_add(1);
         attach_turn_token_usage(result, &turn_token_usage);
+        attach_tool_call_count(result, 1);
     }
 
     response
@@ -987,10 +988,33 @@ fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMod
 }
 
 fn catdesk_instruction_structured(
+    _workspace_root: &str,
+    _mode: Mode,
+    _tool_mode: ToolMode,
+) -> std::io::Result<Value> {
+    Ok(json!({
+        "schema": "catdesk.review.v1",
+        "panelMode": "tool_call",
+        "title": "CatDesk Instruction",
+        "state": "done",
+        "toolName": "catdesk_instruction",
+        "changedFiles": [],
+        "hasChanges": false
+    }))
+}
+
+fn catdesk_instruction_widget_payload_with_cards(
     workspace_root: &str,
     mode: Mode,
     tool_mode: ToolMode,
+    binagotchy_cards: Vec<mascot::ArchivedBinagotchyCard>,
 ) -> std::io::Result<Value> {
+    let mut payload = catdesk_instruction_structured(workspace_root, mode, tool_mode)?;
+    let Some(payload_obj) = payload.as_object_mut() else {
+        return Err(std::io::Error::other(
+            "catdesk instruction payload must be a JSON object",
+        ));
+    };
     let agents_path = preferred_agents_path(workspace_root)
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "-".to_string());
@@ -1000,22 +1024,32 @@ fn catdesk_instruction_structured(
     let binagotchy_path = mascot::catdesk_binagotchy_root()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|_| "-".to_string());
-    let binagotchy_cards = mascot::load_archived_binagotchy_cards()?;
-    Ok(json!({
-        "schema": "catdesk.review.v1",
-        "panelMode": "tool_call",
-        "title": "CatDesk Instruction",
-        "state": "done",
-        "toolName": "catdesk_instruction",
-        "instructionText": catdesk_instruction_text(workspace_root, mode, tool_mode),
-        "workspacePath": workspace_root,
-        "agentsPath": agents_path,
-        "configPath": config_path,
-        "binagotchyPath": binagotchy_path,
-        "binagotchyCards": binagotchy_cards,
-        "changedFiles": [],
-        "hasChanges": false
-    }))
+    payload_obj.insert(
+        "instructionText".to_string(),
+        json!(catdesk_instruction_text(workspace_root, mode, tool_mode)),
+    );
+    payload_obj.insert("workspacePath".to_string(), json!(workspace_root));
+    payload_obj.insert("agentsPath".to_string(), json!(agents_path));
+    payload_obj.insert("configPath".to_string(), json!(config_path));
+    payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
+    payload_obj.insert(
+        "binagotchyCards".to_string(),
+        json!(binagotchy_cards),
+    );
+    Ok(payload)
+}
+
+fn catdesk_instruction_widget_payload(
+    workspace_root: &str,
+    mode: Mode,
+    tool_mode: ToolMode,
+) -> std::io::Result<Value> {
+    catdesk_instruction_widget_payload_with_cards(
+        workspace_root,
+        mode,
+        tool_mode,
+        mascot::load_archived_binagotchy_cards()?,
+    )
 }
 
 fn handle_catdesk_instruction(
@@ -1024,14 +1058,33 @@ fn handle_catdesk_instruction(
     mode: Mode,
     tool_mode: ToolMode,
 ) -> JsonRpcResponse {
-    match catdesk_instruction_structured(workspace_root, mode, tool_mode) {
-        Ok(structured) => tool_success_response_with_structured(
-            req,
-            catdesk_instruction_text(workspace_root, mode, tool_mode),
-            structured,
-        ),
-        Err(error) => tool_error_response(req, format!("Failed to load archived Binagotchy: {error}")),
+    let structured = match catdesk_instruction_structured(workspace_root, mode, tool_mode) {
+        Ok(value) => value,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("Failed to load archived Binagotchy: {error}"),
+            );
+        }
+    };
+    let widget_payload = match catdesk_instruction_widget_payload(workspace_root, mode, tool_mode) {
+        Ok(value) => value,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("Failed to load archived Binagotchy: {error}"),
+            );
+        }
+    };
+    let mut response = tool_success_response_with_structured(
+        req,
+        catdesk_instruction_text(workspace_root, mode, tool_mode),
+        structured,
+    );
+    if let Some(result) = response.result.as_mut() {
+        attach_widget_payload_meta(result, widget_payload);
     }
+    response
 }
 
 fn build_turn_token_payload(req: &JsonRpcRequest, tool_name: &str) -> Value {
@@ -1097,6 +1150,21 @@ fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
             "totalTokens": usage.total_tokens,
         }),
     );
+    if let Some(widget_payload) = obj
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
+        .and_then(Value::as_object_mut)
+    {
+        widget_payload.insert(
+            "turnTokenUsage".to_string(),
+            json!({
+                "inputTokens": usage.input_tokens,
+                "outputTokens": usage.output_tokens,
+                "totalTokens": usage.total_tokens,
+            }),
+        );
+    }
 }
 
 fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
@@ -1110,6 +1178,14 @@ fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
         return;
     };
     structured.insert("toolCallCount".to_string(), json!(tool_call_count));
+    if let Some(widget_payload) = obj
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
+        .and_then(Value::as_object_mut)
+    {
+        widget_payload.insert("toolCallCount".to_string(), json!(tool_call_count));
+    }
 }
 
 fn ensure_output_template_meta(meta_value: &mut Value) {
@@ -2428,5 +2504,118 @@ mod tests {
         assert_eq!(resource_uri, FINAL_SUMMARY_UI_TEMPLATE_URI);
         assert!(!resource_html.contains("var EMBEDDED_WIDGET_PAYLOAD = "));
         assert!(!resource_html.contains("\"changedFiles\":"));
+    }
+
+    #[test]
+    fn attach_current_usage_updates_widget_payload_meta() {
+        let mut result = json!({
+            "structuredContent": {
+                "schema": "catdesk.review.v1"
+            },
+            "_meta": {
+                WIDGET_PAYLOAD_META_KEY: {
+                    "schema": "catdesk.review.v1"
+                }
+            }
+        });
+
+        let usage = TokenUsage::from_counts(123, 45);
+        attach_turn_token_usage(&mut result, &usage);
+        attach_tool_call_count(&mut result, 1);
+
+        let structured = result
+            .get("structuredContent")
+            .expect("missing structuredContent");
+        let widget_payload = result
+            .get("_meta")
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+
+        assert_eq!(
+            structured
+                .get("turnTokenUsage")
+                .and_then(|entry| entry.get("totalTokens"))
+                .and_then(Value::as_u64),
+            Some(168)
+        );
+        assert_eq!(
+            structured.get("toolCallCount").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            widget_payload
+                .get("turnTokenUsage")
+                .and_then(|entry| entry.get("totalTokens"))
+                .and_then(Value::as_u64),
+            Some(168)
+        );
+        assert_eq!(
+            widget_payload
+                .get("toolCallCount")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn catdesk_instruction_puts_binagotchy_cards_in_meta_only() {
+        let structured = catdesk_instruction_structured(
+            "/tmp/workspace",
+            Mode::Both,
+            ToolMode::MultiTools,
+        )
+        .expect("structured payload");
+        let widget_payload = catdesk_instruction_widget_payload_with_cards(
+            "/tmp/workspace",
+            Mode::Both,
+            ToolMode::MultiTools,
+            vec![mascot::ArchivedBinagotchyCard {
+                folder: "20260403T010203000Z_deadbeef".to_string(),
+                seed: "deadbeef".to_string(),
+                image: "data:image/png;base64,AA==".to_string(),
+            }],
+        )
+        .expect("widget payload");
+
+        assert_eq!(
+            structured.get("toolName").and_then(Value::as_str),
+            Some("catdesk_instruction")
+        );
+        assert!(structured.get("instructionText").is_none());
+        assert!(structured.get("workspacePath").is_none());
+        assert!(structured.get("agentsPath").is_none());
+        assert!(structured.get("configPath").is_none());
+        assert!(structured.get("binagotchyPath").is_none());
+        assert!(structured.get("binagotchyCards").is_none());
+
+        assert_eq!(
+            widget_payload
+                .get("instructionText")
+                .and_then(Value::as_str)
+                .map(|text| text.contains("CatDesk usage instructions")),
+            Some(true)
+        );
+        assert_eq!(
+            widget_payload
+                .get("workspacePath")
+                .and_then(Value::as_str),
+            Some("/tmp/workspace")
+        );
+        assert_eq!(
+            widget_payload
+                .get("binagotchyCards")
+                .and_then(Value::as_array)
+                .map(|cards| cards.len()),
+            Some(1)
+        );
+        assert_eq!(
+            widget_payload
+                .get("binagotchyCards")
+                .and_then(Value::as_array)
+                .and_then(|cards| cards.first())
+                .and_then(|card| card.get("seed"))
+                .and_then(Value::as_str),
+            Some("deadbeef")
+        );
     }
 }
