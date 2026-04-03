@@ -986,7 +986,11 @@ fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMod
     lines.join("\n")
 }
 
-fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> Value {
+fn catdesk_instruction_structured(
+    workspace_root: &str,
+    mode: Mode,
+    tool_mode: ToolMode,
+) -> std::io::Result<Value> {
     let agents_path = preferred_agents_path(workspace_root)
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "-".to_string());
@@ -996,7 +1000,8 @@ fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: T
     let binagotchy_path = mascot::catdesk_binagotchy_root()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|_| "-".to_string());
-    json!({
+    let binagotchy_cards = mascot::load_archived_binagotchy_cards()?;
+    Ok(json!({
         "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
         "title": "CatDesk Instruction",
@@ -1007,9 +1012,10 @@ fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: T
         "agentsPath": agents_path,
         "configPath": config_path,
         "binagotchyPath": binagotchy_path,
+        "binagotchyCards": binagotchy_cards,
         "changedFiles": [],
         "hasChanges": false
-    })
+    }))
 }
 
 fn handle_catdesk_instruction(
@@ -1018,11 +1024,14 @@ fn handle_catdesk_instruction(
     mode: Mode,
     tool_mode: ToolMode,
 ) -> JsonRpcResponse {
-    tool_success_response_with_structured(
-        req,
-        catdesk_instruction_text(workspace_root, mode, tool_mode),
-        catdesk_instruction_structured(workspace_root, mode, tool_mode),
-    )
+    match catdesk_instruction_structured(workspace_root, mode, tool_mode) {
+        Ok(structured) => tool_success_response_with_structured(
+            req,
+            catdesk_instruction_text(workspace_root, mode, tool_mode),
+            structured,
+        ),
+        Err(error) => tool_error_response(req, format!("Failed to load archived Binagotchy: {error}")),
+    }
 }
 
 fn build_turn_token_payload(req: &JsonRpcRequest, tool_name: &str) -> Value {

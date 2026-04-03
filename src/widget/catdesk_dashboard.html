@@ -573,6 +573,143 @@
       justify-self: start;
     }
 
+    .binagotchy-modal-root {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(12, 12, 14, 0.58);
+      backdrop-filter: blur(3px);
+    }
+
+    .binagotchy-modal-root.is-open {
+      display: flex;
+    }
+
+    .binagotchy-modal {
+      width: min(100%, 760px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      background: linear-gradient(180deg, #353332 0%, #2f2d2c 100%);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.42);
+      overflow: hidden;
+    }
+
+    .binagotchy-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(0, 0, 0, 0.08);
+    }
+
+    .binagotchy-modal-title {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-2);
+      letter-spacing: 0.02em;
+    }
+
+    .binagotchy-modal-close {
+      width: 22px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg-2);
+      color: var(--text-3);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .binagotchy-modal-body {
+      display: grid;
+      gap: 12px;
+      padding: 12px 14px 14px;
+    }
+
+    .binagotchy-browser-path {
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #242323;
+      color: var(--text-2);
+      font:
+        11px/1.35 "SFMono-Regular",
+        Menlo,
+        Consolas,
+        "Liberation Mono",
+        monospace;
+    }
+
+    .binagotchy-browser-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+      gap: 10px;
+      max-height: 340px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .binagotchy-browser-card {
+      display: grid;
+      grid-template-rows: auto auto;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+      align-content: start;
+    }
+
+    .binagotchy-browser-art {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      place-items: center;
+      aspect-ratio: 1 / 1;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #242323;
+      overflow: hidden;
+    }
+
+    .binagotchy-browser-art img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+
+    .binagotchy-browser-seed {
+      min-width: 0;
+      color: var(--text-2);
+      font:
+        11px/1.35 "SFMono-Regular",
+        Menlo,
+        Consolas,
+        "Liberation Mono",
+        monospace;
+      line-height: 1.25;
+      word-break: break-all;
+      overflow: hidden;
+    }
+
+    .binagotchy-browser-footer {
+      color: var(--text-3);
+      font-size: 11px;
+    }
+
     .instruction-hero {
       position: relative;
       overflow: hidden;
@@ -1188,6 +1325,7 @@
         agentsPath: "",
         configPath: "",
         binagotchyPath: "",
+        binagotchyCards: [],
         mascotWidth: 0,
         mascotHeight: 0,
         mascotFrameMs: 50,
@@ -1235,6 +1373,8 @@
       var instructionMascotState = {
         timerId: 0
       };
+
+      var binagotchyBrowserBindingsBound = false;
 
       var MASCOT_ALPHABET = ".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
       var EMBEDDED_WIDGET_MASCOT = {"__catdeskEmbeddedMascotPlaceholder__":true};
@@ -1342,6 +1482,19 @@
         };
       }
 
+      function normalizeBinagotchyCard(entry) {
+        if (!entry || typeof entry !== "object") return null;
+        var folder = asString(entry.folder, "");
+        var seed = asString(entry.seed, "");
+        var image = asString(entry.image, "");
+        if (!folder || !seed || !image) return null;
+        return {
+          folder: folder,
+          seed: seed,
+          image: image
+        };
+      }
+
       function normalize(data) {
         if (!data || typeof data !== "object") return null;
         var filesScanned = Number(data.filesScanned);
@@ -1373,6 +1526,7 @@
           agentsPath: asString(data.agentsPath, ""),
           configPath: asString(data.configPath, ""),
           binagotchyPath: asString(data.binagotchyPath, ""),
+          binagotchyCards: [],
           mascotWidth: Number.isFinite(mascotWidth) && mascotWidth > 0 ? Math.floor(mascotWidth) : 0,
           mascotHeight: Number.isFinite(mascotHeight) && mascotHeight > 0 ? Math.floor(mascotHeight) : 0,
           mascotFrameMs: Number.isFinite(mascotFrameMs) && mascotFrameMs > 0 ? Math.floor(mascotFrameMs) : 50,
@@ -1410,6 +1564,7 @@
         next.hasChanges = asBool(data.hasChanges, next.changedFiles.length > 0);
         next.searchResults = asArray(data.searchResults).map(normalizeSearchResult).filter(Boolean);
         next.listEntries = asArray(data.listEntries).map(normalizeListEntry).filter(Boolean);
+        next.binagotchyCards = asArray(data.binagotchyCards).map(normalizeBinagotchyCard).filter(Boolean);
         next.mascotFrames = asArray(mascot && mascot.frames).map(normalizeMascotFrame).filter(Boolean);
         next.mascotSequence = asArray(mascot && mascot.sequence).map(normalizeMascotSequenceStep).filter(Boolean);
 
@@ -2006,12 +2161,43 @@
         );
       }
 
+      function renderBinagotchyBrowser(current) {
+        var cards = Array.isArray(current.binagotchyCards) ? current.binagotchyCards : [];
+        var cardsHtml = cards.length > 0
+          ? cards.map(function (card) {
+              return (
+                "<article class=\"binagotchy-browser-card\">" +
+                  "<div class=\"binagotchy-browser-art\">" +
+                    "<img src=\"" + esc(card.image) + "\" alt=\"Binagotchy seed " + esc(card.seed) + "\">" +
+                  "</div>" +
+                  "<div class=\"binagotchy-browser-seed\">" + esc(card.seed) + "</div>" +
+                "</article>"
+              );
+            }).join("")
+          : "<div class=\"empty\">No archived Binagotchy yet.</div>";
+        return (
+          "<div class=\"binagotchy-modal-root\" id=\"binagotchy-browser-modal\" aria-hidden=\"true\">" +
+            "<div class=\"binagotchy-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"binagotchy-browser-title\">" +
+              "<div class=\"binagotchy-modal-header\">" +
+                "<h2 class=\"binagotchy-modal-title\" id=\"binagotchy-browser-title\">Binagotchy Library</h2>" +
+                "<button type=\"button\" class=\"binagotchy-modal-close\" data-close-binagotchy-browser aria-label=\"Close binagotchy browser\">×</button>" +
+              "</div>" +
+              "<div class=\"binagotchy-modal-body\">" +
+                "<div class=\"binagotchy-browser-path\">" + esc(current.binagotchyPath || "-") + "</div>" +
+                "<div class=\"binagotchy-browser-grid\">" + cardsHtml + "</div>" +
+                "<div class=\"binagotchy-browser-footer\">" + esc(String(cards.length)) + " archived Binagotchy folders</div>" +
+              "</div>" +
+            "</div>" +
+          "</div>"
+        );
+      }
+
       function renderCatDeskInstructionPanel(current) {
         var pathsHtml = "";
         if (current.workspacePath || current.agentsPath || current.configPath || current.binagotchyPath) {
           function renderInstructionPathActionButton() {
             return (
-              "<button type=\"button\" class=\"instruction-path-action\" aria-label=\"Configure binagotchy path\">" +
+              "<button type=\"button\" class=\"instruction-path-action\" data-open-binagotchy-browser aria-label=\"Open binagotchy browser\">" +
                 "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\" focusable=\"false\" style=\"stroke:none;fill:currentColor\">" +
                   "<path transform=\"translate(12 12) scale(1.08) translate(-12 -12)\" d=\"M19.14 12.936c.036-.3.06-.607.06-.936 0-.328-.024-.636-.06-.936l2.03-1.58c.18-.144.23-.414.116-.618l-1.92-3.32c-.115-.22-.37-.294-.59-.22l-2.39.96c-.496-.38-1.026-.7-1.616-.94l-.36-2.544C14.364 2.58 14.168 2.4 13.924 2.4h-3.84c-.244 0-.44.18-.476.415l-.36 2.544c-.59.24-1.12.56-1.616.94l-2.39-.96c-.22-.074-.475 0-.59.22l-1.92 3.32c-.114.204-.064.474.116.618l2.03 1.58c-.036.3-.06.608-.06.936 0 .328.024.636.06.936l-2.03 1.58c-.18.144-.23.414-.116.618l1.92 3.32c.115.22.37.294.59.22l2.39-.96c.496.38 1.026.7 1.616.94l.36 2.544c.036.235.232.415.476.415h3.84c.244 0 .44-.18.476-.415l.36-2.544c.59-.24 1.12-.56 1.616-.94l2.39.96c.22.074.475 0 .59-.22l1.92-3.32c.114-.204.064-.474-.116-.618l-2.03-1.58zM12 15.6c-1.987 0-3.6-1.613-3.6-3.6s1.613-3.6 3.6-3.6 3.6 1.613 3.6 3.6-1.613 3.6-3.6 3.6z\"></path>" +
                 "</svg>" +
@@ -2051,6 +2237,7 @@
           "<div class=\"instruction-panel\">" +
             renderInstructionHero(current) +
             pathsHtml +
+            renderBinagotchyBrowser(current) +
           "</div>"
         );
       }
@@ -2088,6 +2275,51 @@
           hero.replaceWith(replacement);
           bindInstructionReplay(replacement, current);
         });
+      }
+
+      function openBinagotchyBrowser() {
+        var modal = document.getElementById("binagotchy-browser-modal");
+        if (!modal) return;
+        modal.classList.add("is-open");
+        modal.setAttribute("aria-hidden", "false");
+      }
+
+      function closeBinagotchyBrowser() {
+        var modal = document.getElementById("binagotchy-browser-modal");
+        if (!modal) return;
+        modal.classList.remove("is-open");
+        modal.setAttribute("aria-hidden", "true");
+      }
+
+      function bindBinagotchyBrowser(root) {
+        if (!root) return;
+        var openButton = root.querySelector("[data-open-binagotchy-browser]");
+        var closeButton = root.querySelector("[data-close-binagotchy-browser]");
+        var modal = root.querySelector("#binagotchy-browser-modal");
+        if (openButton) {
+          openButton.addEventListener("click", function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            openBinagotchyBrowser();
+          });
+        }
+        if (closeButton) {
+          closeButton.addEventListener("click", function (event) {
+            event.preventDefault();
+            closeBinagotchyBrowser();
+          });
+        }
+        if (modal) {
+          modal.addEventListener("click", function (event) {
+            if (event.target === modal) closeBinagotchyBrowser();
+          });
+        }
+        if (!binagotchyBrowserBindingsBound) {
+          window.addEventListener("keydown", function (event) {
+            if (event.key === "Escape") closeBinagotchyBrowser();
+          });
+          binagotchyBrowserBindingsBound = true;
+        }
       }
 
       var GPT54_INPUT_USD_PER_1M = 2.5;
@@ -2643,6 +2875,7 @@
         if (instructionHero) {
           bindInstructionReplay(instructionHero, view);
         }
+        bindBinagotchyBrowser(root);
 
         playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
         if (fromLoading && !shouldAnimateLiveTokenFace(view)) {

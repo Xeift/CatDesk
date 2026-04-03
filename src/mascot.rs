@@ -8,7 +8,7 @@ use ratatui::{
     prelude::{Color, Style},
     text::{Line, Span},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -87,7 +87,7 @@ pub struct MascotPack {
     pub tui_frames: Vec<TuiMascotFrame>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct StoredMascotMetadata {
     seed: String,
     created_at: String,
@@ -97,12 +97,20 @@ struct StoredMascotMetadata {
     traits: StoredMascotTraits,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct StoredMascotTraits {
     fur: String,
     eyes: String,
     headwear: String,
     special: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedBinagotchyCard {
+    pub folder: String,
+    pub seed: String,
+    pub image: String,
 }
 
 impl MascotPack {
@@ -356,6 +364,39 @@ pub(crate) fn catdesk_binagotchy_root() -> std::io::Result<PathBuf> {
     Ok(PathBuf::from(home)
         .join(CATDESK_DIR_NAME)
         .join(BINAGOTCHY_DIR_NAME))
+}
+
+pub(crate) fn load_archived_binagotchy_cards() -> std::io::Result<Vec<ArchivedBinagotchyCard>> {
+    let root = catdesk_binagotchy_root()?;
+    let mut entries: Vec<PathBuf> = fs::read_dir(&root)?
+        .map(|entry| entry.map(|value| value.path()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .collect();
+    entries.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+
+    entries
+        .into_iter()
+        .map(|entry| {
+            let folder = entry
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .ok_or_else(|| std::io::Error::other("binagotchy archive is missing folder name"))?;
+            let metadata_text = fs::read_to_string(entry.join(METADATA_FILE_NAME))?;
+            let metadata: StoredMascotMetadata =
+                toml::from_str(&metadata_text).map_err(std::io::Error::other)?;
+            let bytes = fs::read(entry.join(CHARACTER_PNG_FILE_NAME))?;
+            Ok(ArchivedBinagotchyCard {
+                folder,
+                seed: metadata.seed,
+                image: format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                ),
+            })
+        })
+        .collect()
 }
 
 fn archive_timestamp(created_at: OffsetDateTime) -> std::io::Result<String> {
