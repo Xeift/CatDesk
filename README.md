@@ -6,6 +6,14 @@ An open-source tool that turns ChatGPT Web into a coding agent. No API, no Codex
 
 This is an independent open-source project and is not affiliated with or endorsed by OpenAI. I built it as a personal tool and decided to open-source it. Some features are still buggy and may cause unexpected behavior. Use it at your own risk. I am not responsible for any loss caused by this tool. It is strongly recommended to run it inside a VM or container.
 
+# Why CatDesk?
+
+Codex has a very generous weekly quota (2x usage + reset usage frequently) compared to Antigravity and Claude Code (3 Opus prompts then 5h quota is gone lol), that's why I love OpenAI so much. However, the quota runs out very quickly if you work on a large project. Most people with a Plus subscription do not use even 10% of their weekly thinking messages.
+
+## So why not use your 3,000 weekly messages for coding?
+
+That's the idea behind CatDesk! It gives ChatGPT Web tools like `write_file` and `run_commands` to edit files on your computer.
+
 # Who needs this?
 
 - People who used up their Codex quota on the first day after it reset (me🥺)
@@ -26,18 +34,9 @@ ChatGPT Web + CatDesk
 = OpenClaw without cron and other active utilities
 ```
 
-```text
-Your computer --ngrok--> ChatGPT Web
-catdesk
-```
-
 I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 Thinking is now really good at tool calling and computer use.** The first time I tried it with GPT-5.4, I was honestly surprised by how well it worked.
 
 # Differences between ChatGPT + CatDesk, Codex, and the API (let's say Plus plan)
-
-Codex has a very generous quota compared to Antigravity. However, the quota runs out very quickly if you work on a large project. Most people with a Plus subscription do not use even 10% of their weekly thinking messages.
-
-So why not use your 3,000 weekly messages for coding?
 
 |       | ChatGPT + CatDesk                                | Codex                   | OpenAI API           |
 | ----- | ------------------------------------------------ | ----------------------- | -------------------- |
@@ -101,21 +100,30 @@ Always call catdesk_instruction after list_resources, and follow the instruction
 
 CatDesk's built-in local tools are:
 
-| Tool | Type | What it does |
-| ----- | ----- | ----- |
-| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and reads your workspace `AGENTS.md` |
-| `read_file` | Read | Reads a text file from the workspace |
-| `list_files` | Read | Recursively lists files and directories in the workspace |
-| `search_text` | Read | Searches text across files in the workspace |
-| `write_file` | Write | Creates or overwrites a file |
-| `append_file` | Write | Appends text to a file, or creates it if missing |
-| `make_directory` | Write | Creates a directory |
-| `move_path` | Write | Moves or renames a file or directory |
-| `delete_path` | Write | Deletes a file or directory |
-| `replace_in_file` | Write | Replaces text inside a file |
-| `run_command` | Shell | Runs a shell command inside the workspace. Use it as a last resort when a dedicated tool cannot do the job |
+| Tool                  | Type  | What it does                                                                                               |
+| --------------------- | ----- | ---------------------------------------------------------------------------------------------------------- |
+| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and reads your workspace `AGENTS.md`                                    |
+| `read_file`           | Read  | Reads a text file from the workspace                                                                       |
+| `list_files`          | Read  | Recursively lists files and directories in the workspace                                                   |
+| `search_text`         | Read  | Searches text across files in the workspace                                                                |
+| `write_file`          | Write | Creates or overwrites a file                                                                               |
+| `append_file`         | Write | Appends text to a file, or creates it if missing                                                           |
+| `make_directory`      | Write | Creates a directory                                                                                        |
+| `move_path`           | Write | Moves or renames a file or directory                                                                       |
+| `delete_path`         | Write | Deletes a file or directory                                                                                |
+| `replace_in_file`     | Write | Replaces text inside a file                                                                                |
+| `run_command`         | Shell | Runs a shell command inside the workspace. Use it as a last resort when a dedicated tool cannot do the job |
 
 If browser mode is enabled, CatDesk can also expose extra browser/devtools tools. Those are provided by the browser bridge, so the exact list depends on your environment.
+
+# Context window
+
+According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and-gpt-54-in-chatgpt#:~:text=Thinking%20(GPT%E2%80%915.4%20Thinking)>) and [the code](https://github.com/openai/codex/blob/main/codex-rs/models-manager/src/model_info.rs#L85), the context window in ChatGPT web is different from Codex.
+
+| Tier     | CatDesk + ChatGPT Web (in + out = sum) | Codex CLI (sum)        |
+| -------- | -------------------------------------- | ---------------------- |
+| Plus     | 128K + 128K = 256K                     | 258K (1M experimental) |
+| Pro tier | 272K + 128K = 400K                     | 258K (1M experimental) |
 
 # FAQ
 
@@ -182,4 +190,10 @@ So the full URL looks like this:
 https://xxxx.ngrok-free.app/Ab3kL9xQ2pTm7VhC/mcp
 ```
 
-The URL changes every time you start CatDesk. ChatGPT Web does not provide an edit button for Custom Connectors, so you need to delete the old connector and create a new one with the new URL.
+The URL changes every time you start CatDesk (both `Public URL` and `Random path`). ChatGPT Web does not provide an edit button for Custom Connectors, so you need to delete the old connector and create a new one with the new URL.
+
+# About Binagotchy
+
+The character is a cute shark-cat! I actually made this before CatDesk and decided to put it in the project.
+
+By default, CatDesk will generate a random Binagotchy every time you start it. If you see a cute one, you can set it as your partner on the launch screen. The system will also automatically save every Binagotchy in `~/.catdesk/binagotchy`. You can download it too (or, to be accurate, export it)! Both `.png` and `.gif` are supported. Feel free to use it anywhere. This project and Binagotchy are both under the MIT License. By the way, Binagotchy is generated using pure scripts and does not use any text-to-image or diffusion model.
