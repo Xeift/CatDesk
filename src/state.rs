@@ -397,6 +397,9 @@ impl AppState {
     ) -> std::io::Result<Self> {
         let config = AppConfig::load_from_path(&config_path)?;
         let mascot_seed = rand::random::<u64>();
+        let mascot = mascot::build_workspace_mascot(mascot_seed);
+        #[cfg(not(test))]
+        mascot::archive_startup_mascot(mascot_seed)?;
         Ok(Self {
             theme: config.theme,
             mode: config.mode,
@@ -410,7 +413,7 @@ impl AppState {
             devtools_running: false,
             port,
             mascot_seed,
-            mascot: mascot::build_workspace_mascot(mascot_seed),
+            mascot,
             workspace_root,
             detected_browsers: Vec::new(),
             selected_browser: config.selected_browser,
