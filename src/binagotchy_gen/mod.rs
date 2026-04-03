@@ -77,7 +77,11 @@ pub fn create_character(
         (spirit_img, "none".to_string(), "spirit".to_string())
     } else {
         (
-            compose_character_frame(&sprite, headwear_up.as_ref()),
+            compose_character_frame(
+                &sprite,
+                headwear_up.as_ref(),
+                HEADROOM_TOP.max(0) as u32 * upscale,
+            ),
             headwear_name.clone(),
             "normal".to_string(),
         )
@@ -141,9 +145,13 @@ fn center_sprite_on_frame(sprite: &RgbaImage, frame_width: u32, frame_height: u3
     frame
 }
 
-fn compose_character_frame(sprite: &RgbaImage, headwear_up: Option<&RgbaImage>) -> RgbaImage {
+fn compose_character_frame(
+    sprite: &RgbaImage,
+    headwear_up: Option<&RgbaImage>,
+    headroom_px: u32,
+) -> RgbaImage {
     let (sw, sh) = sprite.dimensions();
-    let mut frame_size = sw.max(sh);
+    let mut frame_size = sw.max(sh.saturating_add(headroom_px));
     if let Some(headwear_up) = headwear_up {
         frame_size = frame_size
             .max(headwear_up.width())
@@ -205,5 +213,12 @@ mod tests {
         assert_eq!(spirit.get_pixel(0, 0)[3], 255);
         assert_eq!(spirit.get_pixel(width - 1, 0)[3], 255);
         assert_eq!(spirit.get_pixel(0, height - 1)[3], 255);
+    }
+
+    #[test]
+    fn non_spirit_frame_size_stays_constant_with_headwear() {
+        let (without_headwear, _) = create_character(Some(42), 32, 1, "normal", "none", 0.0, 1.0, 0);
+        let (with_headwear, _) = create_character(Some(42), 32, 1, "normal", "top_hat", 0.0, 1.0, 0);
+        assert_eq!(without_headwear.dimensions(), with_headwear.dimensions());
     }
 }
