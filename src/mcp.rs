@@ -926,11 +926,16 @@ fn preferred_agents_text(workspace_root: &str) -> Option<String> {
 }
 
 fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> String {
-    let mut lines = vec![
-        "CatDesk usage instructions".to_string(),
-        "".to_string(),
-        "Prefer dedicated MCP tools whenever a dedicated tool can complete the task.".to_string(),
-    ];
+    let mut lines: Vec<String> = r#"CatDesk usage instructions
+
+Prefer dedicated MCP tools whenever a dedicated tool can complete the task.
+You may encounter connector tool paths that include a link segment, for example "/some_connector_name/link_69c7196cc06c8191b774a1102e140d77/search_text".
+Always ignore the link_ segment and call the original tool name instead, for example "/some_connector_name/search_text". This improves tool-calling stability.
+Keep file and directory operations inside the workspace root unless a tool explicitly says otherwise.
+You already have the built-in sandbox container environment. However, CatDesk offers another environment called Workspace. When a user asks you to do anything, use Workspace first, since the user expects you to control their computer rather than your sandbox container."#
+        .lines()
+        .map(str::to_string)
+        .collect();
 
     if mode.computer_enabled() && tool_mode.read_tools_enabled() {
         lines.push(
@@ -963,18 +968,6 @@ fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMod
         );
     }
 
-    lines.push(
-        "You may encounter connector tool paths that include a link segment, for example \"/some_connector_name/link_69c7196cc06c8191b774a1102e140d77/search_text\"."
-            .to_string(),
-    );
-    lines.push(
-        "Always ignore the link_ segment and call the original tool name instead, for example \"/some_connector_name/search_text\". This improves tool-calling stability."
-            .to_string(),
-    );
-    lines.push(
-        "Keep file and directory operations inside the workspace root unless a tool explicitly says otherwise."
-            .to_string(),
-    );
     if let Some(agents_text) = preferred_agents_text(workspace_root) {
         lines.push("".to_string());
         lines.push("Workspace-specific instructions from AGENTS.md:".to_string());
@@ -1032,10 +1025,7 @@ fn catdesk_instruction_widget_payload_with_cards(
     payload_obj.insert("agentsPath".to_string(), json!(agents_path));
     payload_obj.insert("configPath".to_string(), json!(config_path));
     payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
-    payload_obj.insert(
-        "binagotchyCards".to_string(),
-        json!(binagotchy_cards),
-    );
+    payload_obj.insert("binagotchyCards".to_string(), json!(binagotchy_cards));
     Ok(payload)
 }
 
@@ -2550,21 +2540,16 @@ mod tests {
             Some(168)
         );
         assert_eq!(
-            widget_payload
-                .get("toolCallCount")
-                .and_then(Value::as_u64),
+            widget_payload.get("toolCallCount").and_then(Value::as_u64),
             Some(1)
         );
     }
 
     #[test]
     fn catdesk_instruction_puts_binagotchy_cards_in_meta_only() {
-        let structured = catdesk_instruction_structured(
-            "/tmp/workspace",
-            Mode::Both,
-            ToolMode::MultiTools,
-        )
-        .expect("structured payload");
+        let structured =
+            catdesk_instruction_structured("/tmp/workspace", Mode::Both, ToolMode::MultiTools)
+                .expect("structured payload");
         let widget_payload = catdesk_instruction_widget_payload_with_cards(
             "/tmp/workspace",
             Mode::Both,
@@ -2596,9 +2581,7 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            widget_payload
-                .get("workspacePath")
-                .and_then(Value::as_str),
+            widget_payload.get("workspacePath").and_then(Value::as_str),
             Some("/tmp/workspace")
         );
         assert_eq!(
