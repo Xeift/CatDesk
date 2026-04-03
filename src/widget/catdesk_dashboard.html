@@ -512,6 +512,11 @@
       column-gap: 6px;
     }
 
+    .instruction-path-stat.has-action {
+      grid-template-columns: 14px 74px auto;
+      justify-content: start;
+    }
+
     .instruction-path-label {
       color: var(--text-3);
       font-size: 11px;
@@ -534,6 +539,38 @@
       color: var(--text-2);
       font: 11px/1.35 "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
       white-space: nowrap;
+    }
+
+    .instruction-path-action {
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text-2);
+    }
+
+    .instruction-path-action svg {
+      width: 16px;
+      height: 16px;
+      display: block;
+      stroke: none !important;
+      fill: currentColor !important;
+    }
+
+    .instruction-path-action svg path {
+      stroke: none !important;
+      fill: currentColor !important;
+    }
+
+    .instruction-path-trailing {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      justify-self: start;
     }
 
     .instruction-hero {
@@ -1150,6 +1187,7 @@
         workspacePath: "",
         agentsPath: "",
         configPath: "",
+        binagotchyPath: "",
         mascotWidth: 0,
         mascotHeight: 0,
         mascotFrameMs: 50,
@@ -1334,6 +1372,7 @@
           workspacePath: asString(data.workspacePath, ""),
           agentsPath: asString(data.agentsPath, ""),
           configPath: asString(data.configPath, ""),
+          binagotchyPath: asString(data.binagotchyPath, ""),
           mascotWidth: Number.isFinite(mascotWidth) && mascotWidth > 0 ? Math.floor(mascotWidth) : 0,
           mascotHeight: Number.isFinite(mascotHeight) && mascotHeight > 0 ? Math.floor(mascotHeight) : 0,
           mascotFrameMs: Number.isFinite(mascotFrameMs) && mascotFrameMs > 0 ? Math.floor(mascotFrameMs) : 50,
@@ -1795,6 +1834,15 @@
             "</svg>"
           );
         }
+        if (kind === "binagotchy") {
+          return (
+            "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
+              "<path d=\"M2.8 6.6L3.8 2.5L6.3 4.8H9.7L12.2 2.5L13.2 6.6V10.5L11.4 12.6H4.6L2.8 10.5Z\"></path>" +
+              "<path d=\"M6.55 7.45L6.48 8.05\" stroke-width=\"1.2\"></path>" +
+              "<path d=\"M9.55 7.45L9.48 8.05\" stroke-width=\"1.2\"></path>" +
+            "</svg>"
+          );
+        }
         return (
           "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" focusable=\"false\">" +
             "<circle cx=\"8\" cy=\"8\" r=\"5.25\"></circle>" +
@@ -1960,14 +2008,33 @@
 
       function renderCatDeskInstructionPanel(current) {
         var pathsHtml = "";
-        if (current.workspacePath || current.agentsPath || current.configPath) {
-          function renderInstructionPathRow(iconKind, label, value) {
+        if (current.workspacePath || current.agentsPath || current.configPath || current.binagotchyPath) {
+          function renderInstructionPathActionButton() {
+            return (
+              "<button type=\"button\" class=\"instruction-path-action\" aria-label=\"Configure binagotchy path\">" +
+                "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\" focusable=\"false\" style=\"stroke:none;fill:currentColor\">" +
+                  "<path transform=\"translate(12 12) scale(1.08) translate(-12 -12)\" d=\"M19.14 12.936c.036-.3.06-.607.06-.936 0-.328-.024-.636-.06-.936l2.03-1.58c.18-.144.23-.414.116-.618l-1.92-3.32c-.115-.22-.37-.294-.59-.22l-2.39.96c-.496-.38-1.026-.7-1.616-.94l-.36-2.544C14.364 2.58 14.168 2.4 13.924 2.4h-3.84c-.244 0-.44.18-.476.415l-.36 2.544c-.59.24-1.12.56-1.616.94l-2.39-.96c-.22-.074-.475 0-.59.22l-1.92 3.32c-.114.204-.064.474.116.618l2.03 1.58c-.036.3-.06.608-.06.936 0 .328.024.636.06.936l-2.03 1.58c-.18.144-.23.414-.116.618l1.92 3.32c.115.22.37.294.59.22l2.39-.96c.496.38 1.026.7 1.616.94l.36 2.544c.036.235.232.415.476.415h3.84c.244 0 .44-.18.476-.415l.36-2.544c.59-.24 1.12-.56 1.616-.94l2.39.96c.22.074.475 0 .59-.22l1.92-3.32c.114-.204.064-.474-.116-.618l-2.03-1.58zM12 15.6c-1.987 0-3.6-1.613-3.6-3.6s1.613-3.6 3.6-3.6 3.6 1.613 3.6 3.6-1.613 3.6-3.6 3.6z\"></path>" +
+                "</svg>" +
+              "</button>"
+            );
+          }
+
+          function renderInstructionPathRow(iconKind, label, value, actionHtml) {
+            var hasAction = typeof actionHtml === "string" && actionHtml.length > 0;
+            var trailingHtml = hasAction
+              ? (
+                "<span class=\"instruction-path-trailing\">" +
+                  "<span class=\"instruction-path-code\">" + esc(value || "-") + "</span>" +
+                  actionHtml +
+                "</span>"
+              )
+              : "<span class=\"instruction-path-code\">" + esc(value || "-") + "</span>";
             return (
               "<div class=\"summary-row\">" +
-                "<span class=\"summary-stat path instruction-path-stat\">" +
+                "<span class=\"summary-stat path instruction-path-stat" + (hasAction ? " has-action" : "") + "\">" +
                   "<span class=\"listing-kind\">" + listingIconSvg(iconKind) + "</span>" +
                   "<span class=\"instruction-path-label\">" + esc(label) + "</span>" +
-                  "<span class=\"instruction-path-code\">" + esc(value || "-") + "</span>" +
+                  trailingHtml +
                 "</span>" +
               "</div>"
             );
@@ -1977,6 +2044,7 @@
               renderInstructionPathRow("dir", "workspace", current.workspacePath) +
               renderInstructionPathRow("agents", "AGENTS.md", current.agentsPath) +
               renderInstructionPathRow("file", "config.toml", current.configPath) +
+              renderInstructionPathRow("binagotchy", "binagotchy", current.binagotchyPath, renderInstructionPathActionButton()) +
             "</div>";
         }
         return (

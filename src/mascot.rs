@@ -349,7 +349,7 @@ fn archive_sequence(seed: u64) -> (Vec<RgbaImage>, Vec<u64>, HashMap<String, Str
 }
 
 #[cfg_attr(test, allow(dead_code))]
-fn catdesk_binagotchy_root() -> std::io::Result<PathBuf> {
+pub(crate) fn catdesk_binagotchy_root() -> std::io::Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| {
         std::io::Error::other("HOME is not set; cannot resolve ~/.catdesk/binagotchy")
     })?;

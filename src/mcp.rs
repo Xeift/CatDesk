@@ -993,6 +993,9 @@ fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: T
     let config_path = app_config_path()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|_| "-".to_string());
+    let binagotchy_path = mascot::catdesk_binagotchy_root()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "-".to_string());
     json!({
         "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
@@ -1003,6 +1006,7 @@ fn catdesk_instruction_structured(workspace_root: &str, mode: Mode, tool_mode: T
         "workspacePath": workspace_root,
         "agentsPath": agents_path,
         "configPath": config_path,
+        "binagotchyPath": binagotchy_path,
         "changedFiles": [],
         "hasChanges": false
     })
