@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,10 +26,18 @@ pub struct SessionFlow {
     pub session_id: String,
     pub short_id: String,
     pub events: Vec<String>,
+    pub bootstrap_completed_steps: usize,
+    pub bootstrap_pending_steps: VecDeque<usize>,
     pub anim_queue: VecDeque<FlowAnimSegment>,
     pub last_direction: FlowDirection,
     pub closing_started_ms: Option<u128>,
     pub closing_step_ms: u64,
+}
+
+#[derive(Clone, Default)]
+pub struct SessionBootstrapProgress {
+    pub completed_steps: usize,
+    pub pending_steps: VecDeque<usize>,
 }
 
 const APP_CONFIG_DIR_NAME: &str = ".catdesk";
@@ -167,6 +175,128 @@ pub struct FlowAnimSegment {
     pub step_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+pub struct FlowBootstrapStep {
+    pub event: &'static str,
+    pub label: &'static str,
+}
+
+#[derive(Clone, Copy)]
+pub struct FlowBootstrapPhase {
+    pub title: &'static str,
+    pub steps: &'static [FlowBootstrapStep],
+}
+
+const FLOW_BOOTSTRAP_PHASE_1_STEPS: &[FlowBootstrapStep] = &[
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#1",
+    },
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#2",
+    },
+    FlowBootstrapStep {
+        event: "tools/list",
+        label: "tools/list",
+    },
+];
+
+const FLOW_BOOTSTRAP_PHASE_2_STEPS: &[FlowBootstrapStep] = &[
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#1",
+    },
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#2",
+    },
+    FlowBootstrapStep {
+        event: "resources/list",
+        label: "resources/list",
+    },
+];
+
+const FLOW_BOOTSTRAP_PHASE_3_STEPS: &[FlowBootstrapStep] = &[
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#1",
+    },
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#2",
+    },
+    FlowBootstrapStep {
+        event: "resources/read",
+        label: "dashboard.html",
+    },
+    FlowBootstrapStep {
+        event: "resources/read",
+        label: "final-summary.html",
+    },
+];
+
+const FLOW_BOOTSTRAP_PHASE_4_STEPS: &[FlowBootstrapStep] = &[
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#1",
+    },
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#2",
+    },
+    FlowBootstrapStep {
+        event: "tools/list",
+        label: "tools/list",
+    },
+    FlowBootstrapStep {
+        event: "resources/read",
+        label: "dashboard.html",
+    },
+    FlowBootstrapStep {
+        event: "resources/read",
+        label: "final-summary.html",
+    },
+];
+
+const FLOW_BOOTSTRAP_PHASE_5_STEPS: &[FlowBootstrapStep] = &[
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#1",
+    },
+    FlowBootstrapStep {
+        event: "initialize",
+        label: "initialize#2",
+    },
+    FlowBootstrapStep {
+        event: "resources/list",
+        label: "resources/list",
+    },
+];
+
+pub const FLOW_BOOTSTRAP_PHASES: &[FlowBootstrapPhase] = &[
+    FlowBootstrapPhase {
+        title: "Checking tools",
+        steps: FLOW_BOOTSTRAP_PHASE_1_STEPS,
+    },
+    FlowBootstrapPhase {
+        title: "Checking resources",
+        steps: FLOW_BOOTSTRAP_PHASE_2_STEPS,
+    },
+    FlowBootstrapPhase {
+        title: "Loading widgets",
+        steps: FLOW_BOOTSTRAP_PHASE_3_STEPS,
+    },
+    FlowBootstrapPhase {
+        title: "Refreshing widgets",
+        steps: FLOW_BOOTSTRAP_PHASE_4_STEPS,
+    },
+    FlowBootstrapPhase {
+        title: "Final resource check",
+        steps: FLOW_BOOTSTRAP_PHASE_5_STEPS,
+    },
+];
+
 /// Which MCP backends to enable.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,6 +392,7 @@ pub struct AppState {
     pub selected_browser: Option<DetectedBrowser>,
     pub logs: Vec<LogEntry>,
     pub session_flows: Vec<SessionFlow>,
+    pub session_bootstrap_progress: HashMap<String, SessionBootstrapProgress>,
     pub session_count: usize,
     pub request_count: u64,
     pub usage_totals: UsageTotals,
@@ -399,6 +530,54 @@ fn enqueue_flow_segment(
     });
 }
 
+fn flow_bootstrap_step(index: usize) -> Option<&'static FlowBootstrapStep> {
+    let mut offset = 0;
+    for phase in FLOW_BOOTSTRAP_PHASES {
+        let end = offset + phase.steps.len();
+        if index < end {
+            return phase.steps.get(index - offset);
+        }
+        offset = end;
+    }
+    None
+}
+
+fn advance_bootstrap_progress(
+    completed_steps: &mut usize,
+    pending_steps: &mut VecDeque<usize>,
+    events: &[String],
+    direction: FlowDirection,
+) {
+    match direction {
+        FlowDirection::Forward => {
+            for event in events {
+                let next_index = completed_steps.saturating_add(pending_steps.len());
+                let Some(step) = flow_bootstrap_step(next_index) else {
+                    break;
+                };
+                if step.event == event {
+                    pending_steps.push_back(next_index);
+                }
+            }
+        }
+        FlowDirection::Backward => {
+            for event in events {
+                let Some(pending_index) = pending_steps.front().copied() else {
+                    break;
+                };
+                let Some(step) = flow_bootstrap_step(pending_index) else {
+                    pending_steps.clear();
+                    break;
+                };
+                if step.event == event {
+                    pending_steps.pop_front();
+                    *completed_steps = pending_index + 1;
+                }
+            }
+        }
+    }
+}
+
 impl AppState {
     pub fn new(port: u16, workspace_root: String) -> std::io::Result<Self> {
         let config_path = app_config_path()?;
@@ -442,6 +621,7 @@ impl AppState {
             selected_browser: config.selected_browser,
             logs: Vec::new(),
             session_flows: Vec::new(),
+            session_bootstrap_progress: HashMap::new(),
             session_count: 0,
             request_count: 0,
             usage_totals: config.usage_totals,
@@ -509,6 +689,11 @@ impl AppState {
         let now_ms = now_unix_millis();
         self.last_remote_activity_ms = Some(now_ms);
         let step_ms = derive_flow_step_ms();
+        let mut bootstrap = self
+            .session_bootstrap_progress
+            .get(sid)
+            .cloned()
+            .unwrap_or_default();
 
         if let Some(idx) = self
             .session_flows
@@ -521,6 +706,18 @@ impl AppState {
                 let drop_n = flow.events.len() - 12;
                 flow.events.drain(0..drop_n);
             }
+            flow.bootstrap_completed_steps = bootstrap.completed_steps;
+            flow.bootstrap_pending_steps = bootstrap.pending_steps.clone();
+            advance_bootstrap_progress(
+                &mut flow.bootstrap_completed_steps,
+                &mut flow.bootstrap_pending_steps,
+                events,
+                direction,
+            );
+            bootstrap.completed_steps = flow.bootstrap_completed_steps;
+            bootstrap.pending_steps = flow.bootstrap_pending_steps.clone();
+            self.session_bootstrap_progress
+                .insert(sid.to_string(), bootstrap);
             flow.closing_started_ms = None;
             flow.closing_step_ms = 0;
             flow.last_direction = direction;
@@ -539,6 +736,8 @@ impl AppState {
                 session_id: sid.to_string(),
                 short_id: short_session_id(sid),
                 events: trimmed,
+                bootstrap_completed_steps: bootstrap.completed_steps,
+                bootstrap_pending_steps: bootstrap.pending_steps.clone(),
                 anim_queue: VecDeque::new(),
                 last_direction: direction,
                 closing_started_ms: None,
@@ -546,6 +745,16 @@ impl AppState {
             },
         );
         if let Some(flow) = self.session_flows.first_mut() {
+            advance_bootstrap_progress(
+                &mut flow.bootstrap_completed_steps,
+                &mut flow.bootstrap_pending_steps,
+                events,
+                direction,
+            );
+            bootstrap.completed_steps = flow.bootstrap_completed_steps;
+            bootstrap.pending_steps = flow.bootstrap_pending_steps.clone();
+            self.session_bootstrap_progress
+                .insert(sid.to_string(), bootstrap);
             enqueue_flow_segment(&mut flow.anim_queue, direction, now_ms, step_ms);
         }
     }

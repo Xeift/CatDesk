@@ -24,7 +24,7 @@ const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const RENDER_FINAL_SUMMARY_WIDGET_TOOL: &str = "render_final_summary_widget";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
-const EMBEDDED_WIDGET_MASCOT_PLACEHOLDER: &str = "{\"__catdeskEmbeddedMascotPlaceholder__\":true}";
+const EMBEDDED_WIDGET_MASCOT_PLACEHOLDER: &str = "__catdeskEmbeddedMascotPlaceholder__";
 const WIDGET_RESOURCE_URI_PLACEHOLDER: &str = "__catdeskWidgetResourceUriPlaceholder__";
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;

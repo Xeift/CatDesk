@@ -25,9 +25,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use state::{
-    AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, Mode, SessionFlow,
-    SharedState, ToolMode, UsageTotals, app_config_path, load_ngrok_authtoken,
-    save_ngrok_authtoken,
+    AppState, FLOW_ANIM_CELLS, FLOW_BOOTSTRAP_PHASES, FlowAnimKind, FlowAnimSegment,
+    FlowDirection, Mode, SessionFlow, SharedState, ToolMode, UsageTotals, app_config_path,
+    load_ngrok_authtoken, save_ngrok_authtoken,
 };
 use std::io::{Write, stdout};
 use std::sync::Arc;
@@ -248,6 +248,141 @@ fn latest_flow_action(flow: &SessionFlow) -> String {
             }
         })
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlowPhaseStepState {
+    Future,
+    Pending,
+    Complete,
+}
+
+fn flow_phase_bounds(phase_index: usize) -> (usize, usize) {
+    let start = FLOW_BOOTSTRAP_PHASES
+        .iter()
+        .take(phase_index)
+        .map(|phase| phase.steps.len())
+        .sum::<usize>();
+    let end = start + FLOW_BOOTSTRAP_PHASES[phase_index].steps.len();
+    (start, end)
+}
+
+fn flow_phase_step_state(flow: Option<&SessionFlow>, step_index: usize) -> FlowPhaseStepState {
+    let Some(flow) = flow else {
+        return FlowPhaseStepState::Future;
+    };
+    if step_index < flow.bootstrap_completed_steps {
+        FlowPhaseStepState::Complete
+    } else if flow.bootstrap_pending_steps.contains(&step_index) {
+        FlowPhaseStepState::Pending
+    } else {
+        FlowPhaseStepState::Future
+    }
+}
+
+fn flow_phase_status_label(flow: Option<&SessionFlow>, phase_index: usize) -> Option<String> {
+    let Some(flow) = flow else {
+        return None;
+    };
+    let (start, end) = flow_phase_bounds(phase_index);
+    if flow.bootstrap_completed_steps >= end {
+        return Some("✓".to_string());
+    }
+    if let Some(step_index) = flow
+        .bootstrap_pending_steps
+        .iter()
+        .copied()
+        .find(|step_index| (start..end).contains(step_index))
+    {
+        let step = &FLOW_BOOTSTRAP_PHASES[phase_index].steps[step_index - start];
+        return Some(step.label.to_string());
+    }
+    if (start..end).contains(&flow.bootstrap_completed_steps.saturating_sub(1))
+        && flow.bootstrap_completed_steps > start
+    {
+        let step_index = flow.bootstrap_completed_steps - 1;
+        let step = &FLOW_BOOTSTRAP_PHASES[phase_index].steps[step_index - start];
+        return Some(step.label.to_string());
+    }
+    None
+}
+
+fn flow_phase_lines(
+    flow: Option<&SessionFlow>,
+    palette: &theme::Palette,
+    status_style: Style,
+) -> Vec<Line<'static>> {
+    const TITLE_STATUS_GAP: usize = 4;
+    const STATUS_ANIM_GAP: usize = 4;
+    let title_width = FLOW_BOOTSTRAP_PHASES
+        .iter()
+        .enumerate()
+        .map(|(phase_index, phase)| format!("    Phase {}: {}", phase_index + 1, phase.title))
+        .map(|title| title.chars().count())
+        .max()
+        .unwrap_or(0);
+    let status_width = FLOW_BOOTSTRAP_PHASES
+        .iter()
+        .flat_map(|phase| {
+            std::iter::once("✓".to_string())
+                .chain(phase.steps.iter().map(|step| step.label.to_string()))
+                .map(|status| format!("[{status}]").chars().count())
+        })
+        .max()
+        .unwrap_or(0);
+    let pending_style = Style::default()
+        .fg(palette.info_fg)
+        .add_modifier(Modifier::BOLD);
+    let complete_style = Style::default()
+        .fg(palette.success_fg)
+        .add_modifier(Modifier::BOLD);
+    let future_style = Style::default().fg(palette.muted_fg);
+    let label_style = Style::default().fg(palette.primary_fg);
+
+    FLOW_BOOTSTRAP_PHASES
+        .iter()
+        .enumerate()
+        .map(|(phase_index, phase)| {
+            let title = format!("    Phase {}: {}", phase_index + 1, phase.title);
+            let title_padding = title_width.saturating_sub(title.chars().count());
+            let status_label = flow_phase_status_label(flow, phase_index);
+            let status_text = status_label
+                .map(|label| format!("[{label}]"))
+                .unwrap_or_default();
+            let status_padding = status_width.saturating_sub(status_text.chars().count());
+            let mut spans = vec![
+                Span::styled(title, label_style),
+                Span::styled(
+                    " ".repeat(title_padding + TITLE_STATUS_GAP),
+                    future_style,
+                ),
+                Span::styled(status_text, status_style),
+                Span::styled(
+                    " ".repeat(status_padding + STATUS_ANIM_GAP),
+                    future_style,
+                ),
+            ];
+            let (start, _) = flow_phase_bounds(phase_index);
+            for (step_offset, _) in phase.steps.iter().enumerate() {
+                if step_offset > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let step_index = start + step_offset;
+                match flow_phase_step_state(flow, step_index) {
+                    FlowPhaseStepState::Future => {
+                        spans.push(Span::styled("✧", future_style));
+                    }
+                    FlowPhaseStepState::Pending => {
+                        spans.push(Span::styled("✧", pending_style));
+                    }
+                    FlowPhaseStepState::Complete => {
+                        spans.push(Span::styled("✦", complete_style));
+                    }
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn build_animation_snapshot(app: &AppState) -> Vec<String> {
@@ -2148,6 +2283,24 @@ fn draw_ui(
         spans.push(Span::raw(" "));
         spans
     };
+    let session_stats_for = |app: &AppState| -> Vec<Span<'static>> {
+        vec![
+            Span::styled("  Sessions: ", Style::default().fg(palette.muted_fg)),
+            Span::styled(
+                app.session_count.to_string(),
+                Style::default().fg(palette.title_fg),
+            ),
+            Span::styled("    Requests: ", Style::default().fg(palette.muted_fg)),
+            Span::styled(
+                app.request_count.to_string(),
+                Style::default().fg(palette.title_fg),
+            ),
+        ]
+    };
+    let session_meta_gap_for = |sid_text: &str| -> String {
+        const SID_COLUMN_WIDTH: usize = 16;
+        " ".repeat(SID_COLUMN_WIDTH.saturating_sub(sid_text.chars().count()).max(2))
+    };
 
     let mut status_lines: Vec<Line> = vec![
         Line::from(vec![
@@ -2327,12 +2480,6 @@ fn draw_ui(
 
     if show_session_flow {
         status_lines.push(Line::from(""));
-        status_lines.push(Line::from(Span::styled(
-            "  Session request flow:",
-            Style::default()
-                .fg(palette.title_fg)
-                .add_modifier(Modifier::BOLD),
-        )));
         if visible_flow_count == 0 {
             let call_text = if app.remote_connected {
                 "awaiting request"
@@ -2359,7 +2506,13 @@ fn draw_ui(
             row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
             row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
             row.push(Span::styled(sid_text, flow_meta_style));
+            row.push(Span::styled(
+                session_meta_gap_for(sid_text),
+                Style::default().fg(palette.muted_fg),
+            ));
+            row.extend(session_stats_for(app));
             status_lines.push(Line::from(row));
+            status_lines.extend(flow_phase_lines(None, &palette, flow_meta_style));
         } else {
             for flow in app
                 .session_flows
@@ -2380,6 +2533,7 @@ fn draw_ui(
                     || (app.server_running && app.ngrok_running && app.remote_connected);
                 let lane = lane_for(lane_active, Some(flow));
                 let sid_text = format!("[sid={}]", flow.short_id);
+                let sid_gap = session_meta_gap_for(&sid_text);
                 let mut row = vec![
                     Span::styled("    ", Style::default().fg(palette.muted_fg)),
                     Span::styled("Your computer ", computer_role_style),
@@ -2388,7 +2542,13 @@ fn draw_ui(
                 row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
                 row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
                 row.push(Span::styled(sid_text, flow_meta_style));
+                row.push(Span::styled(
+                    sid_gap,
+                    Style::default().fg(palette.muted_fg),
+                ));
+                row.extend(session_stats_for(app));
                 status_lines.push(Line::from(row));
+                status_lines.extend(flow_phase_lines(Some(flow), &palette, flow_meta_style));
             }
         }
     }
@@ -2487,18 +2647,6 @@ fn draw_ui(
             Span::styled(
                 &*app.workspace_root,
                 Style::default().fg(palette.primary_fg),
-            ),
-        ]));
-        status_lines.push(Line::from(vec![
-            Span::styled("  Sessions:  ", Style::default().fg(palette.muted_fg)),
-            Span::styled(
-                app.session_count.to_string(),
-                Style::default().fg(palette.title_fg),
-            ),
-            Span::styled("    Requests: ", Style::default().fg(palette.muted_fg)),
-            Span::styled(
-                app.request_count.to_string(),
-                Style::default().fg(palette.title_fg),
             ),
         ]));
     }
