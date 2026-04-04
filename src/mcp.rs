@@ -158,6 +158,14 @@ struct SearchWidgetContent {
 }
 
 #[derive(Clone, Default)]
+struct ReadFileWidgetContent {
+    path: String,
+    bytes: u64,
+    text: String,
+    truncated: bool,
+}
+
+#[derive(Clone, Default)]
 struct WatchedSnapshot {
     files: HashMap<String, FileSnapshot>,
 }
@@ -1285,6 +1293,7 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
             | "catdesk_instruction"
             | "list_files"
             | "search_text"
+            | "read_file"
             | "write_file"
             | "append_file"
             | "make_directory"
@@ -1506,6 +1515,64 @@ fn parse_search_text_output(output: &str) -> SearchWidgetContent {
     parsed
 }
 
+fn parse_read_file_output(output: &str) -> ReadFileWidgetContent {
+    let normalized = output.replace("\r\n", "\n");
+    let mut lines: Vec<&str> = normalized.lines().collect();
+    let mut parsed = ReadFileWidgetContent::default();
+
+    let path_line = lines.first().copied().unwrap_or_default();
+    if let Some(value) = path_line.strip_prefix("path: ") {
+        parsed.path = value.trim().to_string();
+    }
+
+    let bytes_line = lines.get(1).copied().unwrap_or_default();
+    if let Some(value) = bytes_line.strip_prefix("bytes: ") {
+        parsed.bytes = value.trim().parse::<u64>().unwrap_or(0);
+    }
+
+    let mut body_start = 0usize;
+    if path_line.starts_with("path: ") {
+        body_start = 1;
+    }
+    if bytes_line.starts_with("bytes: ") {
+        body_start = 2;
+    }
+    if lines
+        .get(body_start)
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
+        body_start += 1;
+    }
+    if body_start > 0 {
+        lines.drain(0..body_start.min(lines.len()));
+    }
+
+    while lines
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
+        lines.pop();
+    }
+    if let Some(last) = lines.last().copied() {
+        if last.starts_with("[truncated at ") && last.ends_with(" bytes]") {
+            parsed.truncated = true;
+            lines.pop();
+            while lines
+                .last()
+                .map(|line| line.trim().is_empty())
+                .unwrap_or(false)
+            {
+                lines.pop();
+            }
+        }
+    }
+
+    parsed.text = lines.join("\n");
+    parsed
+}
+
 fn build_auto_widget_structured_content(
     req: &JsonRpcRequest,
     result: &Value,
@@ -1576,6 +1643,25 @@ fn build_auto_widget_structured_content(
             "matchCount": parsed.matches,
             "searchTruncated": parsed.truncated,
             "searchResults": parsed.results.iter().map(search_result_entry_json).collect::<Vec<_>>(),
+            "changedFiles": [],
+            "hasChanges": false
+        });
+    }
+
+    if tool_name == "read_file" {
+        let arguments = tool_arguments(req);
+        let path_arg = arguments.get("path").and_then(Value::as_str).unwrap_or_default();
+        let parsed = parse_read_file_output(&extract_tool_result_text(result));
+        return json!({
+            "schema": "catdesk.review.v1",
+            "panelMode": "tool_call",
+            "title": "Read File",
+            "state": if is_error { "failed" } else { "done" },
+            "toolName": "read_file",
+            "path": if parsed.path.is_empty() { path_arg } else { parsed.path.as_str() },
+            "bytes": parsed.bytes,
+            "text": parsed.text,
+            "truncated": parsed.truncated,
             "changedFiles": [],
             "hasChanges": false
         });
@@ -2430,6 +2516,72 @@ mod tests {
                 "uri": uri,
             }),
         }
+    }
+
+    fn tool_call_request(name: &str, arguments: Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tool")),
+            method: "tools/call".into(),
+            params: json!({
+                "name": name,
+                "arguments": arguments,
+            }),
+        }
+    }
+
+    #[test]
+    fn parse_read_file_output_extracts_body_and_truncation() {
+        let parsed = parse_read_file_output(
+            "path: README.md
+bytes: 12
+
+hello
+world
+
+[truncated at 12 bytes]",
+        );
+
+        assert_eq!(parsed.path, "README.md");
+        assert_eq!(parsed.bytes, 12);
+        assert_eq!(parsed.text, "hello
+world");
+        assert!(parsed.truncated);
+    }
+
+    #[test]
+    fn read_file_uses_dedicated_structured_payload_with_full_text() {
+        let req = tool_call_request("read_file", json!({
+            "path": "README.md",
+        }));
+        let raw = json!({
+            "content": [{
+                "type": "text",
+                "text": "path: README.md
+bytes: 11
+
+hello world"
+            }]
+        });
+
+        let result = enrich_tool_result(&req, raw, None);
+        let structured = result
+            .get("structuredContent")
+            .expect("missing structuredContent");
+        let widget_payload = result
+            .get("_meta")
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+
+        assert_eq!(structured.get("title").and_then(Value::as_str), Some("Read File"));
+        assert_eq!(structured.get("toolName").and_then(Value::as_str), Some("read_file"));
+        assert_eq!(structured.get("path").and_then(Value::as_str), Some("README.md"));
+        assert_eq!(structured.get("bytes").and_then(Value::as_u64), Some(11));
+        assert_eq!(structured.get("text").and_then(Value::as_str), Some("hello world"));
+        assert_eq!(structured.get("truncated").and_then(Value::as_bool), Some(false));
+        assert!(structured.get("detail").is_none());
+        assert!(structured.get("call").is_none());
+        assert_eq!(widget_payload.get("text").and_then(Value::as_str), Some("hello world"));
     }
 
     #[test]

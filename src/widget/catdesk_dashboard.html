@@ -2072,6 +2072,13 @@
             mascotSequence: [],
             command: asString(data.command, ""),
             output: asString(data.output, ""),
+            readFilePath: asString(data.path, ""),
+            readFileBytes:
+              Number.isFinite(data.bytes) && data.bytes >= 0
+                ? Math.floor(data.bytes)
+                : 0,
+            readFileText: asString(data.text, ""),
+            readFileTruncated: asBool(data.truncated, false),
             searchQuery: asString(data.searchQuery, ""),
             searchPath: asString(data.searchPath, ""),
             filesScanned:
@@ -2525,6 +2532,30 @@
             '<pre class="command-output">' +
             esc(current.output) +
             "</pre>" +
+            "</div>"
+          );
+        }
+
+        function renderReadFilePanel(current) {
+          var summaryHtml =
+            '<div class="search-summary">' +
+            '<div class="summary-row metrics with-kicker">' +
+            renderSummaryStat("path", "path", current.readFilePath, "path") +
+            renderSummaryStat("file", "bytes", current.readFileBytes, "other") +
+            '<span class="panel-kicker summary-kicker">file contents</span>' +
+            "</div>" +
+            "</div>";
+          var textHtml = current.readFileText
+            ? '<pre class="command-output">' + esc(current.readFileText) + "</pre>"
+            : '<div class="empty">File is empty.</div>';
+          var truncatedHtml = current.readFileTruncated
+            ? '<div class="search-note">File output truncated by byte limit.</div>'
+            : "";
+          return (
+            '<div class="search-panel">' +
+            summaryHtml +
+            textHtml +
+            truncatedHtml +
             "</div>"
           );
         }
@@ -4025,6 +4056,8 @@
             view.panelMode === "tool_call" && view.toolName === "run_command";
           var isSearchText =
             view.panelMode === "tool_call" && view.toolName === "search_text";
+          var isReadFile =
+            view.panelMode === "tool_call" && view.toolName === "read_file";
           var isListFiles =
             view.panelMode === "tool_call" && view.toolName === "list_files";
           var filesEmpty = isFinal
@@ -4058,6 +4091,15 @@
               "</div>" +
               "</section>";
           }
+          var readFileSectionHtml = "";
+          if (isReadFile) {
+            readFileSectionHtml =
+              '<section class="section">' +
+              '<div class="section-body">' +
+              renderReadFilePanel(view) +
+              "</div>" +
+              "</section>";
+          }
           var listSectionHtml = "";
           if (isListFiles) {
             listSectionHtml =
@@ -4072,6 +4114,7 @@
             (!isCatDeskInstruction &&
               !isRunCommand &&
               !isSearchText &&
+              !isReadFile &&
               !isListFiles) ||
             view.hasChanges
           ) {
@@ -4090,6 +4133,7 @@
             instructionSectionHtml +
             commandSectionHtml +
             searchSectionHtml +
+            readFileSectionHtml +
             listSectionHtml +
             filesSectionHtml;
           var contentRowHtml = "";
@@ -4175,6 +4219,7 @@
             normalized.toolName !== "catdesk_instruction" &&
             normalized.toolName !== "run_command" &&
             normalized.toolName !== "search_text" &&
+            normalized.toolName !== "read_file" &&
             normalized.toolName !== "list_files" &&
             normalized.turnTokenUsage.totalTokens <= 0 &&
             normalized.toolCallCount <= 0
