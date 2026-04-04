@@ -1017,10 +1017,6 @@ fn catdesk_instruction_widget_payload_with_cards(
     let binagotchy_path = mascot::catdesk_binagotchy_root()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|_| "-".to_string());
-    payload_obj.insert(
-        "instructionText".to_string(),
-        json!(catdesk_instruction_text(workspace_root, mode, tool_mode)),
-    );
     payload_obj.insert("workspacePath".to_string(), json!(workspace_root));
     payload_obj.insert("agentsPath".to_string(), json!(agents_path));
     payload_obj.insert("configPath".to_string(), json!(config_path));
@@ -1122,24 +1118,47 @@ fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
     sanitized
 }
 
-fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
+fn ensure_widget_payload_from_structured(result: &mut Value) {
     let Some(obj) = result.as_object_mut() else {
         return;
     };
-    let Some(structured) = obj
-        .get_mut("structuredContent")
-        .and_then(Value::as_object_mut)
-    else {
+    let Some(structured) = obj.get("structuredContent").cloned() else {
         return;
     };
-    structured.insert(
-        "turnTokenUsage".to_string(),
-        json!({
-            "inputTokens": usage.input_tokens,
-            "outputTokens": usage.output_tokens,
-            "totalTokens": usage.total_tokens,
-        }),
-    );
+    let meta_value = obj.entry("_meta".to_string()).or_insert_with(|| json!({}));
+    if !meta_value.is_object() {
+        *meta_value = json!({});
+    }
+    let Some(meta_obj) = meta_value.as_object_mut() else {
+        return;
+    };
+    meta_obj
+        .entry(WIDGET_PAYLOAD_META_KEY.to_string())
+        .or_insert(structured);
+}
+
+fn sync_widget_payload_from_structured(result: &mut Value) {
+    let Some(obj) = result.as_object_mut() else {
+        return;
+    };
+    let Some(structured) = obj.get("structuredContent").cloned() else {
+        return;
+    };
+    let meta_value = obj.entry("_meta".to_string()).or_insert_with(|| json!({}));
+    if !meta_value.is_object() {
+        *meta_value = json!({});
+    }
+    let Some(meta_obj) = meta_value.as_object_mut() else {
+        return;
+    };
+    meta_obj.insert(WIDGET_PAYLOAD_META_KEY.to_string(), structured);
+}
+
+fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
+    ensure_widget_payload_from_structured(result);
+    let Some(obj) = result.as_object_mut() else {
+        return;
+    };
     if let Some(widget_payload) = obj
         .get_mut("_meta")
         .and_then(Value::as_object_mut)
@@ -1158,16 +1177,10 @@ fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
 }
 
 fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
+    ensure_widget_payload_from_structured(result);
     let Some(obj) = result.as_object_mut() else {
         return;
     };
-    let Some(structured) = obj
-        .get_mut("structuredContent")
-        .and_then(Value::as_object_mut)
-    else {
-        return;
-    };
-    structured.insert("toolCallCount".to_string(), json!(tool_call_count));
     if let Some(widget_payload) = obj
         .get_mut("_meta")
         .and_then(Value::as_object_mut)
@@ -1599,6 +1612,7 @@ fn enrich_tool_result(
             result_obj.insert("structuredContent".to_string(), structured);
         }
     }
+    sync_widget_payload_from_structured(&mut result);
     result
 }
 
@@ -2386,24 +2400,47 @@ mod tests {
         session.pending_tool_call_count = 3;
 
         let resp = handle_render_final_summary_widget(&req, &mut session);
-        let usage = resp
+        let structured = resp
             .result
             .as_ref()
             .and_then(|result| result.get("structuredContent"))
-            .and_then(|structured| structured.get("turnTokenUsage"))
             .cloned()
-            .expect("missing turnTokenUsage");
-        let tool_call_count = resp
+            .expect("missing structuredContent");
+        let widget_payload = resp
             .result
             .as_ref()
-            .and_then(|result| result.get("structuredContent"))
-            .and_then(|structured| structured.get("toolCallCount"))
-            .and_then(Value::as_u64);
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .cloned()
+            .expect("missing widget payload");
 
-        assert_eq!(usage.get("inputTokens").and_then(Value::as_u64), Some(123));
-        assert_eq!(usage.get("outputTokens").and_then(Value::as_u64), Some(45));
-        assert_eq!(usage.get("totalTokens").and_then(Value::as_u64), Some(168));
-        assert_eq!(tool_call_count, Some(3));
+        assert!(structured.get("turnTokenUsage").is_none());
+        assert!(structured.get("toolCallCount").is_none());
+        assert_eq!(
+            widget_payload
+                .get("turnTokenUsage")
+                .and_then(|usage| usage.get("inputTokens"))
+                .and_then(Value::as_u64),
+            Some(123)
+        );
+        assert_eq!(
+            widget_payload
+                .get("turnTokenUsage")
+                .and_then(|usage| usage.get("outputTokens"))
+                .and_then(Value::as_u64),
+            Some(45)
+        );
+        assert_eq!(
+            widget_payload
+                .get("turnTokenUsage")
+                .and_then(|usage| usage.get("totalTokens"))
+                .and_then(Value::as_u64),
+            Some(168)
+        );
+        assert_eq!(
+            widget_payload.get("toolCallCount").and_then(Value::as_u64),
+            Some(3)
+        );
         assert_eq!(session.pending_turn_token_usage.input_tokens, 0);
         assert_eq!(session.pending_turn_token_usage.output_tokens, 0);
         assert_eq!(session.pending_turn_token_usage.total_tokens, 0);
@@ -2501,11 +2538,6 @@ mod tests {
         let mut result = json!({
             "structuredContent": {
                 "schema": "catdesk.review.v1"
-            },
-            "_meta": {
-                WIDGET_PAYLOAD_META_KEY: {
-                    "schema": "catdesk.review.v1"
-                }
             }
         });
 
@@ -2521,17 +2553,8 @@ mod tests {
             .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
             .expect("missing widget payload");
 
-        assert_eq!(
-            structured
-                .get("turnTokenUsage")
-                .and_then(|entry| entry.get("totalTokens"))
-                .and_then(Value::as_u64),
-            Some(168)
-        );
-        assert_eq!(
-            structured.get("toolCallCount").and_then(Value::as_u64),
-            Some(1)
-        );
+        assert!(structured.get("turnTokenUsage").is_none());
+        assert!(structured.get("toolCallCount").is_none());
         assert_eq!(
             widget_payload
                 .get("turnTokenUsage")
@@ -2572,14 +2595,7 @@ mod tests {
         assert!(structured.get("configPath").is_none());
         assert!(structured.get("binagotchyPath").is_none());
         assert!(structured.get("binagotchyCards").is_none());
-
-        assert_eq!(
-            widget_payload
-                .get("instructionText")
-                .and_then(Value::as_str)
-                .map(|text| text.contains("CatDesk usage instructions")),
-            Some(true)
-        );
+        assert!(widget_payload.get("instructionText").is_none());
         assert_eq!(
             widget_payload.get("workspacePath").and_then(Value::as_str),
             Some("/tmp/workspace")

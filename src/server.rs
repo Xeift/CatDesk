@@ -193,20 +193,6 @@ fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) 
         "totalTokens": usage_totals.total_tokens,
     });
     let history_tool_call_count = json!(usage_totals.tool_call_count);
-    let Some(structured) = result_obj
-        .get_mut("structuredContent")
-        .and_then(Value::as_object_mut)
-    else {
-        return;
-    };
-    structured.insert(
-        "historyTurnTokenUsage".to_string(),
-        history_usage.clone(),
-    );
-    structured.insert(
-        "historyToolCallCount".to_string(),
-        history_tool_call_count.clone(),
-    );
     if let Some(widget_payload) = result_obj
         .get_mut("_meta")
         .and_then(Value::as_object_mut)
@@ -444,19 +430,8 @@ mod tests {
             .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
             .expect("missing widget payload");
 
-        assert_eq!(
-            structured
-                .get("historyTurnTokenUsage")
-                .and_then(|usage| usage.get("inputTokens"))
-                .and_then(Value::as_u64),
-            Some(120)
-        );
-        assert_eq!(
-            structured
-                .get("historyToolCallCount")
-                .and_then(Value::as_u64),
-            Some(7)
-        );
+        assert!(structured.get("historyTurnTokenUsage").is_none());
+        assert!(structured.get("historyToolCallCount").is_none());
         assert_eq!(
             widget_payload
                 .get("historyTurnTokenUsage")
