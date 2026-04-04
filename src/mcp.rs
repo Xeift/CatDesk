@@ -193,6 +193,7 @@ pub async fn handle_request(
     mascot_seed: u64,
     mode: Mode,
     tool_mode: ToolMode,
+    set_catdesk_as_co_author: bool,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
@@ -226,7 +227,18 @@ pub async fn handle_request(
         }
         "tools/list" => Some(handle_tools_list(req, mode, tool_mode, devtools).await),
         "tools/call" => {
-            Some(handle_tools_call(req, session, workspace_root, mode, tool_mode, devtools).await)
+            Some(
+                handle_tools_call(
+                    req,
+                    session,
+                    workspace_root,
+                    mode,
+                    tool_mode,
+                    set_catdesk_as_co_author,
+                    devtools,
+                )
+                .await,
+            )
         }
         "resources/list" => Some(handle_resources_list(req)),
         "resources/read" => Some(handle_resources_read(req, mascot_seed)),
@@ -546,6 +558,7 @@ async fn handle_tools_call(
     workspace_root: &str,
     mode: Mode,
     tool_mode: ToolMode,
+    set_catdesk_as_co_author: bool,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> JsonRpcResponse {
     let params = &req.params;
@@ -567,7 +580,7 @@ async fn handle_tools_call(
         if mode.computer_enabled() {
             if tool_name == "run_command" {
                 if tool_mode.run_command_enabled() {
-                    handle_run_command(req, workspace_root).await
+                    handle_run_command(req, workspace_root, set_catdesk_as_co_author).await
                 } else if tool_mode.read_only() {
                     read_only_blocked_response(req, &tool_name)
                 } else {
@@ -734,7 +747,11 @@ async fn forward_to_devtools(
     }
 }
 
-async fn handle_run_command(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+async fn handle_run_command(
+    req: &JsonRpcRequest,
+    workspace_root: &str,
+    set_catdesk_as_co_author: bool,
+) -> JsonRpcResponse {
     let params = &req.params;
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
     let cmd = match arguments.get("command").and_then(|v| v.as_str()) {
@@ -747,6 +764,15 @@ async fn handle_run_command(req: &JsonRpcRequest, workspace_root: &str) -> JsonR
     let cwd_input = arguments.get("cwd").and_then(|v| v.as_str());
     let timeout_ms = arguments.get("timeout").and_then(|v| v.as_u64());
 
+    if command::contains_catdesk_co_author_marker(cmd) {
+        let message = if set_catdesk_as_co_author {
+            "Rewrite the commit message normally and remove \"Co-Authored-By: CatDesk\". CatDesk will add that trailer automatically."
+        } else {
+            "Do not include \"Co-Authored-By: CatDesk\" in the commit message. The user does not want that attribution."
+        };
+        return tool_error_response(req, message.into());
+    }
+
     let cwd = match command::resolve_workspace_path(workspace_root, cwd_input) {
         Ok(p) => p,
         Err(e) => {
@@ -755,7 +781,13 @@ async fn handle_run_command(req: &JsonRpcRequest, workspace_root: &str) -> JsonR
     };
 
     let effective_timeout = command::clamp_timeout(timeout_ms);
-    let result = command::run_command(cmd, &cwd, effective_timeout).await;
+    let effective_command =
+        if set_catdesk_as_co_author && command::command_contains_git_commit(cmd) {
+            command::inject_catdesk_co_author_trailer(cmd)
+        } else {
+            cmd.to_string()
+        };
+    let result = command::run_command(&effective_command, &cwd, effective_timeout).await;
     let output = command::format_result(&result);
 
     if result.success {

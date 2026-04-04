@@ -72,6 +72,8 @@ pub struct AppConfig {
     pub ngrok_authtoken: Option<String>,
     #[serde(default)]
     pub partner_binagotchy_seed: Option<String>,
+    #[serde(default)]
+    pub set_catdesk_as_co_author: bool,
     pub theme: String,
     pub mode: Mode,
     pub tool_mode: ToolMode,
@@ -84,6 +86,7 @@ impl Default for AppConfig {
         Self {
             ngrok_authtoken: None,
             partner_binagotchy_seed: None,
+            set_catdesk_as_co_author: false,
             theme: theme::DEFAULT_THEME_ID.to_string(),
             mode: Mode::Both,
             tool_mode: ToolMode::OneTool,
@@ -405,6 +408,7 @@ pub struct AppState {
     pub workspace_root: String,
     pub mascot_seed: u64,
     pub partner_binagotchy_seed: Option<String>,
+    pub set_catdesk_as_co_author: bool,
     pub mascot: MascotPack,
     pub detected_browsers: Vec<DetectedBrowser>,
     pub selected_browser: Option<DetectedBrowser>,
@@ -633,6 +637,7 @@ impl AppState {
             port,
             mascot_seed,
             partner_binagotchy_seed,
+            set_catdesk_as_co_author: config.set_catdesk_as_co_author,
             mascot,
             workspace_root,
             detected_browsers: Vec::new(),
@@ -680,6 +685,7 @@ impl AppState {
     fn app_config(&self) -> std::io::Result<AppConfig> {
         let mut config = AppConfig::load_from_path(&self.config_path)?;
         config.partner_binagotchy_seed = self.partner_binagotchy_seed.clone();
+        config.set_catdesk_as_co_author = self.set_catdesk_as_co_author;
         config.theme = self.theme.clone();
         config.mode = self.mode;
         config.tool_mode = self.tool_mode;

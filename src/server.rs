@@ -543,6 +543,7 @@ async fn post_mcp(
         mascot_seed,
         mode,
         tool_mode,
+        set_catdesk_as_co_author,
         mut usage_totals,
         ngrok_url,
         partner_binagotchy_seed,
@@ -553,6 +554,7 @@ async fn post_mcp(
             app.mascot_seed,
             app.mode,
             app.tool_mode,
+            app.set_catdesk_as_co_author,
             app.usage_totals.clone(),
             app.ngrok_url.clone(),
             app.partner_binagotchy_seed.clone(),
@@ -666,6 +668,7 @@ async fn post_mcp(
                 mascot_seed,
                 mode,
                 tool_mode,
+                set_catdesk_as_co_author,
                 &s.devtools,
             )
             .await

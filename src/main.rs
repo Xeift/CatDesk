@@ -935,18 +935,29 @@ async fn run_settings(
         let app = state.lock().await;
         themes.iter().position(|t| t.id == app.theme).unwrap_or(0)
     };
-    let total_rows = themes.len() + tool_modes.len();
+    let total_rows = themes.len() + tool_modes.len() + 1;
 
     loop {
-        let (current_theme, current_tool_mode, usage_totals) = {
+        let (
+            current_theme,
+            current_tool_mode,
+            usage_totals,
+            set_catdesk_as_co_author,
+        ) = {
             let app = state.lock().await;
-            (app.current_theme(), app.tool_mode, app.usage_totals.clone())
+            (
+                app.current_theme(),
+                app.tool_mode,
+                app.usage_totals.clone(),
+                app.set_catdesk_as_co_author,
+            )
         };
         terminal.draw(|f| {
             draw_settings(
                 f,
                 current_theme,
                 current_tool_mode,
+                set_catdesk_as_co_author,
                 &usage_totals,
                 selected_row,
                 confirm_reset_token_billing,
@@ -981,10 +992,25 @@ async fn run_settings(
                                 app.persist_state_with_log();
                             }
                         } else {
-                            let picked = tool_modes[selected_row - themes.len()];
-                            if app.tool_mode != picked {
-                                app.tool_mode = picked;
-                                app.log("INFO", format!("Tool mode: {}", picked.label()));
+                            let tool_mode_start = themes.len();
+                            let tool_mode_end = tool_mode_start + tool_modes.len();
+                            if selected_row < tool_mode_end {
+                                let picked = tool_modes[selected_row - tool_mode_start];
+                                if app.tool_mode != picked {
+                                    app.tool_mode = picked;
+                                    app.log("INFO", format!("Tool mode: {}", picked.label()));
+                                    app.persist_state_with_log();
+                                }
+                            } else {
+                                app.set_catdesk_as_co_author = !app.set_catdesk_as_co_author;
+                                let enabled = app.set_catdesk_as_co_author;
+                                app.log(
+                                    "INFO",
+                                    format!(
+                                        "Set CatDesk as co-author: {}",
+                                        if enabled { "enabled" } else { "disabled" }
+                                    ),
+                                );
                                 app.persist_state_with_log();
                             }
                         }
@@ -1013,6 +1039,7 @@ fn draw_settings(
     f: &mut Frame,
     current_theme: &theme::ThemeDef,
     current_tool_mode: ToolMode,
+    set_catdesk_as_co_author: bool,
     usage_totals: &UsageTotals,
     selected_row: usize,
     confirm_reset_token_billing: bool,
@@ -1119,6 +1146,50 @@ fn draw_settings(
             Style::default().fg(palette.muted_fg),
         )]));
     }
+    let co_author_row = themes.len() + tool_modes.len();
+    let co_author_selected = co_author_row == selected_row;
+    let co_author_marker = if co_author_selected { ">" } else { " " };
+    let co_author_name_style = if co_author_selected {
+        Style::default()
+            .fg(palette.key_fg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.primary_fg)
+    };
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "  Commit attribution:",
+        Style::default()
+            .fg(palette.title_fg)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        format!(
+            " {} [{}] Set CatDesk as co-author",
+            co_author_marker,
+            co_author_row + 1
+        ),
+        co_author_name_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("     ", Style::default()),
+        Span::styled(
+            if set_catdesk_as_co_author {
+                "[enabled]"
+            } else {
+                "[disabled]"
+            },
+            Style::default().fg(if set_catdesk_as_co_author {
+                palette.success_fg
+            } else {
+                palette.muted_fg
+            }),
+        ),
+    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "     When enabled, CatDesk automatically appends \"Co-Authored-By: CatDesk\" to git commits and blocks manually written CatDesk co-author trailers.",
+        Style::default().fg(palette.muted_fg),
+    )]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  Token billing:",
