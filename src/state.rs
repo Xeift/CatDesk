@@ -159,6 +159,24 @@ pub enum FlowDirection {
     Backward, // response: ChatGPT Web -> Your computer
 }
 
+pub enum ServerUiEvent {
+    IncrementRequestCount,
+    SetRemoteConnected(bool),
+    SetSessionCount(usize),
+    RecordSessionFlow {
+        sid: String,
+        events: Vec<String>,
+        direction: FlowDirection,
+    },
+    BeginSessionFlowClose {
+        sid: String,
+    },
+    Log {
+        level: &'static str,
+        message: String,
+    },
+}
+
 /// Per-session queued animation segment.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FlowAnimKind {
@@ -677,6 +695,36 @@ impl AppState {
     pub fn persist_state_with_log(&mut self) {
         if let Err(e) = self.persist_state() {
             self.log("WARN", format!("Failed to persist app state: {e}"));
+        }
+    }
+
+    pub fn apply_server_ui_event(&mut self, event: ServerUiEvent) {
+        match event {
+            ServerUiEvent::IncrementRequestCount => {
+                self.request_count = self.request_count.saturating_add(1);
+            }
+            ServerUiEvent::SetRemoteConnected(connected) => {
+                self.remote_connected = connected;
+                if !connected {
+                    self.last_remote_activity_ms = None;
+                }
+            }
+            ServerUiEvent::SetSessionCount(count) => {
+                self.session_count = count;
+            }
+            ServerUiEvent::RecordSessionFlow {
+                sid,
+                events,
+                direction,
+            } => {
+                self.record_session_flow(&sid, &events, direction);
+            }
+            ServerUiEvent::BeginSessionFlowClose { sid } => {
+                self.begin_session_flow_close(&sid);
+            }
+            ServerUiEvent::Log { level, message } => {
+                self.log(level, message);
+            }
         }
     }
 }

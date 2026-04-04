@@ -26,13 +26,16 @@ use ratatui::{
 };
 use state::{
     AppState, FLOW_ANIM_CELLS, FLOW_BOOTSTRAP_PHASES, FlowAnimKind, FlowAnimSegment,
-    FlowDirection, Mode, SessionFlow, SharedState, ToolMode, UsageTotals, app_config_path,
-    load_ngrok_authtoken, save_ngrok_authtoken,
+    FlowDirection, Mode, ServerUiEvent, SessionFlow, SharedState, ToolMode, UsageTotals,
+    app_config_path, load_ngrok_authtoken, save_ngrok_authtoken,
 };
 use std::io::{Write, stdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::Mutex;
+use tokio::sync::{
+    Mutex,
+    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+};
 
 const FLOW_ROW_CELLS: usize = FLOW_ANIM_CELLS;
 const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
@@ -458,6 +461,12 @@ fn clipboard_copy(text: &str) {
     });
 }
 
+fn drain_server_ui_events(app: &mut AppState, ui_events: &mut UnboundedReceiver<ServerUiEvent>) {
+    while let Ok(event) = ui_events.try_recv() {
+        app.apply_server_ui_event(event);
+    }
+}
+
 // ── Main ────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -487,18 +496,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
-    // Cleanup
+    // Cleanup after the TUI is gone so quit never appears frozen on screen.
     {
         let mut app = state.lock().await;
+        if let Some(handle) = app.server_handle.take() {
+            handle.abort();
+        }
         if let Some(handle) = app.ngrok_task.take() {
             handle.abort();
         }
-        if let Some(ref mut child) = app.remote_browser_child {
-            let _ = child.kill().await;
+        if let Some(child) = app.remote_browser_child.as_mut() {
+            let _ = child.start_kill();
         }
-        if let Some(ref mut child) = app.devtools_child {
-            let _ = child.kill().await;
+        if let Some(child) = app.devtools_child.as_mut() {
+            let _ = child.start_kill();
         }
+        app.server_running = false;
+        app.ngrok_running = false;
+        app.ngrok_url = None;
+        app.remote_connected = false;
+        app.last_remote_activity_ms = None;
     }
 
     result
@@ -558,10 +575,11 @@ async fn run_app(
     }
 
     // Start services
-    let devtools_bridge = start_services(state.clone()).await;
+    let (ui_event_tx, ui_event_rx) = unbounded_channel();
+    let devtools_bridge = start_services(state.clone(), ui_event_tx).await;
 
     // Phase 2: main TUI loop
-    run_tui(terminal, state, devtools_bridge).await
+    run_tui(terminal, state, devtools_bridge, ui_event_rx).await
 }
 
 fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode) {
@@ -1708,7 +1726,10 @@ async fn ensure_selected_browser_remote_debugging(
 
 // ── Start services ──────────────────────────────────────────
 
-async fn start_services(state: SharedState) -> Option<Arc<Mutex<DevtoolsBridge>>> {
+async fn start_services(
+    state: SharedState,
+    ui_events: UnboundedSender<ServerUiEvent>,
+) -> Option<Arc<Mutex<DevtoolsBridge>>> {
     let (port, mode, mut detected_browsers, mut selected_browser) = {
         let app = state.lock().await;
         (
@@ -1848,7 +1869,7 @@ async fn start_services(state: SharedState) -> Option<Arc<Mutex<DevtoolsBridge>>
         let app = state.lock().await;
         app.mcp_path()
     };
-    let router = server::router(state.clone(), devtools_bridge.clone(), mcp_path);
+    let router = server::router(state.clone(), devtools_bridge.clone(), mcp_path, ui_events);
     let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
         Err(e) => {
@@ -1885,6 +1906,7 @@ async fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: SharedState,
     _devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
+    mut ui_events: UnboundedReceiver<ServerUiEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut log_scroll: usize = 0;
     let mut log_follow_tail = true;
@@ -1900,6 +1922,7 @@ async fn run_tui(
     loop {
         {
             let mut app = state.lock().await;
+            drain_server_ui_events(&mut app, &mut ui_events);
             app.prune_closed_session_flows();
         }
         {
@@ -2068,21 +2091,6 @@ async fn run_tui(
                 _ => {}
             }
         }
-    }
-
-    // Stop services
-    {
-        let mut app = state.lock().await;
-        if let Some(handle) = app.server_handle.take() {
-            handle.abort();
-        }
-        app.server_running = false;
-    }
-    let _ = ngrok::stop(state.clone()).await;
-    {
-        let mut app = state.lock().await;
-        app.remote_connected = false;
-        app.last_remote_activity_ms = None;
     }
 
     Ok(())

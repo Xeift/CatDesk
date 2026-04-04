@@ -9,11 +9,11 @@ use axum::{
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, Session, WIDGET_PAYLOAD_META_KEY};
-use crate::state::{FlowDirection, SharedState, UsageTotals, parse_seed_hex};
+use crate::state::{FlowDirection, ServerUiEvent, SharedState, UsageTotals, parse_seed_hex};
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
@@ -22,6 +22,7 @@ struct ServerState {
     sessions: Sessions,
     app: SharedState,
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
+    ui_events: UnboundedSender<ServerUiEvent>,
 }
 
 /// Build the axum router.
@@ -29,11 +30,13 @@ pub fn router(
     app_state: SharedState,
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
     mcp_path: String,
+    ui_events: UnboundedSender<ServerUiEvent>,
 ) -> Router {
     let state = ServerState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         app: app_state,
         devtools,
+        ui_events,
     };
     Router::new()
         .route("/", get(health))
@@ -533,10 +536,7 @@ async fn post_mcp(
         }
     };
 
-    {
-        let mut app = s.app.lock().await;
-        app.request_count += 1;
-    }
+    let _ = s.ui_events.send(ServerUiEvent::IncrementRequestCount);
 
     let (
         workspace_root,
@@ -605,8 +605,7 @@ async fn post_mcp(
             session_id = new_session.id.clone();
             sessions.insert(session_id.clone(), new_session);
         }
-        let mut app = s.app.lock().await;
-        app.remote_connected = true;
+        let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(true));
     } else if let Some(ref sid) = session_id_header {
         if !sessions.contains_key(sid) {
             drop(sessions);
@@ -635,10 +634,11 @@ async fn post_mcp(
 
     let mut responses: Vec<Value> = Vec::new();
 
-    {
-        let mut app = s.app.lock().await;
-        app.record_session_flow(&session_id, &request_flow_events, FlowDirection::Forward);
-    }
+    let _ = s.ui_events.send(ServerUiEvent::RecordSessionFlow {
+        sid: session_id.clone(),
+        events: request_flow_events.clone(),
+        direction: FlowDirection::Forward,
+    });
 
     for req_val in &requests {
         let req: JsonRpcRequest = match serde_json::from_value(req_val.clone()) {
@@ -691,31 +691,39 @@ async fn post_mcp(
     }
 
     {
+        let session_count = sessions.len();
         let mut app = s.app.lock().await;
         if app.usage_totals != usage_totals {
             app.usage_totals = usage_totals.clone();
             app.persist_state_with_log();
         }
-        app.session_count = sessions.len();
-        app.record_session_flow(&session_id, &response_flow_events, FlowDirection::Backward);
-        let response_summary: Vec<String> = responses.iter().map(summarize_response).collect();
         let mcp_path = app.mcp_path();
-        app.log(
-            "INFO",
-            format!(
+        drop(app);
+        let response_summary: Vec<String> = responses.iter().map(summarize_response).collect();
+        let _ = s
+            .ui_events
+            .send(ServerUiEvent::SetSessionCount(session_count));
+        let _ = s.ui_events.send(ServerUiEvent::RecordSessionFlow {
+            sid: session_id.clone(),
+            events: response_flow_events.clone(),
+            direction: FlowDirection::Backward,
+        });
+        let _ = s.ui_events.send(ServerUiEvent::Log {
+            level: "INFO",
+            message: format!(
                 "POST {mcp_path} request sid={} [{}]",
                 short_session_id(&session_id),
                 summarize_list(&request_summary, 6),
             ),
-        );
-        app.log(
-            "INFO",
-            format!(
+        });
+        let _ = s.ui_events.send(ServerUiEvent::Log {
+            level: "INFO",
+            message: format!(
                 "POST {mcp_path} response sid={} [{}]",
                 short_session_id(&session_id),
                 summarize_list(&response_summary, 6),
             ),
-        );
+        });
     }
 
     drop(sessions);
@@ -782,17 +790,18 @@ async fn get_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<B
         .await;
 
     let sid_clone = sid.clone();
-    let app_state = s.app.clone();
+    let ui_events = s.ui_events.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             if tx.send(Ok(": keepalive\n\n".to_string())).await.is_err() {
-                let mut app = app_state.lock().await;
-                app.begin_session_flow_close(&sid_clone);
-                app.log(
-                    "INFO",
-                    format!("SSE stream closed: {}", short_session_id(&sid_clone)),
-                );
+                let _ = ui_events.send(ServerUiEvent::BeginSessionFlowClose {
+                    sid: sid_clone.clone(),
+                });
+                let _ = ui_events.send(ServerUiEvent::Log {
+                    level: "INFO",
+                    message: format!("SSE stream closed: {}", short_session_id(&sid_clone)),
+                });
                 break;
             }
         }
@@ -820,16 +829,20 @@ async fn delete_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Respons
     if let Some(sid) = session_id {
         let mut sessions = s.sessions.lock().await;
         if sessions.remove(&sid).is_some() {
-            let mut app = s.app.lock().await;
-            app.session_count = sessions.len();
-            app.begin_session_flow_close(&sid);
+            let session_count = sessions.len();
+            let _ = s
+                .ui_events
+                .send(ServerUiEvent::SetSessionCount(session_count));
+            let _ = s.ui_events.send(ServerUiEvent::BeginSessionFlowClose {
+                sid: sid.clone(),
+            });
             if sessions.is_empty() {
-                app.remote_connected = false;
+                let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(false));
             }
-            app.log(
-                "INFO",
-                format!("Session closed: {}", short_session_id(&sid)),
-            );
+            let _ = s.ui_events.send(ServerUiEvent::Log {
+                level: "INFO",
+                message: format!("Session closed: {}", short_session_id(&sid)),
+            });
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/json")

@@ -57,15 +57,3 @@ pub async fn start(state: SharedState) -> Result<(), String> {
 
     Ok(())
 }
-
-/// Stop ngrok.
-pub async fn stop(state: SharedState) -> Result<(), String> {
-    let mut app = state.lock().await;
-    if let Some(handle) = app.ngrok_task.take() {
-        handle.abort();
-    }
-    app.ngrok_running = false;
-    app.ngrok_url = None;
-    app.log("INFO", "ngrok stopped".into());
-    Ok(())
-}
