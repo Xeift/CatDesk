@@ -2154,6 +2154,7 @@
           var finalSummaryOnly =
             WIDGET_RESOURCE_URI === FINAL_SUMMARY_TEMPLATE_URI;
           var finalSummaryFallback = null;
+          var structuredFallback = null;
 
           function extractWidgetPayload(current) {
             if (
@@ -2226,8 +2227,8 @@
               ) {
                 if (!finalSummaryFallback)
                   finalSummaryFallback = current.structuredContent;
-              } else if (!finalSummaryOnly) {
-                return current.structuredContent;
+              } else if (!finalSummaryOnly && !structuredFallback) {
+                structuredFallback = current.structuredContent;
               }
             }
             if (current.schema === "catdesk.review.v1") {
@@ -2237,11 +2238,12 @@
                 (currentIsFinalSummary || isFinalSummaryTransport(current))
               ) {
                 if (!finalSummaryFallback) finalSummaryFallback = current;
-              } else if (!finalSummaryOnly) {
-                return current;
+              } else if (!finalSummaryOnly && !structuredFallback) {
+                structuredFallback = current;
               }
             }
 
+            pushCandidate(current.responseMetadata);
             pushCandidate(current.toolResponseMetadata);
             pushCandidate(current._meta);
             pushCandidate(current.result);
@@ -2264,7 +2266,7 @@
               }
             }
           }
-          return finalSummaryFallback;
+          return finalSummaryOnly ? finalSummaryFallback : structuredFallback;
         }
 
         function isDirectoryFile(file) {
