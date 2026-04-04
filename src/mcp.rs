@@ -1603,6 +1603,7 @@ fn enrich_tool_result(
     } else {
         None
     };
+    let mut inserted_structured = false;
     if let Some(result_obj) = result.as_object_mut() {
         let meta_value = result_obj
             .entry("_meta".to_string())
@@ -1610,9 +1611,14 @@ fn enrich_tool_result(
         ensure_output_template_meta(meta_value);
         if let Some(structured) = structured {
             result_obj.insert("structuredContent".to_string(), structured);
+            inserted_structured = true;
         }
     }
-    sync_widget_payload_from_structured(&mut result);
+    if inserted_structured {
+        sync_widget_payload_from_structured(&mut result);
+    } else {
+        ensure_widget_payload_from_structured(&mut result);
+    }
     result
 }
 
