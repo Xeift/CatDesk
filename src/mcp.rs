@@ -981,16 +981,18 @@ You already have the built-in sandbox container environment. However, CatDesk of
 }
 
 fn catdesk_instruction_structured(
-    _workspace_root: &str,
-    _mode: Mode,
-    _tool_mode: ToolMode,
+    workspace_root: &str,
+    mode: Mode,
+    tool_mode: ToolMode,
 ) -> std::io::Result<Value> {
+    let instruction_text = catdesk_instruction_text(workspace_root, mode, tool_mode);
     Ok(json!({
         "schema": "catdesk.review.v1",
         "panelMode": "tool_call",
         "title": "CatDesk Instruction",
         "state": "done",
         "toolName": "catdesk_instruction",
+        "instructionText": instruction_text,
         "changedFiles": [],
         "hasChanges": false
     }))
@@ -1008,6 +1010,7 @@ fn catdesk_instruction_widget_payload_with_cards(
             "catdesk instruction payload must be a JSON object",
         ));
     };
+    payload_obj.remove("instructionText");
     let agents_path = preferred_agents_path(workspace_root)
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "-".to_string());
@@ -1044,6 +1047,7 @@ fn handle_catdesk_instruction(
     mode: Mode,
     tool_mode: ToolMode,
 ) -> JsonRpcResponse {
+    let instruction_text = catdesk_instruction_text(workspace_root, mode, tool_mode);
     let structured = match catdesk_instruction_structured(workspace_root, mode, tool_mode) {
         Ok(value) => value,
         Err(error) => {
@@ -1064,7 +1068,7 @@ fn handle_catdesk_instruction(
     };
     let mut response = tool_success_response_with_structured(
         req,
-        catdesk_instruction_text(workspace_root, mode, tool_mode),
+        instruction_text,
         structured,
     );
     if let Some(result) = response.result.as_mut() {
@@ -2595,7 +2599,10 @@ mod tests {
             structured.get("toolName").and_then(Value::as_str),
             Some("catdesk_instruction")
         );
-        assert!(structured.get("instructionText").is_none());
+        assert!(structured
+            .get("instructionText")
+            .and_then(Value::as_str)
+            .is_some());
         assert!(structured.get("workspacePath").is_none());
         assert!(structured.get("agentsPath").is_none());
         assert!(structured.get("configPath").is_none());
