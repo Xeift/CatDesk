@@ -1,6 +1,6 @@
 # CatDesk
 
-An open-source tool that turns ChatGPT Web into a coding agent. No API, no Codex. A ChatGPT Plus subscription is enough. Just use your 3,000 weekly Thinking messages in ChatGPT Web.
+An open-source tool that turns ChatGPT Web into a coding agent. No harness, no reverse engineering, no API, no Codex. A ChatGPT Plus subscription is enough.
 
 # Disclaimer
 
@@ -8,16 +8,27 @@ This is an independent open-source project and is not affiliated with or endorse
 
 # Why CatDesk?
 
-Codex has a very generous weekly quota (2x usage + reset usage frequently) compared to Antigravity and Claude Code (3 Opus prompts then 5h quota is gone lol), that's why I love OpenAI so much. However, the quota runs out very quickly if you work on a large project. Most people with a Plus subscription do not use even 10% of their weekly thinking messages.
+Codex has a very generous weekly quota (2x usage + reset usage frequently) compared to Antigravity and Claude Code (3 Opus prompts then 5h quota is gone lol), that's why I love OpenAI so much.
 
-## So why not use your 3,000 weekly messages for coding?
+<p align="center">
+  <img src="docs/images/codex_2x_usage.png" alt="Codex reset usage frequently🙏" width="700"><br>
+  <em>Codex reset usage frequently🙏</em>
+</p>
+
+However, the quota runs out very quickly if you work on a large project.
+
+<p align="center">
+  <img src="docs/images/no_remaining_usage.png" alt="I used up my Codex quota on the first day after it reset" width="700"><br>
+  <em>I used up my Codex quota on the first day after it reset</em>
+</p>
+
+Then you need to wait another 7 days. What are you going to do for the rest of the week?
+
+Here's the solution: most people with a Plus subscription do not use even 10% of their weekly thinking messages.
+
+## **_So why not use your 3,000 weekly messages for coding?_**
 
 That's the idea behind CatDesk! It gives ChatGPT Web tools like `write_file` and `run_commands` to edit files on your computer.
-
-# Who needs this?
-
-- People who used up their Codex quota on the first day after it reset (me🥺)
-- People who are working on web development and crawlers. (CatDesk enables ChatGPT Web to read elements and control your browser tab through chrome-devtools-mcp integration.)
 
 # How does this work?
 
@@ -43,6 +54,11 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 | Usage | 3,000 messages/week                              | Generous weekly quota   | Pay as you go        |
 | Pros  | Stable, no extra fee, and nearly unlimited quota | Stable and no extra fee | Stable               |
 | Cons  | Not as smooth as native Codex                    | Runs out very quickly   | Tokens are expensive |
+
+# Who needs this?
+
+- People who used up their Codex quota on the first day after it reset (me🥺)
+- People who are working on web development and crawlers. (CatDesk enables ChatGPT Web to read elements and control your browser tab through chrome-devtools-mcp integration.)
 
 # Quickstart
 
@@ -129,11 +145,35 @@ According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and
 
 ### Can I turn off the red CSP button?
 
+<p align="center">
+  <img src="docs/images/csp_button.png" alt="The red CSP button shows in every tool call" width="100"><br>
+  <em>The red CSP button shows in every tool call</em>
+</p>
+
 No. That button is not part of the widget, so CatDesk cannot control it. I agree it looks annoying, but there is nothing this project can do about it right now.
 
 ### Can I skip approval? Like `--yolo` or `--dangerously-skip-permissions`?
 
 No. This restriction comes from the ChatGPT Web side. There is not much CatDesk can do about it. They probably use an LLM or some internal policy layer to detect higher-risk operations and require manual approval. Sometimes it is annoying, but there is no good workaround right now.
+
+### I've already connected. Why do I need to connect again and again?
+
+There doesn't seem to be any obvious pattern for when the connector triggers `Connect`. I'm sure it's not triggered by the tool call count, but I don't know the exact reason.
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/images/connect1.png" alt="Connector asks to connect again" width="700"><br>
+      <em>Connector asks to connect again</em>
+    </td>
+    <td align="center">
+      <img src="docs/images/connect2.png" alt="Connector asks to connect again (After you click Continue)" width="700"><br>
+      <em>Connector asks to connect again (After you click Continue)</em>
+    </td>
+  </tr>
+</table>
+
+I know it’s annoying. I’m trying to find a solution now.
 
 ### Can CatDesk be used in other apps?
 
@@ -169,7 +209,7 @@ File tools use this directory as their base path, and paths outside the workspac
 
 ### Where to put my AGENTS.md?
 
-Put it in the workspace root. CatDesk reads `AGENTS.md` every time `catdesk_instruction` is called.
+Put it in the workspace root. If not set, will use `~/.codex/AGENTS.md`. CatDesk reads `AGENTS.md` every time `catdesk_instruction` is called.
 
 # Safety
 
@@ -193,6 +233,11 @@ https://xxxx.ngrok-free.app/Ab3kL9xQ2pTm7VhC/mcp
 The URL changes every time you start CatDesk (both `Public URL` and `Random path`). ChatGPT Web does not provide an edit button for Custom Connectors, so you need to delete the old connector and create a new one with the new URL.
 
 # About Binagotchy
+
+<p align="center">
+  <img src="docs/images/binagotchy.gif" alt="Binagotchy!" width="700"><br>
+  <em>Binagotchy!</em>
+</p>
 
 The character is a cute shark-cat! I actually made this before CatDesk and decided to put it in the project.
 
