@@ -26,7 +26,7 @@ Then you need to wait another 7 days. What are you going to do for the rest of t
 
 Here's the solution: most people with a Plus subscription do not use even 10% of their weekly thinking messages.
 
-## **_So why not use your 3,000 weekly messages for coding?_**
+**_So why not use your 3,000 weekly messages for coding?_**
 
 That's the idea behind CatDesk! It gives ChatGPT Web tools like `write_file` and `run_commands` to edit files on your computer.
 
@@ -67,13 +67,10 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 > Run it inside a VM or container (DevContainer is a good option).
 > Treat it like OpenClaw, keep it containerized and isolated.
 
-1. Install prerequisites.
-   You do not need a local `ngrok` binary in your `PATH`. CatDesk opens the tunnel itself through the embedded Rust ngrok SDK in [`start()`](/home/xeift/Desktop/CatDesk/src/ngrok.rs#L5). On first launch, CatDesk prompts for your ngrok token in the TUI and saves it to `~/.catdesk/config.toml`.
-
-2. Download the CatDesk binary for your platform.
+1. Download the CatDesk binary for your platform.
    Put it anywhere you want. If your platform requires it, make the binary executable first.
 
-3. Run the CatDesk binary.
+2. Run the CatDesk binary.
 
    ```bash
    ./catdesk
@@ -81,18 +78,14 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 
    By default, CatDesk listens on port `3200`, as defined in [`main()`](/home/xeift/Desktop/MCP3000/src/main.rs#L325). You can override it with `PORT`. The workspace root defaults to the current working directory and can be overridden with `WORKSPACE_ROOT`, also in [`main()`](/home/xeift/Desktop/MCP3000/src/main.rs#L325).
 
-4. Wait for the TUI to show the MCP Server URL.
+3. Wait for the TUI to show the MCP Server URL.
    CatDesk starts the local server and ngrok automatically in [`start_services()`](/home/xeift/Desktop/MCP3000/src/main.rs#L1425). The MCP URL is shown in the UI at [`draw_ui()`](/home/xeift/Desktop/MCP3000/src/main.rs#L1748), and the actual value includes a random runtime slug, generated in [`generate_mcp_slug()`](/home/xeift/Desktop/MCP3000/src/state.rs#L501). Because ngrok URLs and the slug both change between runs, you should treat the URL as ephemeral.
 
-5. Open ChatGPT connector settings.
+4. Open [ChatGPT connector settings](https://chatgpt.com/apps#settings/Connectors).
 
-   `https://chatgpt.com/apps#settings/Connectors`
+5. Click `Create app`.
 
-   This matches the built-in guide rendered in [`guide_lines`](/home/xeift/Desktop/MCP3000/src/main.rs#L2150).
-
-6. Click `Create app`.
-
-7. Fill in the connector form.
+6. Fill in the connector form.
    Use:
    - Name: `CatDesk` or any name you like
    - MCP Server URL: the full URL shown by CatDesk
@@ -100,21 +93,21 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 
    These values come directly from the in-app guide in [`guide_lines`](/home/xeift/Desktop/MCP3000/src/main.rs#L2150).
 
-8. Click `I understand and want to continue`.
+7. Click `I understand and want to continue`.
 
-9. Click `Create`.
+8. Click `Create`.
 
-10. Add this to your connector system instruction:
+9. Add this to your ChatGPT system instruction:
 
 ```text
 Always call catdesk_instruction after list_resources, and follow the instructions it contains.
 ```
 
-11. Start using the connector from ChatGPT Web.
+10. Start using the connector from ChatGPT Web.
 
-# Built-in tools
+# Tools
 
-CatDesk's built-in local tools are:
+CatDesk's tools are:
 
 | Tool                  | Type  | What it does                                                                                               |
 | --------------------- | ----- | ---------------------------------------------------------------------------------------------------------- |
@@ -152,9 +145,25 @@ According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and
 
 No. That button is not part of the widget, so CatDesk cannot control it. I agree it looks annoying, but there is nothing this project can do about it right now.
 
-### Can I skip approval? Like `--yolo` or `--dangerously-skip-permissions`?
+### Can I skip approval, like with `--yolo` or `--dangerously-skip-permissions`?
 
-No. This restriction comes from the ChatGPT Web side. There is not much CatDesk can do about it. They probably use an LLM or some internal policy layer to detect higher-risk operations and require manual approval. Sometimes it is annoying, but there is no good workaround right now.
+<p align="center">
+  <img src="docs/images/approval.png" alt="Approval required for sensitive operations" width="500"><br>
+  <em>Approval required for sensitive operations</em>
+</p>
+
+No. This restriction comes from the ChatGPT Web side. There is not much CatDesk can do about it. ChatGPT Web probably uses an LLM or some internal policy layer to detect high-risk operations and require manual approval. Sensitive filenames and sensitive content can both trigger manual approval. It is not only about which tool is being used. For example:
+
+> write_file("api_key.txt", content: "")<br>
+> ⚠️ Approval required
+
+> write_file("Xeift.txt", content: "api_key")<br>
+> ⚠️ Approval required
+
+> write_file("i_luv_catgirl.txt", content: "")<br>
+> ✅ No approval required
+
+Sometimes this is annoying, but there is no good workaround right now. This is one of the reasons I say CatDesk is _not as smooth as native Codex_.
 
 ### I've already connected. Why do I need to connect again and again?
 
@@ -235,7 +244,7 @@ The URL changes every time you start CatDesk (both `Public URL` and `Random path
 # About Binagotchy
 
 <p align="center">
-  <img src="docs/images/binagotchy.gif" alt="Binagotchy!" width="700"><br>
+  <img src="docs/images/binagotchy.gif" alt="Binagotchy!" width="500"><br>
   <em>Binagotchy!</em>
 </p>
 
