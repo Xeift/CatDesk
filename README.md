@@ -1,6 +1,6 @@
 # CatDesk
 
-An open-source tool that turns ChatGPT Web into a coding agent. No harness, no reverse engineering, no API, no Codex. A ChatGPT Plus subscription is enough.
+An open-source tool that turns ChatGPT Web into a coding agent. No reverse engineering, no API, no Codex. A ChatGPT Plus subscription is enough.
 
 # Disclaimer
 
@@ -49,11 +49,13 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 
 # Differences between ChatGPT + CatDesk, Codex, and the API (let's say Plus plan)
 
-|       | ChatGPT + CatDesk                                | Codex                   | OpenAI API           |
-| ----- | ------------------------------------------------ | ----------------------- | -------------------- |
-| Usage | 3,000 messages/week                              | Generous weekly quota   | Pay as you go        |
-| Pros  | Stable, no extra fee, and nearly unlimited quota | Stable and no extra fee | Stable               |
-| Cons  | Not as smooth as native Codex                    | Runs out very quickly   | Tokens are expensive |
+|       | ChatGPT + CatDesk                                  | Codex                   | OpenAI API           |
+| ----- | -------------------------------------------------- | ----------------------- | -------------------- |
+| Usage | 3,000 messages/week                                | Generous weekly quota   | Pay as you go        |
+| Pros  | Stable, no extra fee, and nearly unlimited\* quota | Stable and no extra fee | Stable               |
+| Cons  | Not as smooth as native Codex                      | Runs out very quickly   | Tokens are expensive |
+
+\*Let's say you sleep 6 hours a day and use CatDesk every day. In that case, you can send 3,000 / (24 - 6) / 7 = 23.8 messages per hour. Since thinking and tool calls take time, it is very difficult to use up your weekly 3,000 message limit.
 
 # Who needs this?
 
