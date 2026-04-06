@@ -218,6 +218,10 @@ const FLOW_BOOTSTRAP_PHASE_1_STEPS: &[FlowBootstrapStep] = &[
         label: "initialize#2",
     },
     FlowBootstrapStep {
+        event: "notifications/initialized",
+        label: "initialized",
+    },
+    FlowBootstrapStep {
         event: "tools/list",
         label: "tools/list",
     },
@@ -233,6 +237,10 @@ const FLOW_BOOTSTRAP_PHASE_2_STEPS: &[FlowBootstrapStep] = &[
         label: "initialize#2",
     },
     FlowBootstrapStep {
+        event: "notifications/initialized",
+        label: "initialized",
+    },
+    FlowBootstrapStep {
         event: "resources/list",
         label: "resources/list",
     },
@@ -246,6 +254,10 @@ const FLOW_BOOTSTRAP_PHASE_3_STEPS: &[FlowBootstrapStep] = &[
     FlowBootstrapStep {
         event: "initialize",
         label: "initialize#2",
+    },
+    FlowBootstrapStep {
+        event: "notifications/initialized",
+        label: "initialized",
     },
     FlowBootstrapStep {
         event: "resources/read",
@@ -265,6 +277,10 @@ const FLOW_BOOTSTRAP_PHASE_4_STEPS: &[FlowBootstrapStep] = &[
     FlowBootstrapStep {
         event: "initialize",
         label: "initialize#2",
+    },
+    FlowBootstrapStep {
+        event: "notifications/initialized",
+        label: "initialized",
     },
     FlowBootstrapStep {
         event: "tools/list",
@@ -288,6 +304,10 @@ const FLOW_BOOTSTRAP_PHASE_5_STEPS: &[FlowBootstrapStep] = &[
     FlowBootstrapStep {
         event: "initialize",
         label: "initialize#2",
+    },
+    FlowBootstrapStep {
+        event: "notifications/initialized",
+        label: "initialized",
     },
     FlowBootstrapStep {
         event: "resources/list",
@@ -577,9 +597,14 @@ fn advance_bootstrap_progress(
                 let Some(step) = flow_bootstrap_step(next_index) else {
                     break;
                 };
-                if step.event == event {
-                    pending_steps.push_back(next_index);
+                if step.event != event {
+                    continue;
                 }
+                if step.event == "notifications/initialized" {
+                    *completed_steps = next_index + 1;
+                    continue;
+                }
+                pending_steps.push_back(next_index);
             }
         }
         FlowDirection::Backward => {
