@@ -120,7 +120,7 @@ pub fn contains_catdesk_co_author_marker(command: &str) -> bool {
 pub fn command_contains_git_commit(command: &str) -> bool {
     shell_segments(command)
         .iter()
-        .any(|segment| git_commit_insert_pos(segment).is_some())
+        .any(|segment| segment_contains_git_commit(segment))
 }
 
 pub fn inject_catdesk_co_author_trailer(command: &str) -> String {
@@ -131,16 +131,38 @@ pub fn inject_catdesk_co_author_trailer(command: &str) -> String {
     rewritten
 }
 
+fn segment_contains_git_commit(segment: &str) -> bool {
+    if git_commit_insert_pos(segment).is_some() {
+        return true;
+    }
+    nested_shell_command(segment)
+        .map(|payload| command_contains_git_commit(&payload.command))
+        .unwrap_or(false)
+}
+
 fn inject_trailer_into_segment(segment: &str) -> String {
-    let Some(insert_pos) = git_commit_insert_pos(segment) else {
+    if let Some(insert_pos) = git_commit_insert_pos(segment) {
+        let mut rewritten = String::with_capacity(segment.len() + 48);
+        rewritten.push_str(&segment[..insert_pos]);
+        rewritten.push_str(" --trailer '");
+        rewritten.push_str(CATDESK_CO_AUTHOR_TRAILER);
+        rewritten.push('\'');
+        rewritten.push_str(&segment[insert_pos..]);
+        return rewritten;
+    }
+
+    let Some(payload) = nested_shell_command(segment) else {
         return segment.to_string();
     };
-    let mut rewritten = String::with_capacity(segment.len() + 48);
-    rewritten.push_str(&segment[..insert_pos]);
-    rewritten.push_str(" --trailer '");
-    rewritten.push_str(CATDESK_CO_AUTHOR_TRAILER);
-    rewritten.push('\'');
-    rewritten.push_str(&segment[insert_pos..]);
+    let rewritten_command = inject_catdesk_co_author_trailer(&payload.command);
+    if rewritten_command == payload.command {
+        return segment.to_string();
+    }
+
+    let mut rewritten = String::with_capacity(segment.len() + 64);
+    rewritten.push_str(&segment[..payload.start]);
+    rewritten.push_str(&shell_single_quote(&rewritten_command));
+    rewritten.push_str(&segment[payload.end..]);
     rewritten
 }
 
@@ -149,13 +171,21 @@ fn git_commit_insert_pos(segment: &str) -> Option<usize> {
     let git_idx = command_start_git_index(&words)?;
     let commit_word = words[git_idx + 1..]
         .iter()
-        .find(|word| word.text == "commit")?;
+        .find(|word| word.lower == "commit")?;
     Some(commit_word.end)
 }
 
 #[derive(Clone)]
 struct ShellWord {
     text: String,
+    lower: String,
+    start: usize,
+    end: usize,
+}
+
+struct NestedShellCommand {
+    command: String,
+    start: usize,
     end: usize,
 }
 
@@ -198,9 +228,11 @@ fn shell_words(segment: &str) -> Vec<ShellWord> {
             continue;
         }
         if !in_single && !in_double && ch.is_whitespace() {
-            if start.is_some() {
+            if let Some(word_start) = start {
                 words.push(ShellWord {
-                    text: current.to_ascii_lowercase(),
+                    lower: current.to_ascii_lowercase(),
+                    text: current.clone(),
+                    start: word_start,
                     end: idx,
                 });
                 current.clear();
@@ -214,9 +246,11 @@ fn shell_words(segment: &str) -> Vec<ShellWord> {
         current.push(ch);
     }
 
-    if start.is_some() {
+    if let Some(word_start) = start {
         words.push(ShellWord {
-            text: current.to_ascii_lowercase(),
+            lower: current.to_ascii_lowercase(),
+            text: current.clone(),
+            start: word_start,
             end: segment.len(),
         });
     }
@@ -224,14 +258,37 @@ fn shell_words(segment: &str) -> Vec<ShellWord> {
     words
 }
 
+fn nested_shell_command(segment: &str) -> Option<NestedShellCommand> {
+    let words = shell_words(segment);
+    let shell_idx = command_start_shell_index(&words)?;
+    let command_idx = shell_command_arg_index(&words, shell_idx)?;
+    let payload = words.get(command_idx)?;
+    Some(NestedShellCommand {
+        command: payload.text.clone(),
+        start: payload.start,
+        end: payload.end,
+    })
+}
+
 fn command_start_git_index(words: &[ShellWord]) -> Option<usize> {
+    command_start_index(words, |word| word == "git")
+}
+
+fn command_start_shell_index(words: &[ShellWord]) -> Option<usize> {
+    command_start_index(words, is_shell_command)
+}
+
+fn command_start_index<F>(words: &[ShellWord], matches_command: F) -> Option<usize>
+where
+    F: Fn(&str) -> bool,
+{
     let mut idx = 0usize;
     while idx < words.len() && looks_like_env_assignment(&words[idx].text) {
         idx += 1;
     }
     loop {
         let word = words.get(idx)?;
-        match word.text.as_str() {
+        match word.lower.as_str() {
             "sudo" => {
                 idx += 1;
                 while idx < words.len() && words[idx].text.starts_with('-') {
@@ -250,7 +307,39 @@ fn command_start_git_index(words: &[ShellWord]) -> Option<usize> {
             _ => break,
         }
     }
-    words.get(idx).filter(|word| word.text == "git").map(|_| idx)
+    words
+        .get(idx)
+        .filter(|word| matches_command(&word.lower))
+        .map(|_| idx)
+}
+
+fn is_shell_command(word: &str) -> bool {
+    matches!(word.rsplit('/').next().unwrap_or(word), "bash" | "sh" | "zsh" | "dash")
+}
+
+fn shell_command_arg_index(words: &[ShellWord], shell_idx: usize) -> Option<usize> {
+    let mut idx = shell_idx + 1;
+    while idx < words.len() {
+        let word = &words[idx].lower;
+        if word == "--" {
+            return words.get(idx + 1).map(|_| idx + 1);
+        }
+        if word == "-c" {
+            return words.get(idx + 1).map(|_| idx + 1);
+        }
+        if word.starts_with('-')
+            && word.len() > 2
+            && word[1..].chars().all(|ch| matches!(ch, 'c' | 'l'))
+            && word[1..].contains('c')
+        {
+            return words.get(idx + 1).map(|_| idx + 1);
+        }
+        if !word.starts_with('-') {
+            return None;
+        }
+        idx += 1;
+    }
+    None
 }
 
 fn looks_like_env_assignment(word: &str) -> bool {
@@ -261,6 +350,20 @@ fn looks_like_env_assignment(word: &str) -> bool {
         && name
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn shell_single_quote(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for ch in text.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\"'\"'");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn shell_segments(command: &str) -> Vec<String> {
@@ -356,9 +459,21 @@ mod tests {
     }
 
     #[test]
+    fn inject_catdesk_co_author_trailer_rewrites_nested_shell_commit_commands() {
+        let rewritten = inject_catdesk_co_author_trailer(
+            "bash -lc 'git add src/widget/catdesk_dashboard.html && git commit -m \"Update catdesk widget meta handling\"'",
+        );
+        assert_eq!(
+            rewritten,
+            "bash -lc 'git add src/widget/catdesk_dashboard.html && git commit --trailer '\"'\"'Co-Authored-By: CatDesk'\"'\"' -m \"Update catdesk widget meta handling\"'"
+        );
+    }
+
+    #[test]
     fn command_contains_git_commit_only_matches_real_commit_tokens() {
         assert!(command_contains_git_commit("git commit -m \"x\""));
         assert!(command_contains_git_commit("FOO=1 git -C repo commit -m \"x\""));
+        assert!(command_contains_git_commit("bash -lc 'git commit -m \"x\"'"));
         assert!(!command_contains_git_commit("echo git commit"));
     }
 }
