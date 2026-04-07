@@ -2156,124 +2156,49 @@
           return next;
         }
 
-        function extractStructured(payload) {
-          if (!payload || typeof payload !== "object") return null;
-          var finalSummaryOnly =
-            WIDGET_RESOURCE_URI === FINAL_SUMMARY_TEMPLATE_URI;
-          var finalSummaryFallback = null;
-          var structuredFallback = null;
+        function inspectPayloadDiagnostics(toolResponseMetadata) {
+          var widgetPayload =
+            toolResponseMetadata &&
+            typeof toolResponseMetadata === "object" &&
+            toolResponseMetadata[WIDGET_PAYLOAD_META_KEY] &&
+            typeof toolResponseMetadata[WIDGET_PAYLOAD_META_KEY] === "object"
+              ? toolResponseMetadata[WIDGET_PAYLOAD_META_KEY]
+              : null;
+          var status = "no_tool_response_metadata";
+          if (toolResponseMetadata && typeof toolResponseMetadata === "object") {
+            status = widgetPayload
+              ? "pure_meta_connected"
+              : "tool_response_metadata_missing_widget_payload";
+          }
+          return {
+            status: status,
+            hasToolResponseMetadata:
+              !!toolResponseMetadata && typeof toolResponseMetadata === "object",
+            toolResponseMetadataKeys: Object.keys(toolResponseMetadata || {}),
+            hasWidgetPayload: !!widgetPayload,
+            widgetPayloadSchema: asString(widgetPayload && widgetPayload.schema, ""),
+            widgetPayloadProbe: asString(
+              widgetPayload && widgetPayload.widgetPayloadProbe,
+              "",
+            ),
+          };
+        }
 
-          function extractWidgetPayload(current) {
-            if (
-              current[WIDGET_PAYLOAD_META_KEY] &&
-              typeof current[WIDGET_PAYLOAD_META_KEY] === "object" &&
-              current[WIDGET_PAYLOAD_META_KEY].schema === "catdesk.review.v1"
-            ) {
-              return current[WIDGET_PAYLOAD_META_KEY];
-            }
-            if (
-              current._meta &&
-              typeof current._meta === "object" &&
-              current._meta[WIDGET_PAYLOAD_META_KEY] &&
-              typeof current._meta[WIDGET_PAYLOAD_META_KEY] === "object" &&
-              current._meta[WIDGET_PAYLOAD_META_KEY].schema ===
-                "catdesk.review.v1"
-            ) {
-              return current._meta[WIDGET_PAYLOAD_META_KEY];
-            }
+        function extractStructured(toolResponseMetadata) {
+          var widgetPayload =
+            toolResponseMetadata &&
+            typeof toolResponseMetadata === "object" &&
+            toolResponseMetadata[WIDGET_PAYLOAD_META_KEY] &&
+            typeof toolResponseMetadata[WIDGET_PAYLOAD_META_KEY] === "object"
+              ? toolResponseMetadata[WIDGET_PAYLOAD_META_KEY]
+              : null;
+          if (
+            !widgetPayload ||
+            widgetPayload.schema !== "catdesk.review.v1"
+          ) {
             return null;
           }
-
-          function isFinalSummaryTransport(current) {
-            return (
-              current["openai/outputTemplate"] === FINAL_SUMMARY_TEMPLATE_URI ||
-              (current._meta &&
-                typeof current._meta === "object" &&
-                (current._meta["openai/outputTemplate"] ===
-                  FINAL_SUMMARY_TEMPLATE_URI ||
-                  (current._meta.ui &&
-                    typeof current._meta.ui === "object" &&
-                    current._meta.ui.resourceUri ===
-                      FINAL_SUMMARY_TEMPLATE_URI))) ||
-              (current.ui &&
-                typeof current.ui === "object" &&
-                current.ui.resourceUri === FINAL_SUMMARY_TEMPLATE_URI)
-            );
-          }
-
-          var queue = [payload];
-          var seen = [];
-          var maxNodes = 96;
-          function pushCandidate(candidate) {
-            if (!candidate || typeof candidate !== "object") return;
-            if (seen.indexOf(candidate) >= 0) return;
-            if (seen.length >= maxNodes) return;
-            seen.push(candidate);
-            queue.push(candidate);
-          }
-
-          while (queue.length > 0) {
-            var current = queue.shift();
-            if (!current || typeof current !== "object") continue;
-
-            var widgetPayload = extractWidgetPayload(current);
-            if (widgetPayload) {
-              return widgetPayload;
-            }
-            if (
-              current.structuredContent &&
-              typeof current.structuredContent === "object"
-            ) {
-              var structuredContent = current.structuredContent;
-              var structuredIsFinalSummary =
-                structuredContent.schema === "catdesk.review.v1" &&
-                structuredContent.panelMode === "final_review";
-              if (
-                finalSummaryOnly &&
-                (structuredIsFinalSummary || isFinalSummaryTransport(current))
-              ) {
-                if (!finalSummaryFallback)
-                  finalSummaryFallback = current.structuredContent;
-              } else if (!finalSummaryOnly && !structuredFallback) {
-                structuredFallback = current.structuredContent;
-              }
-            }
-            if (current.schema === "catdesk.review.v1") {
-              var currentIsFinalSummary = current.panelMode === "final_review";
-              if (
-                finalSummaryOnly &&
-                (currentIsFinalSummary || isFinalSummaryTransport(current))
-              ) {
-                if (!finalSummaryFallback) finalSummaryFallback = current;
-              } else if (!finalSummaryOnly && !structuredFallback) {
-                structuredFallback = current;
-              }
-            }
-
-            pushCandidate(current.responseMetadata);
-            pushCandidate(current.toolResponseMetadata);
-            pushCandidate(current._meta);
-            pushCandidate(current.result);
-            pushCandidate(current.output);
-            pushCandidate(current.toolOutput);
-            pushCandidate(current.payload);
-            pushCandidate(current.params);
-            pushCandidate(current.data);
-            pushCandidate(current.response);
-            pushCandidate(current.message);
-
-            if (Array.isArray(current.contents)) {
-              for (var i = 0; i < current.contents.length; i += 1) {
-                pushCandidate(current.contents[i]);
-              }
-            }
-            if (Array.isArray(current.content)) {
-              for (var j = 0; j < current.content.length; j += 1) {
-                pushCandidate(current.content[j]);
-              }
-            }
-          }
-          return finalSummaryOnly ? finalSummaryFallback : structuredFallback;
+          return JSON.parse(JSON.stringify(widgetPayload));
         }
 
         function isDirectoryFile(file) {
@@ -4197,22 +4122,39 @@
           playLoadingTokenAnimation(root);
         }
 
-        function currentToolOutput() {
+        function currentToolResponseMetadata() {
           if (!window.openai) return null;
-          return window.openai.toolOutput || null;
+          return window.openai.toolResponseMetadata || null;
         }
 
-        function applyPayload(payload) {
+        function hasPureMetaPayload(toolResponseMetadata) {
+          return !!(
+            toolResponseMetadata &&
+            typeof toolResponseMetadata === "object" &&
+            toolResponseMetadata[WIDGET_PAYLOAD_META_KEY] &&
+            typeof toolResponseMetadata[WIDGET_PAYLOAD_META_KEY] === "object" &&
+            toolResponseMetadata[WIDGET_PAYLOAD_META_KEY].schema ===
+              "catdesk.review.v1"
+          );
+        }
+
+        function applyPayload(toolResponseMetadata) {
           var root = document.getElementById("root");
           if (!root) return false;
-          var structured = extractStructured(payload);
+          var diagnostics = inspectPayloadDiagnostics(toolResponseMetadata);
+          var structured = extractStructured(toolResponseMetadata);
           if (!structured) {
+            stopTokenRollAnimation();
+            stopInstructionMascotAnimation();
             return false;
           }
           var normalized = normalize(structured);
           if (!normalized) {
+            stopTokenRollAnimation();
+            stopInstructionMascotAnimation();
             return false;
           }
+          normalized.payloadDiagnostics = diagnostics;
           if (
             normalized.panelMode === "tool_call" &&
             !normalized.hasChanges &&
@@ -4225,6 +4167,7 @@
             normalized.toolCallCount <= 0
           ) {
             stopTokenRollAnimation();
+            stopInstructionMascotAnimation();
             root.innerHTML = "";
             return true;
           }
@@ -4237,11 +4180,10 @@
           if (event.source !== window.parent) return;
           var message = event.data;
           if (!message || typeof message !== "object") return;
-          if (
-            message.method === "ui/initialize" ||
-            message.method === "ui/notifications/tool-result"
-          ) {
-            applyPayload(message.params || {});
+          if (message.method === "ui/notifications/tool-result") {
+            var toolResponseMetadata = currentToolResponseMetadata();
+            if (!hasPureMetaPayload(toolResponseMetadata)) return;
+            applyPayload(toolResponseMetadata);
           }
         });
 
@@ -4250,19 +4192,25 @@
           function (event) {
             var globals = event && event.detail ? event.detail.globals : null;
             if (globals) {
-              applyPayload(globals);
+              var globalsToolResponseMetadata =
+                globals.toolResponseMetadata || null;
+              if (hasPureMetaPayload(globalsToolResponseMetadata)) {
+                applyPayload(globalsToolResponseMetadata);
+              }
               return;
             }
-            var toolOutput = window.openai && window.openai.toolOutput;
-            if (toolOutput) applyPayload(toolOutput);
+            var toolResponseMetadata = currentToolResponseMetadata();
+            if (hasPureMetaPayload(toolResponseMetadata)) {
+              applyPayload(toolResponseMetadata);
+            }
           },
           { passive: true },
         );
 
         renderLoading("Waiting for tool output...");
-        var initialPayload = currentToolOutput();
-        if (initialPayload) {
-          applyPayload(initialPayload);
+        var initialToolResponseMetadata = currentToolResponseMetadata();
+        if (hasPureMetaPayload(initialToolResponseMetadata)) {
+          applyPayload(initialToolResponseMetadata);
         }
       })();
     </script>
