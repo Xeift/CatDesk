@@ -431,34 +431,43 @@ fn build_animation_snapshot(app: &AppState) -> Vec<String> {
     rows
 }
 
-fn clipboard_copy(text: &str) {
+#[cfg(target_os = "macos")]
+fn clipboard_copy(text: &str) -> bool {
+    let mut child = match std::process::Command::new("/usr/bin/pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.wait();
+        return false;
+    };
+
+    if stdin.write_all(text.as_bytes()).is_err() {
+        drop(stdin);
+        let _ = child.wait();
+        return false;
+    }
+
+    drop(stdin);
+
+    match child.wait() {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clipboard_copy(text: &str) -> bool {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     let seq = format!("\x1b]52;c;{encoded}\x07");
-    let _ = stdout().write_all(seq.as_bytes());
-    let _ = stdout().flush();
-    let text_owned = text.to_string();
-    std::thread::spawn(move || {
-        for (cmd, args) in [
-            ("wl-copy", vec![]),
-            ("xclip", vec!["-selection", "clipboard"]),
-            ("xsel", vec!["--clipboard", "--input"]),
-        ] {
-            if let Ok(mut child) = std::process::Command::new(cmd)
-                .args(&args)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                if let Some(ref mut stdin) = child.stdin {
-                    let _ = stdin.write_all(text_owned.as_bytes());
-                }
-                let _ = child.wait();
-                return;
-            }
-        }
-    });
+    stdout().write_all(seq.as_bytes()).is_ok() && stdout().flush().is_ok()
 }
 
 fn drain_server_ui_events(app: &mut AppState, ui_events: &mut UnboundedReceiver<ServerUiEvent>) {
@@ -2130,9 +2139,13 @@ async fn run_tui(
                                 if start != end {
                                     let text = extract_from_screen(&screen_lines, start, end);
                                     if !text.is_empty() {
-                                        clipboard_copy(&text);
+                                        let message = if clipboard_copy(&text) {
+                                            "Copied!"
+                                        } else {
+                                            "Copy failed"
+                                        };
                                         toast = Some((
-                                            "Copied!",
+                                            message,
                                             (mouse.column, mouse.row),
                                             Instant::now(),
                                         ));
