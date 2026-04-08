@@ -631,6 +631,15 @@ impl AppState {
         Self::from_config_path(port, workspace_root, config_path)
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        port: u16,
+        workspace_root: String,
+        config_path: PathBuf,
+    ) -> std::io::Result<Self> {
+        Self::from_config_path(port, workspace_root, config_path)
+    }
+
     fn from_config_path(
         port: u16,
         workspace_root: String,
@@ -1017,7 +1026,10 @@ toolCallCount = 0
         )
         .expect("load app state");
 
-        assert_eq!(app.partner_binagotchy_seed.as_deref(), Some("00000000000000ff"));
+        assert_eq!(
+            app.partner_binagotchy_seed.as_deref(),
+            Some("00000000000000ff")
+        );
         assert_eq!(app.mascot_seed, 0xff);
 
         let _ = std::fs::remove_file(config_path);

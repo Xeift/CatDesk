@@ -56,10 +56,7 @@ fn with_binagotchy_action_cors(
 ) -> axum::http::response::Builder {
     builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
     builder = builder.header(header::ACCESS_CONTROL_ALLOW_METHODS, "POST, OPTIONS");
-    builder = builder.header(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        "content-type",
-    );
+    builder = builder.header(header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type");
     builder
 }
 
@@ -179,8 +176,11 @@ fn tool_name_from_jsonrpc_request(req: &JsonRpcRequest) -> &str {
 
 fn extract_turn_token_usage(result: Option<&Value>) -> Option<(u64, u64)> {
     let usage = result
-        .and_then(|value| value.get("structuredContent"))
-        .and_then(|value| value.get("turnTokenUsage"))?;
+        .and_then(|value| value.get("_meta"))
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+        .and_then(Value::as_object)
+        .and_then(|payload| payload.get("turnTokenUsage"))?;
     let input_tokens = usage.get("inputTokens").and_then(Value::as_u64)?;
     let output_tokens = usage.get("outputTokens").and_then(Value::as_u64)?;
     Some((input_tokens, output_tokens))
@@ -335,7 +335,10 @@ async fn post_binagotchy_partner(
     State(s): State<ServerState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response<Body> {
-    let Some(seed) = form.get("seed").map(|value| value.trim().to_ascii_lowercase()) else {
+    let Some(seed) = form
+        .get("seed")
+        .map(|value| value.trim().to_ascii_lowercase())
+    else {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -395,6 +398,57 @@ async fn post_binagotchy_partner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{AppState, Mode, ToolMode};
+    use axum::body::to_bytes;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::{Mutex, mpsc::unbounded_channel};
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{unique}"))
+    }
+
+    fn tool_call_body(name: &str, arguments: Value) -> Bytes {
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": "req-tool",
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": arguments,
+                }
+            }))
+            .expect("serialize tool call"),
+        )
+    }
+
+    #[test]
+    fn extract_turn_token_usage_reads_widget_payload_meta() {
+        let result = json!({
+            "structuredContent": {
+                "schema": "catdesk.review.v1"
+            },
+            "_meta": {
+                WIDGET_PAYLOAD_META_KEY: {
+                    "schema": "catdesk.review.v1",
+                    "turnTokenUsage": {
+                        "inputTokens": 11,
+                        "outputTokens": 22,
+                        "totalTokens": 33
+                    }
+                }
+            }
+        });
+
+        assert_eq!(extract_turn_token_usage(Some(&result)), Some((11, 22)));
+    }
 
     #[test]
     fn attach_history_usage_updates_widget_payload_meta() {
@@ -514,6 +568,103 @@ mod tests {
             card.get("setPartnerUrl").and_then(Value::as_str),
             Some("https://example.ngrok.app/binagotchy/partner")
         );
+    }
+
+    #[tokio::test]
+    async fn post_mcp_accumulates_usage_from_widget_payload_meta() {
+        let workspace_root = unique_temp_path("catdesk-post-mcp-workspace");
+        let config_root = unique_temp_path("catdesk-post-mcp-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+        std::fs::write(workspace_root.join("hello.txt"), "hello world\n").expect("write file");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            app: app_state.clone(),
+            devtools: None,
+            ui_events: ui_tx,
+        };
+
+        let session = Session::new();
+        let session_id = session.id.clone();
+        server_state
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "mcp-session-id",
+            session_id.parse().expect("parse session header"),
+        );
+
+        let response = post_mcp(
+            State(server_state),
+            headers,
+            tool_call_body("list_files", json!({ "path": "." })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let sse_text = String::from_utf8(body.to_vec()).expect("response body utf8");
+        let payload_line = sse_text
+            .lines()
+            .find(|line| line.starts_with("data: "))
+            .expect("missing sse data line");
+        let payload: Value = serde_json::from_str(
+            payload_line
+                .strip_prefix("data: ")
+                .expect("strip sse prefix"),
+        )
+        .expect("parse sse json");
+
+        let widget_payload = payload
+            .get("result")
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        let history_usage = widget_payload
+            .get("historyTurnTokenUsage")
+            .expect("missing history usage");
+        assert!(
+            history_usage
+                .get("totalTokens")
+                .and_then(Value::as_u64)
+                .expect("history total tokens")
+                > 0
+        );
+        assert_eq!(
+            widget_payload
+                .get("historyToolCallCount")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+
+        let app = app_state.lock().await;
+        assert!(app.usage_totals.total_tokens > 0);
+        assert_eq!(app.usage_totals.tool_call_count, 1);
+        assert!(matches!(app.mode, Mode::Both));
+        assert!(matches!(app.tool_mode, ToolMode::OneTool));
+        drop(app);
+
+        let _ = std::fs::remove_file(workspace_root.join("hello.txt"));
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
     }
 }
 
@@ -660,18 +811,17 @@ async fn post_mcp(
 
         let session = sessions.get_mut(&session_id).unwrap();
         let tool_name = tool_name_from_jsonrpc_request(&req).to_string();
-        if let Some(resp) =
-            mcp::handle_request(
-                &req,
-                session,
-                &workspace_root,
-                mascot_seed,
-                mode,
-                tool_mode,
-                set_catdesk_as_co_author,
-                &s.devtools,
-            )
-            .await
+        if let Some(resp) = mcp::handle_request(
+            &req,
+            session,
+            &workspace_root,
+            mascot_seed,
+            mode,
+            tool_mode,
+            set_catdesk_as_co_author,
+            &s.devtools,
+        )
+        .await
         {
             let mut resp = resp;
             if req.method == "tools/call" {
@@ -836,9 +986,9 @@ async fn delete_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Respons
             let _ = s
                 .ui_events
                 .send(ServerUiEvent::SetSessionCount(session_count));
-            let _ = s.ui_events.send(ServerUiEvent::BeginSessionFlowClose {
-                sid: sid.clone(),
-            });
+            let _ = s
+                .ui_events
+                .send(ServerUiEvent::BeginSessionFlowClose { sid: sid.clone() });
             if sessions.is_empty() {
                 let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(false));
             }

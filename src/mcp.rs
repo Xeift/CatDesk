@@ -234,20 +234,18 @@ pub async fn handle_request(
             None
         }
         "tools/list" => Some(handle_tools_list(req, mode, tool_mode, devtools).await),
-        "tools/call" => {
-            Some(
-                handle_tools_call(
-                    req,
-                    session,
-                    workspace_root,
-                    mode,
-                    tool_mode,
-                    set_catdesk_as_co_author,
-                    devtools,
-                )
-                .await,
+        "tools/call" => Some(
+            handle_tools_call(
+                req,
+                session,
+                workspace_root,
+                mode,
+                tool_mode,
+                set_catdesk_as_co_author,
+                devtools,
             )
-        }
+            .await,
+        ),
         "resources/list" => Some(handle_resources_list(req)),
         "resources/read" => Some(handle_resources_read(req, mascot_seed)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
@@ -789,12 +787,12 @@ async fn handle_run_command(
     };
 
     let effective_timeout = command::clamp_timeout(timeout_ms);
-    let effective_command =
-        if set_catdesk_as_co_author && command::command_contains_git_commit(cmd) {
-            command::inject_catdesk_co_author_trailer(cmd)
-        } else {
-            cmd.to_string()
-        };
+    let effective_command = if set_catdesk_as_co_author && command::command_contains_git_commit(cmd)
+    {
+        command::inject_catdesk_co_author_trailer(cmd)
+    } else {
+        cmd.to_string()
+    };
     let result = command::run_command(&effective_command, &cwd, effective_timeout).await;
     let output = command::format_result(&result);
 
@@ -1110,11 +1108,7 @@ fn handle_catdesk_instruction(
             );
         }
     };
-    let mut response = tool_success_response_with_structured(
-        req,
-        instruction_text,
-        structured,
-    );
+    let mut response = tool_success_response_with_structured(req, instruction_text, structured);
     if let Some(result) = response.result.as_mut() {
         attach_widget_payload_meta(result, widget_payload);
     }
@@ -1157,12 +1151,6 @@ fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
         return sanitized;
     };
     obj.remove("_meta");
-    if let Some(structured) = obj
-        .get_mut("structuredContent")
-        .and_then(Value::as_object_mut)
-    {
-        structured.remove("turnTokenUsage");
-    }
     sanitized
 }
 
@@ -1654,7 +1642,10 @@ fn build_auto_widget_structured_content(
 
     if tool_name == "read_file" {
         let arguments = tool_arguments(req);
-        let path_arg = arguments.get("path").and_then(Value::as_str).unwrap_or_default();
+        let path_arg = arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let parsed = parse_read_file_output(&extract_tool_result_text(result));
         return json!({
             "schema": "catdesk.review.v1",
@@ -2548,16 +2539,22 @@ world
 
         assert_eq!(parsed.path, "README.md");
         assert_eq!(parsed.bytes, 12);
-        assert_eq!(parsed.text, "hello
-world");
+        assert_eq!(
+            parsed.text,
+            "hello
+world"
+        );
         assert!(parsed.truncated);
     }
 
     #[test]
     fn read_file_uses_dedicated_structured_payload_with_full_text() {
-        let req = tool_call_request("read_file", json!({
-            "path": "README.md",
-        }));
+        let req = tool_call_request(
+            "read_file",
+            json!({
+                "path": "README.md",
+            }),
+        );
         let raw = json!({
             "content": [{
                 "type": "text",
@@ -2577,15 +2574,33 @@ hello world"
             .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
             .expect("missing widget payload");
 
-        assert_eq!(structured.get("title").and_then(Value::as_str), Some("Read File"));
-        assert_eq!(structured.get("toolName").and_then(Value::as_str), Some("read_file"));
-        assert_eq!(structured.get("path").and_then(Value::as_str), Some("README.md"));
+        assert_eq!(
+            structured.get("title").and_then(Value::as_str),
+            Some("Read File")
+        );
+        assert_eq!(
+            structured.get("toolName").and_then(Value::as_str),
+            Some("read_file")
+        );
+        assert_eq!(
+            structured.get("path").and_then(Value::as_str),
+            Some("README.md")
+        );
         assert_eq!(structured.get("bytes").and_then(Value::as_u64), Some(11));
-        assert_eq!(structured.get("text").and_then(Value::as_str), Some("hello world"));
-        assert_eq!(structured.get("truncated").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            structured.get("text").and_then(Value::as_str),
+            Some("hello world")
+        );
+        assert_eq!(
+            structured.get("truncated").and_then(Value::as_bool),
+            Some(false)
+        );
         assert!(structured.get("detail").is_none());
         assert!(structured.get("call").is_none());
-        assert_eq!(widget_payload.get("text").and_then(Value::as_str), Some("hello world"));
+        assert_eq!(
+            widget_payload.get("text").and_then(Value::as_str),
+            Some("hello world")
+        );
     }
 
     #[test]
@@ -2787,10 +2802,12 @@ hello world"
             structured.get("toolName").and_then(Value::as_str),
             Some("catdesk_instruction")
         );
-        assert!(structured
-            .get("instructionText")
-            .and_then(Value::as_str)
-            .is_some());
+        assert!(
+            structured
+                .get("instructionText")
+                .and_then(Value::as_str)
+                .is_some()
+        );
         assert!(structured.get("workspacePath").is_none());
         assert!(structured.get("agentsPath").is_none());
         assert!(structured.get("configPath").is_none());
