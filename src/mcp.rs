@@ -1582,6 +1582,25 @@ fn build_generic_widget_payload(
     Value::Object(payload)
 }
 
+fn build_widget_payload_error(
+    req: &JsonRpcRequest,
+    widget_context: Option<&AutoWidgetContext>,
+    message: String,
+) -> Value {
+    let tool_name = tool_name_from_request(req);
+    let mut payload = base_widget_payload(
+        "tool_call",
+        "Widget Payload Error",
+        "failed",
+        Some(&tool_name),
+    );
+    payload.insert("payloadKind".to_string(), json!("widget_payload_error"));
+    payload.insert("call".to_string(), json!(format!("call {}", tool_name)));
+    payload.insert("detail".to_string(), json!(message));
+    attach_widget_changed_files(&mut payload, widget_context);
+    Value::Object(payload)
+}
+
 fn build_auto_widget_payload(
     req: &JsonRpcRequest,
     result: &Value,
@@ -1593,14 +1612,42 @@ fn build_auto_widget_payload(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     match tool_name.as_str() {
-        "list_files" => build_list_files_widget_payload(result)
-            .unwrap_or_else(|| build_generic_widget_payload(req, result, widget_context, is_error)),
-        "search_text" => build_search_text_widget_payload(result, is_error)
-            .unwrap_or_else(|| build_generic_widget_payload(req, result, widget_context, is_error)),
-        "read_file" => build_read_file_widget_payload(result, is_error)
-            .unwrap_or_else(|| build_generic_widget_payload(req, result, widget_context, is_error)),
-        "run_command" => build_run_command_widget_payload(result, widget_context, is_error)
-            .unwrap_or_else(|| build_generic_widget_payload(req, result, widget_context, is_error)),
+        "list_files" => match build_list_files_widget_payload(result) {
+            Some(payload) => payload,
+            None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
+            None => build_widget_payload_error(
+                req,
+                widget_context,
+                "Failed to build list_files widget payload from structuredContent.".into(),
+            ),
+        },
+        "search_text" => match build_search_text_widget_payload(result, is_error) {
+            Some(payload) => payload,
+            None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
+            None => build_widget_payload_error(
+                req,
+                widget_context,
+                "Failed to build search_text widget payload from structuredContent.".into(),
+            ),
+        },
+        "read_file" => match build_read_file_widget_payload(result, is_error) {
+            Some(payload) => payload,
+            None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
+            None => build_widget_payload_error(
+                req,
+                widget_context,
+                "Failed to build read_file widget payload from structuredContent.".into(),
+            ),
+        },
+        "run_command" => match build_run_command_widget_payload(result, widget_context, is_error) {
+            Some(payload) => payload,
+            None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
+            None => build_widget_payload_error(
+                req,
+                widget_context,
+                "Failed to build run_command widget payload from structuredContent.".into(),
+            ),
+        },
         _ => build_generic_widget_payload(req, result, widget_context, is_error),
     }
 }
@@ -2623,6 +2670,55 @@ hello world"
         assert_eq!(
             widget_payload.get("text").and_then(Value::as_str),
             Some("hello world")
+        );
+    }
+
+    #[test]
+    fn read_file_missing_structured_field_emits_widget_payload_error_panel() {
+        let req = tool_call_request(
+            "read_file",
+            json!({
+                "path": "README.md",
+            }),
+        );
+        let raw = json!({
+            "structuredContent": {
+                "toolName": "read_file",
+                "path": "README.md",
+                "bytes": 11,
+                "truncated": false
+            },
+            "content": [{
+                "type": "text",
+                "text": "path: README.md\nbytes: 11"
+            }]
+        });
+
+        let result = enrich_tool_result(&req, raw, None);
+        let widget_payload = result
+            .get("_meta")
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+
+        assert_eq!(
+            widget_payload.get("payloadKind").and_then(Value::as_str),
+            Some("widget_payload_error")
+        );
+        assert_eq!(
+            widget_payload.get("title").and_then(Value::as_str),
+            Some("Widget Payload Error")
+        );
+        assert_eq!(
+            widget_payload.get("state").and_then(Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
+            widget_payload.get("call").and_then(Value::as_str),
+            Some("call read_file")
+        );
+        assert_eq!(
+            widget_payload.get("detail").and_then(Value::as_str),
+            Some("Failed to build read_file widget payload from structuredContent.")
         );
     }
 

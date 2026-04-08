@@ -1807,57 +1807,7 @@
     <div id="root"></div>
     <script>
       (function () {
-        var view = {
-          schema: "catdesk.review.v1",
-          panelMode: "tool_call",
-          title: "Changed Files",
-          state: "done",
-          changedFiles: [],
-          hasChanges: false,
-          toolName: "",
-          workspacePath: "",
-          agentsPath: "",
-          configPath: "",
-          binagotchyPath: "",
-          binagotchyApiBaseUrl: "",
-          partnerBinagotchySeed: "",
-          binagotchyCards: [],
-          mascotWidth: 0,
-          mascotHeight: 0,
-          mascotFrameMs: 50,
-          mascotSpiritHeroBackground: "",
-          mascotPalette: [],
-          mascotFrames: [],
-          mascotSequence: [],
-          command: "",
-          output: "",
-          searchQuery: "",
-          searchPath: "",
-          filesScanned: 0,
-          matchCount: 0,
-          searchResults: [],
-          searchTruncated: false,
-          listPath: "",
-          listItemCount: 0,
-          listDirectoryCount: 0,
-          listFileCount: 0,
-          listOtherCount: 0,
-          listEntries: [],
-          listTruncated: false,
-          listLimit: 0,
-          turnTokenUsage: {
-            inputTokens: 0,
-            outputTokens: 0,
-            totalTokens: 0,
-          },
-          toolCallCount: 0,
-          historyTurnTokenUsage: {
-            inputTokens: 0,
-            outputTokens: 0,
-            totalTokens: 0,
-          },
-          historyToolCallCount: 0,
-        };
+        var view = null;
 
         var tokenRollState = {
           signature: "",
@@ -1904,256 +1854,540 @@
           return Array.isArray(value) ? value : [];
         }
 
-        function normalizeStatus(value, fallback) {
-          var raw = asString(value, fallback)
-            .toLowerCase()
-            .replace(/\s+/g, "_");
-          if (raw === "ok") return "success";
-          if (raw === "completed") return "done";
-          return raw;
+        function isPlainObject(value) {
+          return !!value && typeof value === "object" && !Array.isArray(value);
         }
 
-        function normalizeMascotFrame(value) {
+        function cloneJsonValue(value) {
+          return JSON.parse(JSON.stringify(value));
+        }
+
+        function readString(value) {
+          return typeof value === "string" ? value : null;
+        }
+
+        function readNonEmptyString(value) {
           return typeof value === "string" && value.length > 0 ? value : null;
         }
 
-        function normalizeMascotSequenceStep(value) {
-          if (!value || typeof value !== "object") return null;
-          var frame = Number(value.frame);
-          var repeat = Number(value.repeat);
-          if (!Number.isFinite(frame) || frame < 0) return null;
-          if (!Number.isFinite(repeat) || repeat <= 0) return null;
+        function readBoolean(value) {
+          return typeof value === "boolean" ? value : null;
+        }
+
+        function readInteger(value) {
+          return typeof value === "number" && Number.isInteger(value)
+            ? value
+            : null;
+        }
+
+        function readNonNegativeInteger(value) {
+          var intValue = readInteger(value);
+          return intValue !== null && intValue >= 0 ? intValue : null;
+        }
+
+        function readPositiveInteger(value) {
+          var intValue = readInteger(value);
+          return intValue !== null && intValue > 0 ? intValue : null;
+        }
+
+        function readOptionalStringField(entry, key) {
+          if (!Object.prototype.hasOwnProperty.call(entry, key)) return "";
+          return readString(entry[key]);
+        }
+
+        function validateArrayEntries(value, validator) {
+          if (!Array.isArray(value)) return null;
+          return value.reduce(function (items, entry) {
+            if (items === null) return null;
+            var nextEntry = validator(entry);
+            if (nextEntry === null) return null;
+            items.push(nextEntry);
+            return items;
+          }, []);
+        }
+
+        function validateStringArray(value, allowEmpty) {
+          return validateArrayEntries(value, function (entry) {
+            var text = readString(entry);
+            if (text === null) return null;
+            if (!allowEmpty && text.length === 0) return null;
+            return text;
+          });
+        }
+
+        function validateFileStatus(value) {
+          return value === "added" || value === "deleted" || value === "modified"
+            ? value
+            : null;
+        }
+
+        function validateMascotFrame(value) {
+          return readNonEmptyString(value);
+        }
+
+        function validateMascotSequenceStep(value) {
+          if (!isPlainObject(value)) return null;
+          var frame = readNonNegativeInteger(value.frame);
+          var repeat = readPositiveInteger(value.repeat);
+          if (frame === null || repeat === null) return null;
           return {
-            frame: Math.floor(frame),
-            repeat: Math.floor(repeat),
+            frame: frame,
+            repeat: repeat,
           };
         }
 
-        function normalizeFile(entry) {
-          if (!entry || typeof entry !== "object") return null;
-          var path = asString(entry.path, "");
-          if (!path) return null;
-          var added = Number(entry.added);
-          var removed = Number(entry.removed);
-          return {
-            path: path,
-            status: normalizeStatus(entry.status, "modified"),
-            added: Number.isFinite(added) ? Math.max(0, Math.floor(added)) : 0,
-            removed: Number.isFinite(removed)
-              ? Math.max(0, Math.floor(removed))
-              : 0,
-            diff: asString(entry.diff, ""),
-          };
-        }
-
-        function normalizeSearchResult(entry) {
-          if (!entry || typeof entry !== "object") return null;
-          var path = asString(entry.path, "");
-          if (!path) return null;
-          var line = Number(entry.line);
-          return {
-            path: path,
-            line: Number.isFinite(line) && line > 0 ? Math.floor(line) : 0,
-            text: asString(entry.text, ""),
-          };
-        }
-
-        function normalizeListEntry(entry) {
-          if (!entry || typeof entry !== "object") return null;
-          var path = asString(entry.path, "");
-          var name = asString(entry.name, "");
-          var kind = asString(entry.kind, "").toLowerCase();
-          var depth = Number(entry.depth);
-          if (!path || !name) return null;
-          if (kind !== "dir" && kind !== "file" && kind !== "other")
+        function validateFile(entry) {
+          if (!isPlainObject(entry)) return null;
+          var path = readNonEmptyString(entry.path);
+          var status = validateFileStatus(entry.status);
+          var added = readNonNegativeInteger(entry.added);
+          var removed = readNonNegativeInteger(entry.removed);
+          var diff = readString(entry.diff);
+          if (
+            path === null ||
+            status === null ||
+            added === null ||
+            removed === null ||
+            diff === null
+          ) {
             return null;
+          }
+          return {
+            path: path,
+            status: status,
+            added: added,
+            removed: removed,
+            diff: diff,
+          };
+        }
+
+        function validateSearchResult(entry) {
+          if (!isPlainObject(entry)) return null;
+          var path = readNonEmptyString(entry.path);
+          var line = readPositiveInteger(entry.line);
+          var text = readString(entry.text);
+          if (path === null || line === null || text === null) return null;
+          return {
+            path: path,
+            line: line,
+            text: text,
+          };
+        }
+
+        function validateListEntry(entry) {
+          if (!isPlainObject(entry)) return null;
+          var path = readNonEmptyString(entry.path);
+          var name = readNonEmptyString(entry.name);
+          var kind = readString(entry.kind);
+          var depth = readNonNegativeInteger(entry.depth);
+          if (path === null || name === null || depth === null) return null;
+          if (kind !== "dir" && kind !== "file" && kind !== "other") {
+            return null;
+          }
           return {
             path: path,
             name: name,
             kind: kind,
-            depth: Number.isFinite(depth) && depth >= 0 ? Math.floor(depth) : 0,
+            depth: depth,
           };
         }
 
-        function normalizeTurnTokenUsage(entry) {
-          var inputTokens = Number(entry && entry.inputTokens);
-          var outputTokens = Number(entry && entry.outputTokens);
-          var totalTokens = Number(entry && entry.totalTokens);
+        function validateTurnTokenUsage(entry) {
+          if (!isPlainObject(entry)) return null;
+          var inputTokens = readNonNegativeInteger(entry.inputTokens);
+          var outputTokens = readNonNegativeInteger(entry.outputTokens);
+          var totalTokens = readNonNegativeInteger(entry.totalTokens);
+          if (
+            inputTokens === null ||
+            outputTokens === null ||
+            totalTokens === null
+          ) {
+            return null;
+          }
           return {
-            inputTokens:
-              Number.isFinite(inputTokens) && inputTokens >= 0
-                ? Math.floor(inputTokens)
-                : 0,
-            outputTokens:
-              Number.isFinite(outputTokens) && outputTokens >= 0
-                ? Math.floor(outputTokens)
-                : 0,
-            totalTokens:
-              Number.isFinite(totalTokens) && totalTokens >= 0
-                ? Math.floor(totalTokens)
-                : 0,
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            totalTokens: totalTokens,
           };
         }
 
-        function normalizeBinagotchyCard(entry) {
-          if (!entry || typeof entry !== "object") return null;
-          var folder = asString(entry.folder, "");
-          var seed = asString(entry.seed, "");
-          var image = asString(entry.image, "");
-          var saveFolderUrl = asString(entry.saveFolderUrl, "");
-          var setPartnerUrl = asString(entry.setPartnerUrl, "");
-          if (!folder || !seed || !image) return null;
+        function validateBinagotchyCard(entry) {
+          if (!isPlainObject(entry)) return null;
+          var folder = readNonEmptyString(entry.folder);
+          var seed = readNonEmptyString(entry.seed);
+          var image = readNonEmptyString(entry.image);
+          var saveFolderUrl = readOptionalStringField(entry, "saveFolderUrl");
+          var setPartnerUrl = readOptionalStringField(entry, "setPartnerUrl");
+          var isPartner = readBoolean(entry.isPartner);
+          if (
+            folder === null ||
+            seed === null ||
+            image === null ||
+            saveFolderUrl === null ||
+            setPartnerUrl === null ||
+            isPartner === null
+          ) {
+            return null;
+          }
           return {
             folder: folder,
             seed: seed,
             image: image,
             saveFolderUrl: saveFolderUrl,
             setPartnerUrl: setPartnerUrl,
-            isPartner: asBool(entry.isPartner, false),
+            isPartner: isPartner,
           };
         }
 
-        function normalize(data) {
-          if (!data || typeof data !== "object") return null;
-          var filesScanned = Number(data.filesScanned);
-          var matchCount = Number(data.matchCount);
-          var listItemCount = Number(data.listItemCount);
-          var listDirectoryCount = Number(data.listDirectoryCount);
-          var listFileCount = Number(data.listFileCount);
-          var listOtherCount = Number(data.listOtherCount);
-          var listLimit = Number(data.listLimit);
-          var toolCallCount = Number(data.toolCallCount);
-          var historyToolCallCount = Number(data.historyToolCallCount);
-          var mascot =
-            EMBEDDED_WIDGET_MASCOT && typeof EMBEDDED_WIDGET_MASCOT === "object"
-              ? EMBEDDED_WIDGET_MASCOT
-              : null;
-          var mascotWidth = Number(mascot && mascot.width);
-          var mascotHeight = Number(mascot && mascot.height);
-          var mascotFrameMs = Number(mascot && mascot.frameMs);
-          var mascotSpiritHeroBackground = asString(
-            mascot && mascot.spiritHeroBackground,
-            "",
-          );
-          var next = {
-            schema: asString(data.schema, "catdesk.review.v1"),
-            panelMode: asString(data.panelMode, "tool_call"),
-            title: asString(data.title, view.title),
-            state: normalizeStatus(data.state, "done"),
-            changedFiles: [],
-            hasChanges: false,
-            toolName: asString(data.toolName, ""),
-            workspacePath: asString(data.workspacePath, ""),
-            agentsPath: asString(data.agentsPath, ""),
-            configPath: asString(data.configPath, ""),
-            binagotchyPath: asString(data.binagotchyPath, ""),
-            binagotchyApiBaseUrl: asString(data.binagotchyApiBaseUrl, ""),
-            partnerBinagotchySeed: asString(data.partnerBinagotchySeed, ""),
-            binagotchyCards: [],
-            mascotWidth:
-              Number.isFinite(mascotWidth) && mascotWidth > 0
-                ? Math.floor(mascotWidth)
-                : 0,
-            mascotHeight:
-              Number.isFinite(mascotHeight) && mascotHeight > 0
-                ? Math.floor(mascotHeight)
-                : 0,
-            mascotFrameMs:
-              Number.isFinite(mascotFrameMs) && mascotFrameMs > 0
-                ? Math.floor(mascotFrameMs)
-                : 50,
-            mascotSpiritHeroBackground: mascotSpiritHeroBackground,
-            mascotPalette: asArray(mascot && mascot.palette)
-              .map(function (entry) {
-                return asString(entry, "");
-              })
-              .filter(Boolean),
+        function emptyMascotState() {
+          return {
+            mascotWidth: 0,
+            mascotHeight: 0,
+            mascotFrameMs: 50,
+            mascotSpiritHeroBackground: "",
+            mascotPalette: [],
             mascotFrames: [],
             mascotSequence: [],
-            command: asString(data.command, ""),
-            output: asString(data.output, ""),
-            readFilePath: asString(data.path, ""),
-            readFileBytes:
-              Number.isFinite(data.bytes) && data.bytes >= 0
-                ? Math.floor(data.bytes)
-                : 0,
-            readFileText: asString(data.text, ""),
-            readFileTruncated: asBool(data.truncated, false),
-            searchQuery: asString(data.searchQuery, ""),
-            searchPath: asString(data.searchPath, ""),
-            filesScanned:
-              Number.isFinite(filesScanned) && filesScanned >= 0
-                ? Math.floor(filesScanned)
-                : 0,
-            matchCount:
-              Number.isFinite(matchCount) && matchCount >= 0
-                ? Math.floor(matchCount)
-                : 0,
-            searchResults: [],
-            searchTruncated: asBool(data.searchTruncated, false),
-            listPath: asString(data.listPath, ""),
-            listItemCount:
-              Number.isFinite(listItemCount) && listItemCount >= 0
-                ? Math.floor(listItemCount)
-                : 0,
-            listDirectoryCount:
-              Number.isFinite(listDirectoryCount) && listDirectoryCount >= 0
-                ? Math.floor(listDirectoryCount)
-                : 0,
-            listFileCount:
-              Number.isFinite(listFileCount) && listFileCount >= 0
-                ? Math.floor(listFileCount)
-                : 0,
-            listOtherCount:
-              Number.isFinite(listOtherCount) && listOtherCount >= 0
-                ? Math.floor(listOtherCount)
-                : 0,
-            listEntries: [],
-            listTruncated: asBool(data.listTruncated, false),
-            listLimit:
-              Number.isFinite(listLimit) && listLimit >= 0
-                ? Math.floor(listLimit)
-                : 0,
-            turnTokenUsage: normalizeTurnTokenUsage(data.turnTokenUsage),
-            toolCallCount:
-              Number.isFinite(toolCallCount) && toolCallCount >= 0
-                ? Math.floor(toolCallCount)
-                : 0,
-            historyTurnTokenUsage: normalizeTurnTokenUsage(
-              data.historyTurnTokenUsage,
-            ),
-            historyToolCallCount:
-              Number.isFinite(historyToolCallCount) && historyToolCallCount >= 0
-                ? Math.floor(historyToolCallCount)
-                : 0,
           };
-          if (next.panelMode !== "final_review") {
-            next.panelMode = "tool_call";
-          }
-          next.changedFiles = asArray(data.changedFiles)
-            .map(normalizeFile)
-            .filter(Boolean);
-          next.hasChanges = asBool(
-            data.hasChanges,
-            next.changedFiles.length > 0,
-          );
-          next.searchResults = asArray(data.searchResults)
-            .map(normalizeSearchResult)
-            .filter(Boolean);
-          next.listEntries = asArray(data.listEntries)
-            .map(normalizeListEntry)
-            .filter(Boolean);
-          next.binagotchyCards = asArray(data.binagotchyCards)
-            .map(normalizeBinagotchyCard)
-            .filter(Boolean);
-          next.mascotFrames = asArray(mascot && mascot.frames)
-            .map(normalizeMascotFrame)
-            .filter(Boolean);
-          next.mascotSequence = asArray(mascot && mascot.sequence)
-            .map(normalizeMascotSequenceStep)
-            .filter(Boolean);
+        }
 
-          return next;
+        function validateMascotState(mascot) {
+          if (!isPlainObject(mascot)) return null;
+          var width = readPositiveInteger(mascot.width);
+          var height = readPositiveInteger(mascot.height);
+          var frameMs = readPositiveInteger(mascot.frameMs);
+          var spiritHeroBackground = readString(mascot.spiritHeroBackground);
+          var palette = validateStringArray(mascot.palette, false);
+          var frames = validateArrayEntries(mascot.frames, validateMascotFrame);
+          var sequence = validateArrayEntries(
+            mascot.sequence,
+            validateMascotSequenceStep,
+          );
+          if (
+            width === null ||
+            height === null ||
+            frameMs === null ||
+            spiritHeroBackground === null ||
+            palette === null ||
+            frames === null ||
+            sequence === null
+          ) {
+            return null;
+          }
+          return {
+            mascotWidth: width,
+            mascotHeight: height,
+            mascotFrameMs: frameMs,
+            mascotSpiritHeroBackground: spiritHeroBackground,
+            mascotPalette: palette,
+            mascotFrames: frames,
+            mascotSequence: sequence,
+          };
+        }
+
+        function readEmbeddedMascotState() {
+          var mascotState = validateMascotState(EMBEDDED_WIDGET_MASCOT);
+          return mascotState || emptyMascotState();
+        }
+
+        function createBaseView(common) {
+          var mascotState = readEmbeddedMascotState();
+          return {
+            schema: common.schema,
+            panelMode: common.panelMode,
+            title: common.title,
+            state: common.state,
+            changedFiles: common.changedFiles,
+            hasChanges: common.hasChanges,
+            toolName: common.toolName,
+            call: "",
+            detail: "",
+            workspacePath: "",
+            agentsPath: "",
+            configPath: "",
+            binagotchyPath: "",
+            binagotchyApiBaseUrl: "",
+            partnerBinagotchySeed: "",
+            binagotchyCards: [],
+            mascotWidth: mascotState.mascotWidth,
+            mascotHeight: mascotState.mascotHeight,
+            mascotFrameMs: mascotState.mascotFrameMs,
+            mascotSpiritHeroBackground: mascotState.mascotSpiritHeroBackground,
+            mascotPalette: mascotState.mascotPalette,
+            mascotFrames: mascotState.mascotFrames,
+            mascotSequence: mascotState.mascotSequence,
+            command: "",
+            output: "",
+            readFilePath: "",
+            readFileBytes: 0,
+            readFileText: "",
+            readFileTruncated: false,
+            searchQuery: "",
+            searchPath: "",
+            filesScanned: 0,
+            matchCount: 0,
+            searchResults: [],
+            searchTruncated: false,
+            listPath: "",
+            listItemCount: 0,
+            listDirectoryCount: 0,
+            listFileCount: 0,
+            listOtherCount: 0,
+            listEntries: [],
+            listTruncated: false,
+            listLimit: 0,
+            turnTokenUsage: common.turnTokenUsage,
+            toolCallCount: common.toolCallCount,
+            historyTurnTokenUsage: common.historyTurnTokenUsage,
+            historyToolCallCount: common.historyToolCallCount,
+            payloadDiagnostics: null,
+          };
+        }
+
+        function invalidPayload(message) {
+          return {
+            ok: false,
+            error: message,
+          };
+        }
+
+        function validPayload(nextView) {
+          return {
+            ok: true,
+            value: nextView,
+          };
+        }
+
+        function buildViewFromWidgetPayload(data) {
+          if (!isPlainObject(data)) {
+            return invalidPayload("Widget payload must be a JSON object.");
+          }
+          if (data.schema !== "catdesk.review.v1") {
+            return invalidPayload(
+              "Widget payload schema must be catdesk.review.v1.",
+            );
+          }
+
+          var panelMode = readNonEmptyString(data.panelMode);
+          if (panelMode !== "tool_call" && panelMode !== "final_review") {
+            return invalidPayload(
+              "Widget payload panelMode must be tool_call or final_review.",
+            );
+          }
+
+          var title = readString(data.title);
+          var state = readNonEmptyString(data.state);
+          var toolName = readNonEmptyString(data.toolName);
+          var changedFiles = validateArrayEntries(data.changedFiles, validateFile);
+          var hasChanges = readBoolean(data.hasChanges);
+          var turnTokenUsage = validateTurnTokenUsage(data.turnTokenUsage);
+          var toolCallCount = readNonNegativeInteger(data.toolCallCount);
+          var historyTurnTokenUsage = validateTurnTokenUsage(
+            data.historyTurnTokenUsage,
+          );
+          var historyToolCallCount = readNonNegativeInteger(
+            data.historyToolCallCount,
+          );
+          if (
+            title === null ||
+            state === null ||
+            toolName === null ||
+            changedFiles === null ||
+            hasChanges === null ||
+            turnTokenUsage === null ||
+            toolCallCount === null ||
+            historyTurnTokenUsage === null ||
+            historyToolCallCount === null
+          ) {
+            return invalidPayload(
+              "Widget payload is missing required common fields.",
+            );
+          }
+          if (hasChanges !== (changedFiles.length > 0)) {
+            return invalidPayload(
+              "Widget payload hasChanges does not match changedFiles.",
+            );
+          }
+
+          var next = createBaseView({
+            schema: data.schema,
+            panelMode: panelMode,
+            title: title,
+            state: state,
+            changedFiles: changedFiles,
+            hasChanges: hasChanges,
+            toolName: toolName,
+            turnTokenUsage: turnTokenUsage,
+            toolCallCount: toolCallCount,
+            historyTurnTokenUsage: historyTurnTokenUsage,
+            historyToolCallCount: historyToolCallCount,
+          });
+          var call = readOptionalStringField(data, "call");
+          var detail = readOptionalStringField(data, "detail");
+          if (call === null || detail === null) {
+            return invalidPayload("Widget payload call/detail fields are invalid.");
+          }
+          next.call = call;
+          next.detail = detail;
+
+          if (panelMode === "final_review") {
+            if (toolName !== "render_final_summary_widget") {
+              return invalidPayload(
+                "Final summary payload must use render_final_summary_widget.",
+              );
+            }
+            return validPayload(next);
+          }
+
+          if (data.payloadKind === "widget_payload_error") {
+            if (!next.call || !next.detail) {
+              return invalidPayload(
+                "Widget payload error panels must include call and detail.",
+              );
+            }
+            return validPayload(next);
+          }
+
+          if (toolName === "catdesk_instruction") {
+            var workspacePath = readNonEmptyString(data.workspacePath);
+            var agentsPath = readNonEmptyString(data.agentsPath);
+            var configPath = readNonEmptyString(data.configPath);
+            var binagotchyPath = readNonEmptyString(data.binagotchyPath);
+            var binagotchyApiBaseUrl = readString(data.binagotchyApiBaseUrl);
+            var partnerBinagotchySeed = readString(data.partnerBinagotchySeed);
+            var binagotchyCards = validateArrayEntries(
+              data.binagotchyCards,
+              validateBinagotchyCard,
+            );
+            if (
+              workspacePath === null ||
+              agentsPath === null ||
+              configPath === null ||
+              binagotchyPath === null ||
+              binagotchyApiBaseUrl === null ||
+              partnerBinagotchySeed === null ||
+              binagotchyCards === null
+            ) {
+              return invalidPayload(
+                "catdesk_instruction widget payload is missing required fields.",
+              );
+            }
+            next.workspacePath = workspacePath;
+            next.agentsPath = agentsPath;
+            next.configPath = configPath;
+            next.binagotchyPath = binagotchyPath;
+            next.binagotchyApiBaseUrl = binagotchyApiBaseUrl;
+            next.partnerBinagotchySeed = partnerBinagotchySeed;
+            next.binagotchyCards = binagotchyCards;
+            return validPayload(next);
+          }
+
+          if (toolName === "run_command") {
+            var command = readString(data.command);
+            var output = readString(data.output);
+            if (command === null || output === null) {
+              return invalidPayload(
+                "run_command widget payload is missing required fields.",
+              );
+            }
+            next.command = command;
+            next.output = output;
+            return validPayload(next);
+          }
+
+          if (toolName === "search_text") {
+            var searchQuery = readString(data.searchQuery);
+            var searchPath = readNonEmptyString(data.searchPath);
+            var filesScanned = readNonNegativeInteger(data.filesScanned);
+            var matchCount = readNonNegativeInteger(data.matchCount);
+            var searchResults = validateArrayEntries(
+              data.searchResults,
+              validateSearchResult,
+            );
+            var searchTruncated = readBoolean(data.searchTruncated);
+            if (
+              searchQuery === null ||
+              searchPath === null ||
+              filesScanned === null ||
+              matchCount === null ||
+              searchResults === null ||
+              searchTruncated === null
+            ) {
+              return invalidPayload(
+                "search_text widget payload is missing required fields.",
+              );
+            }
+            next.searchQuery = searchQuery;
+            next.searchPath = searchPath;
+            next.filesScanned = filesScanned;
+            next.matchCount = matchCount;
+            next.searchResults = searchResults;
+            next.searchTruncated = searchTruncated;
+            return validPayload(next);
+          }
+
+          if (toolName === "read_file") {
+            var readFilePath = readNonEmptyString(data.path);
+            var readFileBytes = readNonNegativeInteger(data.bytes);
+            var readFileText = readString(data.text);
+            var readFileTruncated = readBoolean(data.truncated);
+            if (
+              readFilePath === null ||
+              readFileBytes === null ||
+              readFileText === null ||
+              readFileTruncated === null
+            ) {
+              return invalidPayload(
+                "read_file widget payload is missing required fields.",
+              );
+            }
+            next.readFilePath = readFilePath;
+            next.readFileBytes = readFileBytes;
+            next.readFileText = readFileText;
+            next.readFileTruncated = readFileTruncated;
+            return validPayload(next);
+          }
+
+          if (toolName === "list_files") {
+            var listPath = readNonEmptyString(data.listPath);
+            var listItemCount = readNonNegativeInteger(data.listItemCount);
+            var listDirectoryCount = readNonNegativeInteger(
+              data.listDirectoryCount,
+            );
+            var listFileCount = readNonNegativeInteger(data.listFileCount);
+            var listOtherCount = readNonNegativeInteger(data.listOtherCount);
+            var listEntries = validateArrayEntries(
+              data.listEntries,
+              validateListEntry,
+            );
+            var listTruncated = readBoolean(data.listTruncated);
+            var listLimit = readPositiveInteger(data.listLimit);
+            if (
+              listPath === null ||
+              listItemCount === null ||
+              listDirectoryCount === null ||
+              listFileCount === null ||
+              listOtherCount === null ||
+              listEntries === null ||
+              listTruncated === null ||
+              listLimit === null
+            ) {
+              return invalidPayload(
+                "list_files widget payload is missing required fields.",
+              );
+            }
+            next.listPath = listPath;
+            next.listItemCount = listItemCount;
+            next.listDirectoryCount = listDirectoryCount;
+            next.listFileCount = listFileCount;
+            next.listOtherCount = listOtherCount;
+            next.listEntries = listEntries;
+            next.listTruncated = listTruncated;
+            next.listLimit = listLimit;
+            return validPayload(next);
+          }
+
+          return validPayload(next);
         }
 
         function inspectPayloadDiagnostics(toolResponseMetadata) {
@@ -2198,7 +2432,7 @@
           ) {
             return null;
           }
-          return JSON.parse(JSON.stringify(widgetPayload));
+          return cloneJsonValue(widgetPayload);
         }
 
         function isDirectoryFile(file) {
@@ -2212,7 +2446,7 @@
         }
 
         function prettyStatus(status) {
-          return asString(status, "modified").replace(/_/g, " ");
+          return String(status).replace(/_/g, " ");
         }
 
         function formatCounts(file) {
@@ -2367,18 +2601,14 @@
         }
 
         function directoryMetaLabel(file) {
-          var status = normalizeStatus(file && file.status, "modified");
-          if (
-            status === "added" ||
-            status === "untracked" ||
-            status === "copied"
-          ) {
+          var status = file && file.status;
+          if (status === "added") {
             return "directory created";
           }
           if (status === "deleted") {
             return "directory deleted";
           }
-          if (status === "modified" || status === "renamed") {
+          if (status === "modified") {
             return "directory changed";
           }
           return "directory";
@@ -3141,37 +3371,17 @@
         }
 
         function applyWidgetMascotToView(mascot) {
-          if (!mascot || typeof mascot !== "object") return false;
-          var mascotWidth = Number(mascot.width);
-          var mascotHeight = Number(mascot.height);
-          var mascotFrameMs = Number(mascot.frameMs);
-          view.mascotWidth =
-            Number.isFinite(mascotWidth) && mascotWidth > 0
-              ? Math.floor(mascotWidth)
-              : 0;
-          view.mascotHeight =
-            Number.isFinite(mascotHeight) && mascotHeight > 0
-              ? Math.floor(mascotHeight)
-              : 0;
-          view.mascotFrameMs =
-            Number.isFinite(mascotFrameMs) && mascotFrameMs > 0
-              ? Math.floor(mascotFrameMs)
-              : 50;
-          view.mascotSpiritHeroBackground = asString(
-            mascot.spiritHeroBackground,
-            "",
-          );
-          view.mascotPalette = asArray(mascot.palette)
-            .map(function (entry) {
-              return asString(entry, "");
-            })
-            .filter(Boolean);
-          view.mascotFrames = asArray(mascot.frames)
-            .map(normalizeMascotFrame)
-            .filter(Boolean);
-          view.mascotSequence = asArray(mascot.sequence)
-            .map(normalizeMascotSequenceStep)
-            .filter(Boolean);
+          if (!view) return false;
+          var mascotState = validateMascotState(mascot);
+          if (!mascotState) return false;
+          view.mascotWidth = mascotState.mascotWidth;
+          view.mascotHeight = mascotState.mascotHeight;
+          view.mascotFrameMs = mascotState.mascotFrameMs;
+          view.mascotSpiritHeroBackground =
+            mascotState.mascotSpiritHeroBackground;
+          view.mascotPalette = mascotState.mascotPalette;
+          view.mascotFrames = mascotState.mascotFrames;
+          view.mascotSequence = mascotState.mascotSequence;
           return true;
         }
 
@@ -3597,6 +3807,17 @@
             }) +
             "</div>"
           );
+        }
+
+        function renderToolDetailPanel(current) {
+          if (!current || (!current.call && !current.detail)) return "";
+          var callHtml = current.call
+            ? '<div class="command-line">' + esc(current.call) + "</div>"
+            : "";
+          var detailHtml = current.detail
+            ? '<pre class="command-output">' + esc(current.detail) + "</pre>"
+            : "";
+          return '<div class="command-panel">' + callHtml + detailHtml + "</div>";
         }
 
         function stopTokenRollAnimation() {
@@ -4034,6 +4255,15 @@
               "</div>" +
               "</section>";
           }
+          var detailSectionHtml = "";
+          if (view.call || view.detail) {
+            detailSectionHtml =
+              '<section class="section">' +
+              '<div class="section-body">' +
+              renderToolDetailPanel(view) +
+              "</div>" +
+              "</section>";
+          }
           var filesSectionHtml = "";
           if (
             (!isCatDeskInstruction &&
@@ -4060,6 +4290,7 @@
             searchSectionHtml +
             readFileSectionHtml +
             listSectionHtml +
+            detailSectionHtml +
             filesSectionHtml;
           var contentRowHtml = "";
           if (mainContentHtml && tokenPanelHtml) {
@@ -4122,6 +4353,40 @@
           playLoadingTokenAnimation(root);
         }
 
+        function renderPayloadError(title, detail, diagnostics) {
+          var root = document.getElementById("root");
+          if (!root) return;
+          stopTokenRollAnimation();
+          stopInstructionMascotAnimation();
+          tokenRollState.signature = "";
+          var diagnosticsHtml = diagnostics
+            ? '<div class="search-note">' +
+              esc(
+                "diagnostics: " +
+                  diagnostics.status +
+                  " / hasWidgetPayload=" +
+                  String(!!diagnostics.hasWidgetPayload),
+              ) +
+              "</div>"
+            : "";
+          root.innerHTML =
+            '<section class="root">' +
+            '<section class="section">' +
+            '<div class="section-body">' +
+            '<div class="command-panel">' +
+            '<div class="panel-head"><div class="panel-title">' +
+            esc(title) +
+            "</div></div>" +
+            '<pre class="command-output">' +
+            esc(detail) +
+            "</pre>" +
+            diagnosticsHtml +
+            "</div>" +
+            "</div>" +
+            "</section>" +
+            "</section>";
+        }
+
         function currentToolResponseMetadata() {
           if (!window.openai) return null;
           return window.openai.toolResponseMetadata || null;
@@ -4144,34 +4409,39 @@
           var diagnostics = inspectPayloadDiagnostics(toolResponseMetadata);
           var widgetPayload = extractWidgetPayload(toolResponseMetadata);
           if (!widgetPayload) {
-            stopTokenRollAnimation();
-            stopInstructionMascotAnimation();
+            renderPayloadError(
+              "Widget Payload Missing",
+              "Tool response metadata does not contain a valid catdesk/widgetPayload object.",
+              diagnostics,
+            );
             return false;
           }
-          var normalized = normalize(widgetPayload);
-          if (!normalized) {
-            stopTokenRollAnimation();
-            stopInstructionMascotAnimation();
+          var parsed = buildViewFromWidgetPayload(widgetPayload);
+          if (!parsed.ok) {
+            renderPayloadError("Invalid Widget Payload", parsed.error, diagnostics);
             return false;
           }
-          normalized.payloadDiagnostics = diagnostics;
+          var nextView = parsed.value;
+          nextView.payloadDiagnostics = diagnostics;
           if (
-            normalized.panelMode === "tool_call" &&
-            !normalized.hasChanges &&
-            normalized.toolName !== "catdesk_instruction" &&
-            normalized.toolName !== "run_command" &&
-            normalized.toolName !== "search_text" &&
-            normalized.toolName !== "read_file" &&
-            normalized.toolName !== "list_files" &&
-            normalized.turnTokenUsage.totalTokens <= 0 &&
-            normalized.toolCallCount <= 0
+            nextView.panelMode === "tool_call" &&
+            !nextView.hasChanges &&
+            nextView.toolName !== "catdesk_instruction" &&
+            nextView.toolName !== "run_command" &&
+            nextView.toolName !== "search_text" &&
+            nextView.toolName !== "read_file" &&
+            nextView.toolName !== "list_files" &&
+            !nextView.call &&
+            !nextView.detail &&
+            nextView.turnTokenUsage.totalTokens <= 0 &&
+            nextView.toolCallCount <= 0
           ) {
             stopTokenRollAnimation();
             stopInstructionMascotAnimation();
             root.innerHTML = "";
             return true;
           }
-          view = normalized;
+          view = nextView;
           render();
           return true;
         }
