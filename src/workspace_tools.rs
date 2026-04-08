@@ -58,6 +58,70 @@ impl ListFilesOutput {
     }
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadFileOutput {
+    pub path: String,
+    pub bytes: usize,
+    pub text: String,
+    pub truncated: bool,
+}
+
+impl ReadFileOutput {
+    pub fn render_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("path: {}\n", self.path));
+        out.push_str(&format!("bytes: {}\n\n", self.bytes));
+        out.push_str(&self.text);
+        if self.truncated {
+            out.push_str(&format!("\n\n[truncated at {} bytes]", MAX_READ_BYTES));
+        }
+        out
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchTextEntry {
+    pub path: String,
+    pub line: usize,
+    pub text: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchTextOutput {
+    pub query: String,
+    pub path: String,
+    pub files_scanned: usize,
+    pub match_count: usize,
+    pub truncated: bool,
+    pub limit: usize,
+    pub results: Vec<SearchTextEntry>,
+}
+
+impl SearchTextOutput {
+    pub fn render_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("query: {}\n", self.query));
+        out.push_str(&format!("path: {}\n", self.path));
+        out.push_str(&format!("files_scanned: {}\n", self.files_scanned));
+        out.push_str(&format!("matches: {}\n\n", self.match_count));
+        out.push_str(
+            &self
+                .results
+                .iter()
+                .map(|entry| format!("{}:{}: {}", entry.path, entry.line, entry.text))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        if self.truncated {
+            out.push_str(&format!("\n\n[truncated at {} matches]", self.limit));
+        }
+        out
+    }
+}
+
 fn workspace_root_path(workspace_root: &str) -> Result<PathBuf, String> {
     Path::new(workspace_root)
         .canonicalize()
@@ -80,7 +144,7 @@ fn resolve_target_path(workspace_root: &str, path: &str) -> Result<PathBuf, Stri
     command::resolve_workspace_path(workspace_root, Some(path))
 }
 
-pub fn read_file(workspace_root: &str, path: &str) -> Result<String, String> {
+pub fn read_file(workspace_root: &str, path: &str) -> Result<ReadFileOutput, String> {
     let root = workspace_root_path(workspace_root)?;
     let target = resolve_target_path(workspace_root, path)?;
     if !target.exists() {
@@ -97,17 +161,12 @@ pub fn read_file(workspace_root: &str, path: &str) -> Result<String, String> {
     let data = &buf[..read_n.min(MAX_READ_BYTES)];
     let text = String::from_utf8_lossy(data).into_owned();
 
-    let mut out = String::new();
-    out.push_str(&format!(
-        "path: {}\n",
-        to_workspace_relative(&root, &target)
-    ));
-    out.push_str(&format!("bytes: {}\n\n", data.len()));
-    out.push_str(&text);
-    if truncated {
-        out.push_str(&format!("\n\n[truncated at {} bytes]", MAX_READ_BYTES));
-    }
-    Ok(out)
+    Ok(ReadFileOutput {
+        path: to_workspace_relative(&root, &target),
+        bytes: data.len(),
+        text,
+        truncated,
+    })
 }
 
 pub fn write_file(
@@ -293,7 +352,7 @@ pub fn search_text(
     path: Option<&str>,
     include_hidden: bool,
     limit: Option<usize>,
-) -> Result<String, String> {
+) -> Result<SearchTextOutput, String> {
     if query.trim().is_empty() {
         return Err("Query must not be empty".into());
     }
@@ -311,7 +370,7 @@ pub fn search_text(
     let mut queue = VecDeque::new();
     queue.push_back(start.clone());
 
-    let mut matches: Vec<String> = Vec::new();
+    let mut matches: Vec<SearchTextEntry> = Vec::new();
     let mut visited_files: usize = 0;
     let mut truncated = false;
 
@@ -343,7 +402,11 @@ pub fn search_text(
             let rel = to_workspace_relative(&root, &path);
             for (idx, line) in text.lines().enumerate() {
                 if line.contains(query) {
-                    matches.push(format!("{rel}:{}: {}", idx + 1, line));
+                    matches.push(SearchTextEntry {
+                        path: rel.clone(),
+                        line: idx + 1,
+                        text: line.to_string(),
+                    });
                     if matches.len() >= max_matches {
                         truncated = true;
                         break;
@@ -359,16 +422,15 @@ pub fn search_text(
         }
     }
 
-    let mut out = String::new();
-    out.push_str(&format!("query: {query}\n"));
-    out.push_str(&format!("path: {}\n", to_workspace_relative(&root, &start)));
-    out.push_str(&format!("files_scanned: {visited_files}\n"));
-    out.push_str(&format!("matches: {}\n\n", matches.len()));
-    out.push_str(&matches.join("\n"));
-    if truncated {
-        out.push_str(&format!("\n\n[truncated at {} matches]", max_matches));
-    }
-    Ok(out)
+    Ok(SearchTextOutput {
+        query: query.to_string(),
+        path: to_workspace_relative(&root, &start),
+        files_scanned: visited_files,
+        match_count: matches.len(),
+        truncated,
+        limit: max_matches,
+        results: matches,
+    })
 }
 
 pub fn make_directory(workspace_root: &str, path: &str, recursive: bool) -> Result<String, String> {

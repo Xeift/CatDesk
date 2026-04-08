@@ -2184,7 +2184,7 @@
           };
         }
 
-        function extractStructured(toolResponseMetadata) {
+        function extractWidgetPayload(toolResponseMetadata) {
           var widgetPayload =
             toolResponseMetadata &&
             typeof toolResponseMetadata === "object" &&
@@ -4142,13 +4142,13 @@
           var root = document.getElementById("root");
           if (!root) return false;
           var diagnostics = inspectPayloadDiagnostics(toolResponseMetadata);
-          var structured = extractStructured(toolResponseMetadata);
-          if (!structured) {
+          var widgetPayload = extractWidgetPayload(toolResponseMetadata);
+          if (!widgetPayload) {
             stopTokenRollAnimation();
             stopInstructionMascotAnimation();
             return false;
           }
-          var normalized = normalize(structured);
+          var normalized = normalize(widgetPayload);
           if (!normalized) {
             stopTokenRollAnimation();
             stopInstructionMascotAnimation();

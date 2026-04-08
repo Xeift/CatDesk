@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -138,31 +138,6 @@ struct FileDiffEntry {
     added: u64,
     removed: u64,
     diff: String,
-}
-
-#[derive(Clone, Default)]
-struct SearchResultEntry {
-    path: String,
-    line: u64,
-    text: String,
-}
-
-#[derive(Clone, Default)]
-struct SearchWidgetContent {
-    query: String,
-    path: String,
-    files_scanned: u64,
-    matches: u64,
-    results: Vec<SearchResultEntry>,
-    truncated: bool,
-}
-
-#[derive(Clone, Default)]
-struct ReadFileWidgetContent {
-    path: String,
-    bytes: u64,
-    text: String,
-    truncated: bool,
 }
 
 #[derive(Clone, Default)]
@@ -795,20 +770,39 @@ async fn handle_run_command(
     };
     let result = command::run_command(&effective_command, &cwd, effective_timeout).await;
     let output = command::format_result(&result);
+    let structured = json!({
+        "toolName": "run_command",
+        "command": effective_command,
+        "cwd": cwd.to_string_lossy().to_string(),
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "success": result.success,
+    });
 
     if result.success {
-        tool_success_response(req, output)
+        tool_success_response_with_structured(req, output, structured)
     } else {
-        tool_error_response(req, output)
+        tool_error_response_with_structured(req, output, structured)
     }
 }
 
-fn tool_success_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse {
-    let result = enrich_tool_result(
-        req,
-        json!({ "content": [{"type": "text", "text": text}] }),
-        None,
-    );
+fn tool_response(
+    req: &JsonRpcRequest,
+    text: String,
+    structured: Option<Value>,
+    is_error: bool,
+) -> JsonRpcResponse {
+    let mut result = json!({
+        "content": [{"type": "text", "text": text}]
+    });
+    if let Some(obj) = result.as_object_mut() {
+        if let Some(structured) = structured {
+            obj.insert("structuredContent".to_string(), structured);
+        }
+        if is_error {
+            obj.insert("isError".to_string(), Value::Bool(true));
+        }
+    }
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
@@ -817,15 +811,15 @@ fn tool_success_response_with_structured(
     text: String,
     structured: Value,
 ) -> JsonRpcResponse {
-    let result = enrich_tool_result(
-        req,
-        json!({
-            "structuredContent": structured,
-            "content": [{"type": "text", "text": text}]
-        }),
-        None,
-    );
-    JsonRpcResponse::success(req.id.clone(), result)
+    tool_response(req, text, Some(structured), false)
+}
+
+fn tool_error_response_with_structured(
+    req: &JsonRpcRequest,
+    text: String,
+    structured: Value,
+) -> JsonRpcResponse {
+    tool_response(req, text, Some(structured), true)
 }
 
 fn handle_render_final_summary_widget(
@@ -853,27 +847,19 @@ fn handle_render_final_summary_widget(
     let has_changes = changed_file_count > 0;
     let turn_token_usage = session.pending_turn_token_usage.clone();
     let tool_call_count = session.pending_tool_call_count;
-    let widget_payload = json!({
-        "schema": "catdesk.review.v1",
-        "panelMode": panel_mode.clone(),
-        "title": title.clone(),
-        "state": state.clone(),
-        "changedFiles": changed_files,
-        "hasChanges": has_changes,
-        "changedFileCount": changed_file_count,
-        "turnTokenUsage": {
-            "inputTokens": turn_token_usage.input_tokens,
-            "outputTokens": turn_token_usage.output_tokens,
-            "totalTokens": turn_token_usage.total_tokens,
-        },
-        "toolCallCount": tool_call_count,
-    });
+    let mut widget_payload = base_widget_payload(
+        &panel_mode,
+        &title,
+        &state,
+        Some(RENDER_FINAL_SUMMARY_WIDGET_TOOL),
+    );
+    widget_payload.insert("changedFiles".to_string(), Value::Array(changed_files));
+    widget_payload.insert("hasChanges".to_string(), Value::Bool(has_changes));
+    widget_payload.insert("changedFileCount".to_string(), json!(changed_file_count));
+    let widget_payload = Value::Object(widget_payload);
 
     let structured = json!({
-        "schema": "catdesk.review.v1",
-        "panelMode": panel_mode.clone(),
-        "title": title.clone(),
-        "state": state.clone(),
+        "toolName": RENDER_FINAL_SUMMARY_WIDGET_TOOL,
         "hasChanges": has_changes,
         "changedFileCount": changed_file_count,
     });
@@ -889,22 +875,17 @@ fn handle_render_final_summary_widget(
         }),
         None,
     );
+    attach_widget_payload_meta(&mut result, widget_payload);
     attach_turn_token_usage(&mut result, &turn_token_usage);
     attach_tool_call_count(&mut result, tool_call_count);
     attach_output_template_uri(&mut result, FINAL_SUMMARY_UI_TEMPLATE_URI);
-    attach_widget_payload_meta(&mut result, widget_payload);
     session.pending_turn_token_usage = TokenUsage::default();
     session.pending_tool_call_count = 0;
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
 fn tool_error_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse {
-    let result = enrich_tool_result(
-        req,
-        json!({ "content": [{"type": "text", "text": text}], "isError": true }),
-        None,
-    );
-    JsonRpcResponse::success(req.id.clone(), result)
+    tool_response(req, text, None, true)
 }
 
 fn read_only_blocked_response(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse {
@@ -1029,30 +1010,28 @@ fn catdesk_instruction_structured(
 ) -> std::io::Result<Value> {
     let instruction_text = catdesk_instruction_text(workspace_root, mode, tool_mode);
     Ok(json!({
-        "schema": "catdesk.review.v1",
-        "panelMode": "tool_call",
-        "title": "CatDesk Instruction",
-        "state": "done",
         "toolName": "catdesk_instruction",
         "instructionText": instruction_text,
-        "changedFiles": [],
-        "hasChanges": false
     }))
 }
 
 fn catdesk_instruction_widget_payload_with_cards(
     workspace_root: &str,
-    mode: Mode,
-    tool_mode: ToolMode,
+    _mode: Mode,
+    _tool_mode: ToolMode,
     binagotchy_cards: Vec<mascot::ArchivedBinagotchyCard>,
 ) -> std::io::Result<Value> {
-    let mut payload = catdesk_instruction_structured(workspace_root, mode, tool_mode)?;
+    let mut payload = Value::Object(base_widget_payload(
+        "tool_call",
+        "CatDesk Instruction",
+        "done",
+        Some("catdesk_instruction"),
+    ));
     let Some(payload_obj) = payload.as_object_mut() else {
         return Err(std::io::Error::other(
             "catdesk instruction payload must be a JSON object",
         ));
     };
-    payload_obj.remove("instructionText");
     let agents_path = preferred_agents_path(workspace_root)
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "-".to_string());
@@ -1067,6 +1046,8 @@ fn catdesk_instruction_widget_payload_with_cards(
     payload_obj.insert("configPath".to_string(), json!(config_path));
     payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
     payload_obj.insert("binagotchyCards".to_string(), json!(binagotchy_cards));
+    payload_obj.insert("changedFiles".to_string(), json!([]));
+    payload_obj.insert("hasChanges".to_string(), json!(false));
     Ok(payload)
 }
 
@@ -1154,79 +1135,6 @@ fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
     sanitized
 }
 
-fn ensure_widget_payload_from_structured(result: &mut Value) {
-    let Some(obj) = result.as_object_mut() else {
-        return;
-    };
-    let Some(structured) = obj.get("structuredContent").cloned() else {
-        return;
-    };
-    let meta_value = obj.entry("_meta".to_string()).or_insert_with(|| json!({}));
-    if !meta_value.is_object() {
-        *meta_value = json!({});
-    }
-    let Some(meta_obj) = meta_value.as_object_mut() else {
-        return;
-    };
-    meta_obj
-        .entry(WIDGET_PAYLOAD_META_KEY.to_string())
-        .or_insert(structured);
-}
-
-fn sync_widget_payload_from_structured(result: &mut Value) {
-    let Some(obj) = result.as_object_mut() else {
-        return;
-    };
-    let Some(structured) = obj.get("structuredContent").cloned() else {
-        return;
-    };
-    let meta_value = obj.entry("_meta".to_string()).or_insert_with(|| json!({}));
-    if !meta_value.is_object() {
-        *meta_value = json!({});
-    }
-    let Some(meta_obj) = meta_value.as_object_mut() else {
-        return;
-    };
-    meta_obj.insert(WIDGET_PAYLOAD_META_KEY.to_string(), structured);
-}
-
-fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
-    ensure_widget_payload_from_structured(result);
-    let Some(obj) = result.as_object_mut() else {
-        return;
-    };
-    if let Some(widget_payload) = obj
-        .get_mut("_meta")
-        .and_then(Value::as_object_mut)
-        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
-        .and_then(Value::as_object_mut)
-    {
-        widget_payload.insert(
-            "turnTokenUsage".to_string(),
-            json!({
-                "inputTokens": usage.input_tokens,
-                "outputTokens": usage.output_tokens,
-                "totalTokens": usage.total_tokens,
-            }),
-        );
-    }
-}
-
-fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
-    ensure_widget_payload_from_structured(result);
-    let Some(obj) = result.as_object_mut() else {
-        return;
-    };
-    if let Some(widget_payload) = obj
-        .get_mut("_meta")
-        .and_then(Value::as_object_mut)
-        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
-        .and_then(Value::as_object_mut)
-    {
-        widget_payload.insert("toolCallCount".to_string(), json!(tool_call_count));
-    }
-}
-
 fn ensure_output_template_meta(meta_value: &mut Value) {
     ensure_output_template_meta_with_uri(meta_value, UI_TEMPLATE_URI);
 }
@@ -1276,6 +1184,41 @@ fn attach_widget_payload_meta(result: &mut Value, payload: Value) {
         return;
     };
     meta_obj.insert(WIDGET_PAYLOAD_META_KEY.to_string(), payload);
+}
+
+fn widget_payload_meta_mut(result: &mut Value) -> Option<&mut Map<String, Value>> {
+    let obj = result.as_object_mut()?;
+    let meta_value = obj.entry("_meta".to_string()).or_insert_with(|| json!({}));
+    if !meta_value.is_object() {
+        *meta_value = json!({});
+    }
+    let meta_obj = meta_value.as_object_mut()?;
+    let widget_payload = meta_obj
+        .entry(WIDGET_PAYLOAD_META_KEY.to_string())
+        .or_insert_with(|| json!({}));
+    if !widget_payload.is_object() {
+        *widget_payload = json!({});
+    }
+    widget_payload.as_object_mut()
+}
+
+fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
+    if let Some(widget_payload) = widget_payload_meta_mut(result) {
+        widget_payload.insert(
+            "turnTokenUsage".to_string(),
+            json!({
+                "inputTokens": usage.input_tokens,
+                "outputTokens": usage.output_tokens,
+                "totalTokens": usage.total_tokens,
+            }),
+        );
+    }
+}
+
+fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
+    if let Some(widget_payload) = widget_payload_meta_mut(result) {
+        widget_payload.insert("toolCallCount".to_string(), json!(tool_call_count));
+    }
 }
 
 fn tool_descriptor_should_attach_widget(name: &str) -> bool {
@@ -1410,162 +1353,236 @@ fn session_changed_files_json(session: &Session) -> Vec<Value> {
     changed_files.into_iter().map(file_entry_json).collect()
 }
 
-fn search_result_entry_json(entry: &SearchResultEntry) -> Value {
-    json!({
-        "path": entry.path,
-        "line": entry.line,
-        "text": entry.text,
-    })
+fn widget_state(is_error: bool, widget_context: Option<&AutoWidgetContext>) -> &'static str {
+    if let Some(ctx) = widget_context {
+        if ctx.is_error {
+            return "failed";
+        }
+        if ctx.turn_files.is_empty() {
+            return "done";
+        }
+        return "changed";
+    }
+    if is_error { "failed" } else { "done" }
 }
 
-fn parse_search_match_line(line: &str) -> Option<SearchResultEntry> {
-    let mut parts = line.splitn(3, ':');
-    let path = parts.next()?.trim();
-    let line_no = parts.next()?.trim().parse::<u64>().ok()?;
-    let text_raw = parts.next()?.trim_start();
-    if path.is_empty() {
-        return None;
-    }
-    Some(SearchResultEntry {
-        path: path.to_string(),
-        line: line_no,
-        text: truncate_for_widget(text_raw, MAX_SEARCH_LINE_CHARS),
-    })
+fn widget_changed_files(widget_context: Option<&AutoWidgetContext>) -> (Vec<Value>, bool) {
+    let Some(ctx) = widget_context else {
+        return (Vec::new(), false);
+    };
+    let changed_files = ctx
+        .turn_files
+        .iter()
+        .map(file_entry_json)
+        .collect::<Vec<_>>();
+    let has_changes = !changed_files.is_empty();
+    (changed_files, has_changes)
 }
 
-fn parse_search_text_output(output: &str) -> SearchWidgetContent {
-    let normalized = output.replace("\r\n", "\n");
-    let mut lines: Vec<&str> = normalized.lines().collect();
-    let mut parsed = SearchWidgetContent::default();
-
-    let query_line = lines.first().copied().unwrap_or_default();
-    if let Some(value) = query_line.strip_prefix("query: ") {
-        parsed.query = value.trim().to_string();
+fn base_widget_payload(
+    panel_mode: &str,
+    title: &str,
+    state: &str,
+    tool_name: Option<&str>,
+) -> Map<String, Value> {
+    let mut payload = Map::new();
+    payload.insert("schema".to_string(), json!("catdesk.review.v1"));
+    payload.insert("panelMode".to_string(), json!(panel_mode));
+    payload.insert("title".to_string(), json!(title));
+    payload.insert("state".to_string(), json!(state));
+    if let Some(tool_name) = tool_name {
+        payload.insert("toolName".to_string(), json!(tool_name));
     }
-
-    let path_line = lines.get(1).copied().unwrap_or_default();
-    if let Some(value) = path_line.strip_prefix("path: ") {
-        parsed.path = value.trim().to_string();
-    }
-
-    let files_line = lines.get(2).copied().unwrap_or_default();
-    if let Some(value) = files_line.strip_prefix("files_scanned: ") {
-        parsed.files_scanned = value.trim().parse::<u64>().unwrap_or(0);
-    }
-
-    let matches_line = lines.get(3).copied().unwrap_or_default();
-    if let Some(value) = matches_line.strip_prefix("matches: ") {
-        parsed.matches = value.trim().parse::<u64>().unwrap_or(0);
-    }
-
-    if lines.len() <= 4 {
-        return parsed;
-    }
-
-    lines.drain(0..4);
-    while lines
-        .first()
-        .map(|line| line.trim().is_empty())
-        .unwrap_or(false)
-    {
-        lines.remove(0);
-    }
-    while lines
-        .last()
-        .map(|line| line.trim().is_empty())
-        .unwrap_or(false)
-    {
-        lines.pop();
-    }
-    if let Some(last) = lines.last().copied() {
-        if last.starts_with("[truncated at ") && last.ends_with(" matches]") {
-            parsed.truncated = true;
-            lines.pop();
-            while lines
-                .last()
-                .map(|line| line.trim().is_empty())
-                .unwrap_or(false)
-            {
-                lines.pop();
-            }
-        }
-    }
-
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if parsed.results.len() >= MAX_SEARCH_RESULTS_WIDGET {
-            parsed.truncated = true;
-            break;
-        }
-        if let Some(entry) = parse_search_match_line(line) {
-            parsed.results.push(entry);
-        }
-    }
-
-    parsed
+    payload
 }
 
-fn parse_read_file_output(output: &str) -> ReadFileWidgetContent {
-    let normalized = output.replace("\r\n", "\n");
-    let mut lines: Vec<&str> = normalized.lines().collect();
-    let mut parsed = ReadFileWidgetContent::default();
-
-    let path_line = lines.first().copied().unwrap_or_default();
-    if let Some(value) = path_line.strip_prefix("path: ") {
-        parsed.path = value.trim().to_string();
-    }
-
-    let bytes_line = lines.get(1).copied().unwrap_or_default();
-    if let Some(value) = bytes_line.strip_prefix("bytes: ") {
-        parsed.bytes = value.trim().parse::<u64>().unwrap_or(0);
-    }
-
-    let mut body_start = 0usize;
-    if path_line.starts_with("path: ") {
-        body_start = 1;
-    }
-    if bytes_line.starts_with("bytes: ") {
-        body_start = 2;
-    }
-    if lines
-        .get(body_start)
-        .map(|line| line.trim().is_empty())
-        .unwrap_or(false)
-    {
-        body_start += 1;
-    }
-    if body_start > 0 {
-        lines.drain(0..body_start.min(lines.len()));
-    }
-
-    while lines
-        .last()
-        .map(|line| line.trim().is_empty())
-        .unwrap_or(false)
-    {
-        lines.pop();
-    }
-    if let Some(last) = lines.last().copied() {
-        if last.starts_with("[truncated at ") && last.ends_with(" bytes]") {
-            parsed.truncated = true;
-            lines.pop();
-            while lines
-                .last()
-                .map(|line| line.trim().is_empty())
-                .unwrap_or(false)
-            {
-                lines.pop();
-            }
-        }
-    }
-
-    parsed.text = lines.join("\n");
-    parsed
+fn attach_widget_changed_files(
+    payload: &mut Map<String, Value>,
+    widget_context: Option<&AutoWidgetContext>,
+) {
+    let (changed_files, has_changes) = widget_changed_files(widget_context);
+    payload.insert("changedFiles".to_string(), Value::Array(changed_files));
+    payload.insert("hasChanges".to_string(), Value::Bool(has_changes));
 }
 
-fn build_auto_widget_structured_content(
+fn result_structured_content(result: &Value) -> Option<&Map<String, Value>> {
+    result.get("structuredContent").and_then(Value::as_object)
+}
+
+fn build_list_files_widget_payload(result: &Value) -> Option<Value> {
+    let structured = result_structured_content(result)?;
+    let mut payload = base_widget_payload("tool_call", "List Files", "done", Some("list_files"));
+    payload.insert("listPath".to_string(), structured.get("listPath")?.clone());
+    payload.insert(
+        "listItemCount".to_string(),
+        structured.get("listItemCount")?.clone(),
+    );
+    payload.insert(
+        "listDirectoryCount".to_string(),
+        structured.get("listDirectoryCount")?.clone(),
+    );
+    payload.insert(
+        "listFileCount".to_string(),
+        structured.get("listFileCount")?.clone(),
+    );
+    payload.insert(
+        "listOtherCount".to_string(),
+        structured.get("listOtherCount")?.clone(),
+    );
+    payload.insert(
+        "listTruncated".to_string(),
+        structured.get("listTruncated")?.clone(),
+    );
+    payload.insert(
+        "listLimit".to_string(),
+        structured.get("listLimit")?.clone(),
+    );
+    payload.insert(
+        "listEntries".to_string(),
+        structured.get("listEntries")?.clone(),
+    );
+    payload.insert("changedFiles".to_string(), json!([]));
+    payload.insert("hasChanges".to_string(), json!(false));
+    Some(Value::Object(payload))
+}
+
+fn build_search_text_widget_payload(result: &Value, is_error: bool) -> Option<Value> {
+    let structured = result_structured_content(result)?;
+    let mut payload = base_widget_payload(
+        "tool_call",
+        "Search Results",
+        widget_state(is_error, None),
+        Some("search_text"),
+    );
+    let mut search_results = Vec::new();
+    let mut widget_truncated = structured
+        .get("searchTruncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let Some(results) = structured.get("searchResults").and_then(Value::as_array) {
+        for entry in results.iter().take(MAX_SEARCH_RESULTS_WIDGET) {
+            let Some(entry_obj) = entry.as_object() else {
+                continue;
+            };
+            let Some(path) = entry_obj.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(line) = entry_obj.get("line").and_then(Value::as_u64) else {
+                continue;
+            };
+            let text = entry_obj
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|value| truncate_for_widget(value, MAX_SEARCH_LINE_CHARS))
+                .unwrap_or_default();
+            search_results.push(json!({
+                "path": path,
+                "line": line,
+                "text": text,
+            }));
+        }
+        if results.len() > MAX_SEARCH_RESULTS_WIDGET {
+            widget_truncated = true;
+        }
+    }
+    payload.insert(
+        "searchQuery".to_string(),
+        structured.get("searchQuery")?.clone(),
+    );
+    payload.insert(
+        "searchPath".to_string(),
+        structured.get("searchPath")?.clone(),
+    );
+    payload.insert(
+        "filesScanned".to_string(),
+        structured.get("filesScanned")?.clone(),
+    );
+    payload.insert(
+        "matchCount".to_string(),
+        structured.get("matchCount")?.clone(),
+    );
+    payload.insert("searchTruncated".to_string(), json!(widget_truncated));
+    payload.insert("searchResults".to_string(), Value::Array(search_results));
+    payload.insert("changedFiles".to_string(), json!([]));
+    payload.insert("hasChanges".to_string(), json!(false));
+    Some(Value::Object(payload))
+}
+
+fn build_read_file_widget_payload(result: &Value, is_error: bool) -> Option<Value> {
+    let structured = result_structured_content(result)?;
+    let mut payload = base_widget_payload(
+        "tool_call",
+        "Read File",
+        widget_state(is_error, None),
+        Some("read_file"),
+    );
+    payload.insert("path".to_string(), structured.get("path")?.clone());
+    payload.insert("bytes".to_string(), structured.get("bytes")?.clone());
+    payload.insert("text".to_string(), structured.get("text")?.clone());
+    payload.insert(
+        "truncated".to_string(),
+        structured.get("truncated")?.clone(),
+    );
+    payload.insert("changedFiles".to_string(), json!([]));
+    payload.insert("hasChanges".to_string(), json!(false));
+    Some(Value::Object(payload))
+}
+
+fn build_run_command_widget_payload(
+    result: &Value,
+    widget_context: Option<&AutoWidgetContext>,
+    is_error: bool,
+) -> Option<Value> {
+    let structured = result_structured_content(result)?;
+    let mut payload = base_widget_payload(
+        "tool_call",
+        "Command Output",
+        widget_state(is_error, widget_context),
+        Some("run_command"),
+    );
+    payload.insert("command".to_string(), structured.get("command")?.clone());
+    payload.insert(
+        "output".to_string(),
+        json!(truncate_for_widget(
+            &extract_tool_result_text(result),
+            MAX_COMMAND_OUTPUT_CHARS,
+        )),
+    );
+    attach_widget_changed_files(&mut payload, widget_context);
+    Some(Value::Object(payload))
+}
+
+fn build_generic_widget_payload(
+    req: &JsonRpcRequest,
+    result: &Value,
+    widget_context: Option<&AutoWidgetContext>,
+    is_error: bool,
+) -> Value {
+    let tool_name = tool_name_from_request(req);
+    let mut payload = base_widget_payload(
+        "tool_call",
+        "Changed Files",
+        widget_state(is_error, widget_context),
+        Some(&tool_name),
+    );
+    if widget_context.is_some() {
+        attach_widget_changed_files(&mut payload, widget_context);
+    } else {
+        payload.insert("call".to_string(), json!(format!("call {}", tool_name)));
+        payload.insert(
+            "detail".to_string(),
+            json!(summarize_tool_detail(
+                &extract_tool_result_text(result),
+                is_error
+            )),
+        );
+        payload.insert("changedFiles".to_string(), json!([]));
+        payload.insert("hasChanges".to_string(), json!(false));
+    }
+    Value::Object(payload)
+}
+
+fn build_auto_widget_payload(
     req: &JsonRpcRequest,
     result: &Value,
     widget_context: Option<&AutoWidgetContext>,
@@ -1575,125 +1592,17 @@ fn build_auto_widget_structured_content(
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if tool_name == "run_command" {
-        let arguments = tool_arguments(req);
-        let command_text = arguments
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let output_text =
-            truncate_for_widget(&extract_tool_result_text(result), MAX_COMMAND_OUTPUT_CHARS);
-        let (state, changed_files, has_changes) = if let Some(ctx) = widget_context {
-            (
-                if ctx.is_error {
-                    "failed"
-                } else if ctx.turn_files.is_empty() {
-                    "done"
-                } else {
-                    "changed"
-                },
-                ctx.turn_files
-                    .iter()
-                    .map(file_entry_json)
-                    .collect::<Vec<_>>(),
-                !ctx.turn_files.is_empty(),
-            )
-        } else {
-            (if is_error { "failed" } else { "done" }, Vec::new(), false)
-        };
-        return json!({
-            "schema": "catdesk.review.v1",
-            "panelMode": "tool_call",
-            "title": "Command Output",
-            "state": state,
-            "toolName": "run_command",
-            "command": command_text,
-            "output": output_text,
-            "changedFiles": changed_files,
-            "hasChanges": has_changes
-        });
+    match tool_name.as_str() {
+        "list_files" => build_list_files_widget_payload(result)
+            .unwrap_or_else(|| build_generic_widget_payload(req, result, widget_context, is_error)),
+        "search_text" => build_search_text_widget_payload(result, is_error)
+            .unwrap_or_else(|| build_generic_widget_payload(req, result, widget_context, is_error)),
+        "read_file" => build_read_file_widget_payload(result, is_error)
+            .unwrap_or_else(|| build_generic_widget_payload(req, result, widget_context, is_error)),
+        "run_command" => build_run_command_widget_payload(result, widget_context, is_error)
+            .unwrap_or_else(|| build_generic_widget_payload(req, result, widget_context, is_error)),
+        _ => build_generic_widget_payload(req, result, widget_context, is_error),
     }
-
-    if tool_name == "search_text" {
-        let arguments = tool_arguments(req);
-        let query_arg = arguments
-            .get("query")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let path_arg = arguments.get("path").and_then(Value::as_str).unwrap_or(".");
-        let parsed = parse_search_text_output(&extract_tool_result_text(result));
-        return json!({
-            "schema": "catdesk.review.v1",
-            "panelMode": "tool_call",
-            "title": "Search Results",
-            "state": if is_error { "failed" } else { "done" },
-            "toolName": "search_text",
-            "searchQuery": if parsed.query.is_empty() { query_arg } else { parsed.query.as_str() },
-            "searchPath": if parsed.path.is_empty() { path_arg } else { parsed.path.as_str() },
-            "filesScanned": parsed.files_scanned,
-            "matchCount": parsed.matches,
-            "searchTruncated": parsed.truncated,
-            "searchResults": parsed.results.iter().map(search_result_entry_json).collect::<Vec<_>>(),
-            "changedFiles": [],
-            "hasChanges": false
-        });
-    }
-
-    if tool_name == "read_file" {
-        let arguments = tool_arguments(req);
-        let path_arg = arguments
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let parsed = parse_read_file_output(&extract_tool_result_text(result));
-        return json!({
-            "schema": "catdesk.review.v1",
-            "panelMode": "tool_call",
-            "title": "Read File",
-            "state": if is_error { "failed" } else { "done" },
-            "toolName": "read_file",
-            "path": if parsed.path.is_empty() { path_arg } else { parsed.path.as_str() },
-            "bytes": parsed.bytes,
-            "text": parsed.text,
-            "truncated": parsed.truncated,
-            "changedFiles": [],
-            "hasChanges": false
-        });
-    }
-
-    let line = summarize_tool_detail(&extract_tool_result_text(result), is_error);
-    if let Some(ctx) = widget_context {
-        let state = if ctx.is_error {
-            "failed"
-        } else if ctx.turn_files.is_empty() {
-            "done"
-        } else {
-            "changed"
-        };
-        let changed_files: Vec<Value> = ctx.turn_files.iter().map(file_entry_json).collect();
-        return json!({
-            "schema": "catdesk.review.v1",
-            "panelMode": "tool_call",
-            "title": "Changed Files",
-            "state": state,
-            "toolName": tool_name,
-            "changedFiles": changed_files,
-            "hasChanges": !ctx.turn_files.is_empty()
-        });
-    }
-
-    json!({
-        "schema": "catdesk.review.v1",
-        "panelMode": "tool_call",
-        "title": "Changed Files",
-        "state": if is_error { "failed" } else { "done" },
-        "toolName": tool_name,
-        "call": format!("call {}", tool_name),
-        "detail": line,
-        "changedFiles": [],
-        "hasChanges": false
-    })
 }
 
 fn enrich_tool_result(
@@ -1709,32 +1618,24 @@ fn enrich_tool_result(
             }]
         });
     }
-    let should_overwrite_structured = widget_context.is_some();
-    let has_structured = matches!(result.get("structuredContent"), Some(Value::Object(_)));
-    let structured = if should_overwrite_structured || !has_structured {
-        Some(build_auto_widget_structured_content(
-            req,
-            &result,
-            widget_context,
-        ))
-    } else {
+    let has_widget_payload = result
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+        .is_some();
+    let widget_payload = if has_widget_payload {
         None
+    } else {
+        Some(build_auto_widget_payload(req, &result, widget_context))
     };
-    let mut inserted_structured = false;
     if let Some(result_obj) = result.as_object_mut() {
         let meta_value = result_obj
             .entry("_meta".to_string())
             .or_insert_with(|| json!({}));
         ensure_output_template_meta(meta_value);
-        if let Some(structured) = structured {
-            result_obj.insert("structuredContent".to_string(), structured);
-            inserted_structured = true;
-        }
     }
-    if inserted_structured {
-        sync_widget_payload_from_structured(&mut result);
-    } else {
-        ensure_widget_payload_from_structured(&mut result);
+    if let Some(widget_payload) = widget_payload {
+        attach_widget_payload_meta(&mut result, widget_payload);
     }
     result
 }
@@ -2305,7 +2206,17 @@ fn handle_read_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespon
         None => return tool_error_response(req, "Missing required parameter: path".into()),
     };
     match workspace_tools::read_file(workspace_root, path) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(output) => tool_success_response_with_structured(
+            req,
+            output.render_text(),
+            json!({
+                "toolName": "read_file",
+                "path": output.path,
+                "bytes": output.bytes,
+                "text": output.text,
+                "truncated": output.truncated,
+            }),
+        ),
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2325,7 +2236,16 @@ fn handle_write_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     match workspace_tools::write_file(workspace_root, path, content, create_dirs) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(text) => tool_success_response_with_structured(
+            req,
+            text,
+            json!({
+                "toolName": "write_file",
+                "path": path,
+                "bytesWritten": content.len(),
+                "createDirs": create_dirs,
+            }),
+        ),
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2345,7 +2265,16 @@ fn handle_append_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     match workspace_tools::append_file(workspace_root, path, content, create_dirs) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(text) => tool_success_response_with_structured(
+            req,
+            text,
+            json!({
+                "toolName": "append_file",
+                "path": path,
+                "bytesAppended": content.len(),
+                "createDirs": create_dirs,
+            }),
+        ),
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2365,10 +2294,6 @@ fn handle_list_files(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
         Ok(listing) => {
             let text = listing.render_text();
             let structured = json!({
-                "schema": "catdesk.review.v1",
-                "panelMode": "tool_call",
-                "title": "List Files",
-                "state": "done",
                 "toolName": "list_files",
                 "listPath": listing.path,
                 "listItemCount": listing.item_count,
@@ -2401,7 +2326,20 @@ fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
     match workspace_tools::search_text(workspace_root, query, path, include_hidden, limit) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(output) => tool_success_response_with_structured(
+            req,
+            output.render_text(),
+            json!({
+                "toolName": "search_text",
+                "searchQuery": output.query,
+                "searchPath": output.path,
+                "filesScanned": output.files_scanned,
+                "matchCount": output.match_count,
+                "searchTruncated": output.truncated,
+                "searchLimit": output.limit,
+                "searchResults": output.results,
+            }),
+        ),
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2417,7 +2355,15 @@ fn handle_make_directory(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcR
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     match workspace_tools::make_directory(workspace_root, path, recursive) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(text) => tool_success_response_with_structured(
+            req,
+            text,
+            json!({
+                "toolName": "make_directory",
+                "path": path,
+                "recursive": recursive,
+            }),
+        ),
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2441,7 +2387,17 @@ fn handle_move_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespon
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     match workspace_tools::move_path(workspace_root, from, to, overwrite, create_dirs) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(text) => tool_success_response_with_structured(
+            req,
+            text,
+            json!({
+                "toolName": "move_path",
+                "from": from,
+                "to": to,
+                "overwrite": overwrite,
+                "createDirs": create_dirs,
+            }),
+        ),
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2457,7 +2413,15 @@ fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     match workspace_tools::delete_path(workspace_root, path, recursive) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(text) => tool_success_response_with_structured(
+            req,
+            text,
+            json!({
+                "toolName": "delete_path",
+                "path": path,
+                "recursive": recursive,
+            }),
+        ),
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2481,7 +2445,15 @@ fn handle_replace_in_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpc
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     match workspace_tools::replace_in_file(workspace_root, path, find, replace, replace_all) {
-        Ok(text) => tool_success_response(req, text),
+        Ok(text) => tool_success_response_with_structured(
+            req,
+            text,
+            json!({
+                "toolName": "replace_in_file",
+                "path": path,
+                "replaceAll": replace_all,
+            }),
+        ),
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2525,30 +2497,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_read_file_output_extracts_body_and_truncation() {
-        let parsed = parse_read_file_output(
-            "path: README.md
-bytes: 12
+    #[tokio::test]
+    async fn write_file_widget_payload_includes_changed_files_after_tool_call() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-write-file-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
 
-hello
-world
-
-[truncated at 12 bytes]",
+        let req = tool_call_request(
+            "write_file",
+            json!({
+                "path": "notes.txt",
+                "content": "hello world\n",
+            }),
         );
+        let mut session = Session::new();
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &mut session,
+            &workspace_root_str,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
 
-        assert_eq!(parsed.path, "README.md");
-        assert_eq!(parsed.bytes, 12);
+        let widget_payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+
         assert_eq!(
-            parsed.text,
-            "hello
-world"
+            widget_payload.get("hasChanges").and_then(Value::as_bool),
+            Some(true)
         );
-        assert!(parsed.truncated);
+        assert_eq!(
+            widget_payload
+                .get("changedFiles")
+                .and_then(Value::as_array)
+                .map(|files| files.len()),
+            Some(1)
+        );
+        assert_eq!(
+            widget_payload
+                .get("changedFiles")
+                .and_then(Value::as_array)
+                .and_then(|files| files.first())
+                .and_then(|file| file.get("path"))
+                .and_then(Value::as_str),
+            Some("notes.txt")
+        );
+
+        let _ = std::fs::remove_file(workspace_root.join("notes.txt"));
+        let _ = std::fs::remove_dir_all(workspace_root);
     }
 
     #[test]
-    fn read_file_uses_dedicated_structured_payload_with_full_text() {
+    fn read_file_separates_model_payload_from_widget_payload() {
         let req = tool_call_request(
             "read_file",
             json!({
@@ -2556,6 +2564,13 @@ world"
             }),
         );
         let raw = json!({
+            "structuredContent": {
+                "toolName": "read_file",
+                "path": "README.md",
+                "bytes": 11,
+                "text": "hello world",
+                "truncated": false
+            },
             "content": [{
                 "type": "text",
                 "text": "path: README.md
@@ -2575,10 +2590,6 @@ hello world"
             .expect("missing widget payload");
 
         assert_eq!(
-            structured.get("title").and_then(Value::as_str),
-            Some("Read File")
-        );
-        assert_eq!(
             structured.get("toolName").and_then(Value::as_str),
             Some("read_file")
         );
@@ -2595,8 +2606,20 @@ hello world"
             structured.get("truncated").and_then(Value::as_bool),
             Some(false)
         );
-        assert!(structured.get("detail").is_none());
-        assert!(structured.get("call").is_none());
+        assert!(structured.get("schema").is_none());
+        assert!(structured.get("panelMode").is_none());
+        assert!(structured.get("title").is_none());
+        assert!(structured.get("state").is_none());
+        assert!(structured.get("changedFiles").is_none());
+        assert!(structured.get("hasChanges").is_none());
+        assert_eq!(
+            widget_payload.get("title").and_then(Value::as_str),
+            Some("Read File")
+        );
+        assert_eq!(
+            widget_payload.get("panelMode").and_then(Value::as_str),
+            Some("tool_call")
+        );
         assert_eq!(
             widget_payload.get("text").and_then(Value::as_str),
             Some("hello world")
@@ -2629,6 +2652,13 @@ hello world"
 
         assert!(structured.get("turnTokenUsage").is_none());
         assert!(structured.get("toolCallCount").is_none());
+        assert!(structured.get("title").is_none());
+        assert!(structured.get("panelMode").is_none());
+        assert!(structured.get("state").is_none());
+        assert_eq!(
+            structured.get("toolName").and_then(Value::as_str),
+            Some(RENDER_FINAL_SUMMARY_WIDGET_TOOL)
+        );
         assert_eq!(
             widget_payload
                 .get("turnTokenUsage")
@@ -2711,6 +2741,9 @@ hello world"
             .expect("missing widget html");
 
         assert!(structured.get("changedFiles").is_none());
+        assert!(structured.get("title").is_none());
+        assert!(structured.get("panelMode").is_none());
+        assert!(structured.get("state").is_none());
         assert!(
             resp.result
                 .as_ref()
@@ -2750,7 +2783,13 @@ hello world"
     fn attach_current_usage_updates_widget_payload_meta() {
         let mut result = json!({
             "structuredContent": {
-                "schema": "catdesk.review.v1"
+                "toolName": "read_file"
+            },
+            "_meta": {
+                WIDGET_PAYLOAD_META_KEY: {
+                    "schema": "catdesk.review.v1",
+                    "toolName": "read_file"
+                }
             }
         });
 
@@ -2814,6 +2853,10 @@ hello world"
         assert!(structured.get("binagotchyPath").is_none());
         assert!(structured.get("binagotchyCards").is_none());
         assert!(widget_payload.get("instructionText").is_none());
+        assert_eq!(
+            widget_payload.get("title").and_then(Value::as_str),
+            Some("CatDesk Instruction")
+        );
         assert_eq!(
             widget_payload.get("workspacePath").and_then(Value::as_str),
             Some("/tmp/workspace")
