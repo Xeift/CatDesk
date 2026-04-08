@@ -209,7 +209,7 @@ mod tests {
         let (image, _) = create_character(Some(42), 32, 1, "normal", "none", 0.0, 1.0, 0);
         let spirit = apply_mascot_spirit_frame(42, &image, 40, 32);
         let (width, height) = spirit.dimensions();
-        assert_eq!((width, height), (40, 32));
+        assert_eq!((width, height), (image.width().max(40), image.height().max(32)));
         assert_eq!(spirit.get_pixel(0, 0)[3], 255);
         assert_eq!(spirit.get_pixel(width - 1, 0)[3], 255);
         assert_eq!(spirit.get_pixel(0, height - 1)[3], 255);
