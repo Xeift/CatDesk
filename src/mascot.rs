@@ -26,6 +26,8 @@ const MASCOT_SPIRIT_FRAME_WIDTH: u32 = 40;
 const MASCOT_SPIRIT_FRAME_HEIGHT: u32 = 32;
 const SPIRIT_HERO_BG_WIDTH: u32 = 720;
 const SPIRIT_HERO_BG_HEIGHT: u32 = 420;
+pub const TUI_MASCOT_BLOCK_WIDTH: u16 = MASCOT_SPIRIT_FRAME_WIDTH as u16 + 2;
+pub const TUI_MASCOT_BLOCK_HEIGHT: u16 = ((MASCOT_SPIRIT_FRAME_HEIGHT as u16) + 1) / 2 + 2;
 #[cfg_attr(test, allow(dead_code))]
 const CATDESK_DIR_NAME: &str = ".catdesk";
 #[cfg_attr(test, allow(dead_code))]
@@ -123,16 +125,6 @@ impl MascotPack {
             ((now_millis / self.frame_ms as u128) as usize) % self.tui_frames.len()
         };
         &self.tui_frames[idx]
-    }
-
-    pub fn required_tui_block_height(&self) -> u16 {
-        let rows = self
-            .tui_frames
-            .iter()
-            .map(|frame| frame.rows.len() as u16)
-            .max()
-            .unwrap_or(0);
-        rows.saturating_add(2)
     }
 }
 

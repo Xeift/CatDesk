@@ -19,7 +19,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use devtools::DevtoolsBridge;
-use mascot::render_tui_lines;
+use mascot::{TUI_MASCOT_BLOCK_HEIGHT, TUI_MASCOT_BLOCK_WIDTH, render_tui_lines};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -27,7 +27,7 @@ use ratatui::{
 use state::{
     AppState, FLOW_ANIM_CELLS, FLOW_BOOTSTRAP_PHASES, FlowAnimKind, FlowAnimSegment,
     FlowDirection, Mode, ServerUiEvent, SessionFlow, SharedState, ToolMode, UsageTotals,
-    app_config_path, load_ngrok_authtoken, save_ngrok_authtoken,
+    app_config_path, flow_anim_lit_count, load_ngrok_authtoken, save_ngrok_authtoken,
 };
 use std::io::{Write, stdout};
 use std::sync::Arc;
@@ -40,6 +40,7 @@ use tokio::sync::{
 const FLOW_ROW_CELLS: usize = FLOW_ANIM_CELLS;
 const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
 const UI_POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
+const STATUS_PANEL_HEIGHT: u16 = TUI_MASCOT_BLOCK_HEIGHT + 6;
 
 // ── Selection ───────────────────────────────────────────────
 
@@ -129,90 +130,32 @@ fn flow_direction(flow: Option<&SessionFlow>, now_millis: u128) -> FlowDirection
         if let Some(seg) = current_anim_segment(flow, now_millis) {
             return seg.direction;
         }
-        if let Some(seg) = flow.anim_queue.back() {
-            return seg.direction;
-        }
-        if flow.closing_started_ms.is_some() {
-            return flow.last_direction;
-        }
+        return flow.last_direction;
     }
     FlowDirection::Forward
 }
 
-fn flow_lit_count(
-    flow: Option<&SessionFlow>,
-    active: bool,
-    now_millis: u128,
-    direction: FlowDirection,
-    forward_delay_cells: u64,
-    backward_delay_cells: u64,
-    _close_delay_cells: u64,
-    cells: usize,
-) -> usize {
-    if !active && flow.is_none() {
+fn flow_lit_count(flow: Option<&SessionFlow>, now_millis: u128, cells: usize) -> usize {
+    let Some(flow) = flow else {
+        return 0;
+    };
+    if flow.closing_started_ms.is_some() {
         return 0;
     }
-
-    if let Some(flow) = flow {
-        if flow.closing_started_ms.is_some() {
-            // A closed SSE stream should render as fully unlit immediately.
-            0
-        } else if active {
-            if let Some(seg) = current_anim_segment(flow, now_millis) {
-                if seg.kind == FlowAnimKind::Turn {
-                    0
-                } else {
-                    let step_ms = seg.step_ms.max(1) as u128;
-                    let delay_cells = match direction {
-                        FlowDirection::Forward => forward_delay_cells,
-                        FlowDirection::Backward => backward_delay_cells,
-                    };
-                    let delay_ms = (delay_cells.saturating_mul(seg.step_ms.max(1))) as u128;
-                    let elapsed_ms = now_millis.saturating_sub(seg.started_ms);
-                    if elapsed_ms < delay_ms {
-                        0
-                    } else {
-                        let progressed = elapsed_ms - delay_ms;
-                        (((progressed / step_ms) as usize) + 1).min(cells)
-                    }
-                }
-            } else {
-                cells
-            }
-        } else {
-            0
-        }
-    } else if active {
-        cells
-    } else {
-        0
-    }
+    current_anim_segment(flow, now_millis)
+        .map(|seg| flow_anim_lit_count(seg, now_millis).min(cells))
+        .unwrap_or(0)
 }
 
-fn debug_lane(direction: FlowDirection, lit_count: usize, cells: usize) -> String {
-    let dashes = cells.saturating_sub(1);
+fn debug_lane(direction: Option<FlowDirection>, lit_count: usize, cells: usize) -> String {
     let mut out = String::with_capacity(cells);
     for i in 0..cells {
-        match direction {
-            FlowDirection::Forward => {
-                if i == dashes {
-                    out.push('>');
-                } else if i < lit_count {
-                    out.push('#');
-                } else {
-                    out.push('-');
-                }
-            }
-            FlowDirection::Backward => {
-                if i == 0 {
-                    out.push('<');
-                } else if i >= cells.saturating_sub(lit_count) {
-                    out.push('#');
-                } else {
-                    out.push('-');
-                }
-            }
-        }
+        let lit_here = match direction {
+            Some(FlowDirection::Forward) => lit_count > 0 && i < lit_count,
+            Some(FlowDirection::Backward) => lit_count > 0 && i >= cells.saturating_sub(lit_count),
+            None => false,
+        };
+        out.push(if lit_here { '#' } else { '-' });
     }
     out
 }
@@ -407,18 +350,9 @@ fn build_animation_snapshot(app: &AppState) -> Vec<String> {
         let lane_active = closing
             || !flow.anim_queue.is_empty()
             || (app.server_running && app.ngrok_running && app.remote_connected);
-        let direction = flow_direction(Some(flow), now_millis);
+        let direction = Some(flow_direction(Some(flow), now_millis)).filter(|_| lane_active);
         let phase = flow_phase(flow, now_millis);
-        let lit = flow_lit_count(
-            Some(flow),
-            lane_active,
-            now_millis,
-            direction,
-            0,
-            0,
-            0,
-            FLOW_ROW_CELLS,
-        );
+        let lit = flow_lit_count(Some(flow), now_millis, FLOW_ROW_CELLS);
         let lane = debug_lane(direction, lit, FLOW_ROW_CELLS);
         rows.push(format!(
             "sid {} phase={:<8} tool={:<16} Your computer {} ChatGPT Web (via Ngrok)",
@@ -2214,21 +2148,10 @@ fn draw_ui(
         && visible_flow_count == 0
         && !within_connect_grace;
     let show_session_flow = !show_guide;
-    let flow_lines = if show_session_flow {
-        if visible_flow_count == 0 {
-            2
-        } else {
-            visible_flow_count.saturating_mul(2)
-        }
-    } else {
-        0
-    };
-    let mascot_block_height = app.mascot.required_tui_block_height();
-    let desired_status_height = if show_guide { 20 } else { 17 + flow_lines };
-    let desired_status_height = desired_status_height.max(mascot_block_height);
     let logs_min_height = if show_guide { 3 } else { 5 };
     let max_status_height = area.height.saturating_sub(6 + logs_min_height).max(17);
-    let status_height = desired_status_height.min(max_status_height);
+    // Keep the main panel deterministic: mascot size must not drive layout.
+    let status_height = STATUS_PANEL_HEIGHT.min(max_status_height);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2330,47 +2253,36 @@ fn draw_ui(
         " ".repeat(lane_left_padding + centered_in_lane)
     };
     let lane_for = |active: bool, flow: Option<&SessionFlow>| -> Vec<Span<'static>> {
-        const DASHES: usize = FLOW_ROW_CELLS - 1;
         const CELLS: usize = FLOW_ROW_CELLS;
         let unlit = Style::default().fg(palette.muted_fg);
         let lit = Style::default()
             .fg(palette.info_fg)
             .add_modifier(Modifier::BOLD);
 
-        if !active && flow.is_none() {
+        let direction = flow.map(|flow| flow_direction(Some(flow), now_millis));
+        let lit_count = if active {
+            flow_lit_count(flow, now_millis, CELLS)
+        } else {
+            0
+        };
+
+        if lit_count == 0 || direction.is_none() {
             return vec![
-                Span::styled(format!("{} ", "-".repeat(DASHES)), unlit),
+                Span::styled("-".repeat(CELLS), unlit),
                 Span::raw(" "),
             ];
         }
 
-        let direction = flow_direction(flow, now_millis);
-        let lit_count = flow_lit_count(flow, active, now_millis, direction, 0, 0, 0, CELLS);
+        let direction = direction.unwrap_or(FlowDirection::Forward);
 
         let mut spans = Vec::with_capacity(CELLS + 1);
         for i in 0..CELLS {
             let lit_here = match direction {
-                FlowDirection::Forward => lit_count > 0 && i < lit_count,
-                FlowDirection::Backward => lit_count > 0 && i >= CELLS.saturating_sub(lit_count),
-            };
-            let ch = match direction {
-                FlowDirection::Forward => {
-                    if i == DASHES {
-                        '>'
-                    } else {
-                        '-'
-                    }
-                }
-                FlowDirection::Backward => {
-                    if i == 0 {
-                        '<'
-                    } else {
-                        '-'
-                    }
-                }
+                FlowDirection::Forward => i < lit_count,
+                FlowDirection::Backward => i >= CELLS.saturating_sub(lit_count),
             };
             let style = if lit_here { lit } else { unlit };
-            spans.push(Span::styled(ch.to_string(), style));
+            spans.push(Span::styled("-".to_string(), style));
         }
         spans.push(Span::raw(" "));
         spans
@@ -2392,6 +2304,13 @@ fn draw_ui(
     let session_meta_gap_for = |sid_text: &str| -> String {
         const SID_COLUMN_WIDTH: usize = 16;
         " ".repeat(SID_COLUMN_WIDTH.saturating_sub(sid_text.chars().count()).max(2))
+    };
+    let status_inner_height = status_height.saturating_sub(2) as usize;
+    let flow_block_lines = 2 + FLOW_BOOTSTRAP_PHASES.len();
+    let visible_flow_slots = if show_session_flow {
+        status_inner_height.saturating_sub(12 + 1 + 2) / flow_block_lines.max(1)
+    } else {
+        0
     };
 
     let mut status_lines: Vec<Line> = vec![
@@ -2570,7 +2489,7 @@ fn draw_ui(
         ]));
     }
 
-    if show_session_flow {
+    if show_session_flow && visible_flow_slots > 0 {
         status_lines.push(Line::from(""));
         if visible_flow_count == 0 {
             let call_text = if app.remote_connected {
@@ -2610,6 +2529,7 @@ fn draw_ui(
                 .session_flows
                 .iter()
                 .filter(|flow| should_display_flow_row(flow, app.remote_connected))
+                .take(visible_flow_slots)
             {
                 let latest_action = latest_flow_action(flow);
                 let call_text = trim_line(&format!("call {latest_action}"), FLOW_ROW_CELLS);
@@ -2745,7 +2665,7 @@ fn draw_ui(
 
     let status_columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(42)])
+        .constraints([Constraint::Min(0), Constraint::Length(TUI_MASCOT_BLOCK_WIDTH)])
         .split(chunks[1]);
     let status_block = Block::default()
         .title(" Status ")

@@ -194,6 +194,8 @@ pub struct FlowAnimSegment {
     pub started_ms: u128,
     pub ends_ms: u128,
     pub step_ms: u64,
+    pub start_cells: usize,
+    pub end_cells: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -449,11 +451,12 @@ pub type SharedState = Arc<Mutex<AppState>>;
 
 pub const FLOW_ANIM_CELLS: usize = 32;
 const FLOW_LINK_CELLS: u64 = FLOW_ANIM_CELLS as u64;
-const FLOW_CHAIN_DELAY_CELLS: u64 = 3;
-const FLOW_ANIMATION_DURATION_MS: u64 = 250;
+const FLOW_CHAIN_DELAY_CELLS: u64 = 0;
+const FLOW_FORWARD_ANIMATION_DURATION_MS: u64 = 125;
+const FLOW_BACKWARD_ANIMATION_DURATION_MS: u64 = 125;
 const FLOW_STEP_FIXED_MS: u64 =
-    (FLOW_ANIMATION_DURATION_MS + FLOW_LINK_CELLS - 1) / FLOW_LINK_CELLS;
-const FLOW_TURN_TRANSITION_MS: u64 = 60;
+    (FLOW_FORWARD_ANIMATION_DURATION_MS + FLOW_LINK_CELLS - 1) / FLOW_LINK_CELLS;
+const FLOW_TURN_TRANSITION_MS: u64 = 24;
 const FLOW_CLOSE_PRUNE_MULTIPLIER: u64 = 3;
 
 fn short_session_id(sid: &str) -> String {
@@ -523,8 +526,60 @@ fn prune_finished_segments(queue: &mut VecDeque<FlowAnimSegment>, now_ms: u128) 
     }
 }
 
-fn move_segment_duration_ms(step_ms: u64) -> u128 {
-    (FLOW_LINK_CELLS + FLOW_CHAIN_DELAY_CELLS) as u128 * step_ms as u128
+fn current_queue_segment(queue: &VecDeque<FlowAnimSegment>, now_ms: u128) -> Option<FlowAnimSegment> {
+    if let Some(seg) = queue
+        .iter()
+        .find(|seg| seg.started_ms <= now_ms && now_ms < seg.ends_ms)
+    {
+        return Some(*seg);
+    }
+    queue.front().copied()
+}
+
+pub(crate) fn flow_anim_lit_count(seg: FlowAnimSegment, now_ms: u128) -> usize {
+    if seg.started_ms >= seg.ends_ms {
+        return seg.end_cells;
+    }
+    if now_ms <= seg.started_ms {
+        return seg.start_cells;
+    }
+    if now_ms >= seg.ends_ms {
+        return seg.end_cells;
+    }
+
+    let duration_ms = seg.ends_ms.saturating_sub(seg.started_ms);
+    if duration_ms == 0 {
+        return seg.end_cells;
+    }
+
+    let elapsed_ms = now_ms.saturating_sub(seg.started_ms);
+    let distance = seg.end_cells.abs_diff(seg.start_cells) as u128;
+    let progressed = ((distance * elapsed_ms) / duration_ms) as usize;
+
+    if seg.end_cells >= seg.start_cells {
+        (seg.start_cells + progressed).min(seg.end_cells)
+    } else {
+        seg.start_cells
+            .saturating_sub(progressed.min(seg.start_cells - seg.end_cells))
+    }
+}
+
+fn move_segment_duration_ms(
+    direction: FlowDirection,
+    _step_ms: u64,
+    start_cells: usize,
+    end_cells: usize,
+) -> u128 {
+    let cells_to_travel = end_cells.abs_diff(start_cells) as u128;
+    if cells_to_travel == 0 {
+        return 0;
+    }
+    let base_duration_ms = match direction {
+        FlowDirection::Forward => FLOW_FORWARD_ANIMATION_DURATION_MS as u128,
+        FlowDirection::Backward => FLOW_BACKWARD_ANIMATION_DURATION_MS as u128,
+    };
+    ((cells_to_travel + FLOW_CHAIN_DELAY_CELLS as u128) * base_duration_ms)
+        .div_ceil(FLOW_LINK_CELLS as u128)
 }
 
 fn enqueue_flow_segment(
@@ -535,41 +590,52 @@ fn enqueue_flow_segment(
 ) {
     prune_finished_segments(queue, now_ms);
 
-    let mut start_ms = now_ms;
-    if let Some(tail) = queue.back() {
-        start_ms = start_ms.max(tail.ends_ms);
-    }
+    let current_seg = current_queue_segment(queue, now_ms);
+    let current_direction = current_seg
+        .map(|seg| seg.direction)
+        .or_else(|| queue.back().map(|seg| seg.direction));
+    let current_cells = current_seg
+        .map(|seg| flow_anim_lit_count(seg, now_ms))
+        .or_else(|| queue.back().map(|seg| seg.end_cells))
+        .unwrap_or(0)
+        .min(FLOW_ANIM_CELLS);
 
-    let last_move_direction = queue.iter().rev().find_map(|seg| {
-        if seg.kind == FlowAnimKind::Move {
-            Some(seg.direction)
-        } else {
-            None
-        }
-    });
-    if let Some(last_dir) = last_move_direction {
-        if last_dir != direction {
-            let turn_start = start_ms;
-            let turn_end = turn_start + FLOW_TURN_TRANSITION_MS as u128;
+    queue.clear();
+
+    let mut start_ms = now_ms;
+    let mut move_start_cells = 0usize;
+
+    if let Some(current_direction) = current_direction {
+        if current_direction == direction {
+            move_start_cells = current_cells;
+        } else if current_cells > 0 {
+            let turn_end = start_ms + FLOW_TURN_TRANSITION_MS as u128;
             queue.push_back(FlowAnimSegment {
                 kind: FlowAnimKind::Turn,
-                direction: last_dir,
-                started_ms: turn_start,
+                direction: current_direction,
+                started_ms: start_ms,
                 ends_ms: turn_end,
-                step_ms: 0,
+                step_ms,
+                start_cells: current_cells,
+                end_cells: 0,
             });
             start_ms = turn_end;
         }
     }
 
-    let move_end = start_ms + move_segment_duration_ms(step_ms);
-    queue.push_back(FlowAnimSegment {
-        kind: FlowAnimKind::Move,
-        direction,
-        started_ms: start_ms,
-        ends_ms: move_end,
-        step_ms,
-    });
+    let move_end =
+        start_ms + move_segment_duration_ms(direction, step_ms, move_start_cells, FLOW_ANIM_CELLS);
+    if move_end > start_ms {
+        queue.push_back(FlowAnimSegment {
+            kind: FlowAnimKind::Move,
+            direction,
+            started_ms: start_ms,
+            ends_ms: move_end,
+            step_ms,
+            start_cells: move_start_cells,
+            end_cells: FLOW_ANIM_CELLS,
+        });
+    }
 }
 
 fn flow_bootstrap_step(index: usize) -> Option<&'static FlowBootstrapStep> {
@@ -1034,5 +1100,55 @@ toolCallCount = 0
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn flow_anim_lit_count_interpolates_between_endpoints() {
+        let duration_ms =
+            move_segment_duration_ms(FlowDirection::Forward, derive_flow_step_ms(), 0, FLOW_ANIM_CELLS);
+        let seg = FlowAnimSegment {
+            kind: FlowAnimKind::Move,
+            direction: FlowDirection::Forward,
+            started_ms: 100,
+            ends_ms: 100 + duration_ms,
+            step_ms: derive_flow_step_ms(),
+            start_cells: 0,
+            end_cells: FLOW_ANIM_CELLS,
+        };
+
+        assert_eq!(flow_anim_lit_count(seg, 100), 0);
+        assert!(flow_anim_lit_count(seg, 100 + duration_ms / 2) > 0);
+        assert!(flow_anim_lit_count(seg, 100 + duration_ms / 2) < FLOW_ANIM_CELLS);
+        assert_eq!(flow_anim_lit_count(seg, 100 + duration_ms), FLOW_ANIM_CELLS);
+    }
+
+    #[test]
+    fn backward_move_uses_longer_duration() {
+        let forward =
+            move_segment_duration_ms(FlowDirection::Forward, derive_flow_step_ms(), 0, FLOW_ANIM_CELLS);
+        let backward =
+            move_segment_duration_ms(FlowDirection::Backward, derive_flow_step_ms(), 0, FLOW_ANIM_CELLS);
+
+        assert_eq!(forward, FLOW_FORWARD_ANIMATION_DURATION_MS as u128);
+        assert_eq!(backward, FLOW_BACKWARD_ANIMATION_DURATION_MS as u128);
+    }
+
+    #[test]
+    fn enqueue_flow_segment_preempts_inflight_move() {
+        let mut queue = VecDeque::new();
+        let step_ms = derive_flow_step_ms();
+        enqueue_flow_segment(&mut queue, FlowDirection::Forward, 0, step_ms);
+        assert_eq!(queue.len(), 1);
+
+        enqueue_flow_segment(&mut queue, FlowDirection::Backward, 40, step_ms);
+        assert_eq!(queue.len(), 2);
+        assert!(matches!(queue[0].kind, FlowAnimKind::Turn));
+        assert!(queue[0].direction == FlowDirection::Forward);
+        assert!(queue[0].start_cells > 0);
+        assert_eq!(queue[0].end_cells, 0);
+        assert!(matches!(queue[1].kind, FlowAnimKind::Move));
+        assert!(queue[1].direction == FlowDirection::Backward);
+        assert_eq!(queue[1].start_cells, 0);
+        assert_eq!(queue[1].end_cells, FLOW_ANIM_CELLS);
     }
 }
