@@ -224,6 +224,7 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
 fn attach_catdesk_instruction_actions(
     result: &mut Option<Value>,
     public_base_url: Option<&str>,
+    mascot_seed: u64,
     partner_binagotchy_seed: Option<&str>,
 ) {
     let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
@@ -259,6 +260,10 @@ fn attach_catdesk_instruction_actions(
     widget_payload.insert(
         "partnerBinagotchySeed".to_string(),
         json!(partner_binagotchy_seed.unwrap_or("")),
+    );
+    widget_payload.insert(
+        "widgetMascot".to_string(),
+        json!(crate::mascot::build_widget_mascot(mascot_seed)),
     );
 
     if let Some(cards) = widget_payload
@@ -526,6 +531,7 @@ mod tests {
         attach_catdesk_instruction_actions(
             &mut result,
             Some("https://example.ngrok.app"),
+            0xff,
             Some("deadbeef"),
         );
 
@@ -559,6 +565,7 @@ mod tests {
                 .and_then(Value::as_str),
             Some("deadbeef")
         );
+        assert!(widget_payload.get("widgetMascot").is_some());
         assert_eq!(card.get("isPartner").and_then(Value::as_bool), Some(true));
         assert_eq!(
             card.get("saveFolderUrl").and_then(Value::as_str),
@@ -689,27 +696,9 @@ async fn post_mcp(
 
     let _ = s.ui_events.send(ServerUiEvent::IncrementRequestCount);
 
-    let (
-        workspace_root,
-        mascot_seed,
-        mode,
-        tool_mode,
-        set_catdesk_as_co_author,
-        mut usage_totals,
-        ngrok_url,
-        partner_binagotchy_seed,
-    ) = {
+    let mut usage_totals = {
         let app = s.app.lock().await;
-        (
-            app.workspace_root.clone(),
-            app.mascot_seed,
-            app.mode,
-            app.tool_mode,
-            app.set_catdesk_as_co_author,
-            app.usage_totals.clone(),
-            app.ngrok_url.clone(),
-            app.partner_binagotchy_seed.clone(),
-        )
+        app.usage_totals.clone()
     };
 
     let requests: Vec<Value> = if body.is_array() {
@@ -809,6 +798,27 @@ async fn post_mcp(
             }
         };
 
+        let (
+            workspace_root,
+            mascot_seed,
+            mode,
+            tool_mode,
+            set_catdesk_as_co_author,
+            ngrok_url,
+            partner_binagotchy_seed,
+        ) = {
+            let app = s.app.lock().await;
+            (
+                app.workspace_root.clone(),
+                app.mascot_seed,
+                app.mode,
+                app.tool_mode,
+                app.set_catdesk_as_co_author,
+                app.ngrok_url.clone(),
+                app.partner_binagotchy_seed.clone(),
+            )
+        };
+
         let session = sessions.get_mut(&session_id).unwrap();
         let tool_name = tool_name_from_jsonrpc_request(&req).to_string();
         if let Some(resp) = mcp::handle_request(
@@ -836,6 +846,7 @@ async fn post_mcp(
                 attach_catdesk_instruction_actions(
                     &mut resp.result,
                     ngrok_url.as_deref(),
+                    mascot_seed,
                     partner_binagotchy_seed.as_deref(),
                 );
             }

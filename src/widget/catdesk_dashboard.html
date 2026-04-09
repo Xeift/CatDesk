@@ -1824,7 +1824,6 @@
 
         var MASCOT_ALPHABET =
           ".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
-        var EMBEDDED_WIDGET_MASCOT = __catdeskEmbeddedMascotPlaceholder__;
         var FINAL_SUMMARY_TEMPLATE_URI =
           "ui://widget/catdesk-dashboard-final-summary.html";
         var WIDGET_RESOURCE_URI = "__catdeskWidgetResourceUriPlaceholder__";
@@ -2085,13 +2084,8 @@
           };
         }
 
-        function readEmbeddedMascotState() {
-          var mascotState = validateMascotState(EMBEDDED_WIDGET_MASCOT);
-          return mascotState || emptyMascotState();
-        }
-
         function createBaseView(common) {
-          var mascotState = readEmbeddedMascotState();
+          var mascotState = emptyMascotState();
           return {
             schema: common.schema,
             panelMode: common.panelMode,
@@ -2255,6 +2249,7 @@
             var binagotchyPath = readNonEmptyString(data.binagotchyPath);
             var binagotchyApiBaseUrl = readString(data.binagotchyApiBaseUrl);
             var partnerBinagotchySeed = readString(data.partnerBinagotchySeed);
+            var widgetMascot = validateMascotState(data.widgetMascot);
             var binagotchyCards = validateArrayEntries(
               data.binagotchyCards,
               validateBinagotchyCard,
@@ -2266,6 +2261,7 @@
               binagotchyPath === null ||
               binagotchyApiBaseUrl === null ||
               partnerBinagotchySeed === null ||
+              widgetMascot === null ||
               binagotchyCards === null
             ) {
               return invalidPayload(
@@ -2279,6 +2275,14 @@
             next.binagotchyApiBaseUrl = binagotchyApiBaseUrl;
             next.partnerBinagotchySeed = partnerBinagotchySeed;
             next.binagotchyCards = binagotchyCards;
+            next.mascotWidth = widgetMascot.mascotWidth;
+            next.mascotHeight = widgetMascot.mascotHeight;
+            next.mascotFrameMs = widgetMascot.mascotFrameMs;
+            next.mascotSpiritHeroBackground =
+              widgetMascot.mascotSpiritHeroBackground;
+            next.mascotPalette = widgetMascot.mascotPalette;
+            next.mascotFrames = widgetMascot.mascotFrames;
+            next.mascotSequence = widgetMascot.mascotSequence;
             return validPayload(next);
           }
 

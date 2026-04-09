@@ -24,7 +24,6 @@ const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const RENDER_FINAL_SUMMARY_WIDGET_TOOL: &str = "render_final_summary_widget";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
-const EMBEDDED_WIDGET_MASCOT_PLACEHOLDER: &str = "__catdeskEmbeddedMascotPlaceholder__";
 const WIDGET_RESOURCE_URI_PLACEHOLDER: &str = "__catdeskWidgetResourceUriPlaceholder__";
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
@@ -214,6 +213,7 @@ pub async fn handle_request(
                 req,
                 session,
                 workspace_root,
+                mascot_seed,
                 mode,
                 tool_mode,
                 set_catdesk_as_co_author,
@@ -222,7 +222,7 @@ pub async fn handle_request(
             .await,
         ),
         "resources/list" => Some(handle_resources_list(req)),
-        "resources/read" => Some(handle_resources_read(req, mascot_seed)),
+        "resources/read" => Some(handle_resources_read(req)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
         _ => Some(JsonRpcResponse::error(
             req.id.clone(),
@@ -272,27 +272,20 @@ fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
     )
 }
 
-fn render_widget_html(mascot_seed: u64, resource_uri: &str) -> String {
-    let mascot = mascot::build_widget_mascot(mascot_seed);
-    let mascot_json = serde_json::to_string(&mascot).unwrap_or_else(|_| {
-        "{\"width\":0,\"height\":0,\"frameMs\":50,\"palette\":[],\"frames\":[],\"sequence\":[]}"
-            .to_string()
-    });
-    CATDESK_WIDGET_HTML
-        .replace(EMBEDDED_WIDGET_MASCOT_PLACEHOLDER, &mascot_json)
-        .replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
+fn render_widget_html(resource_uri: &str) -> String {
+    CATDESK_WIDGET_HTML.replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
 }
 
-fn handle_resources_read(req: &JsonRpcRequest, mascot_seed: u64) -> JsonRpcResponse {
+fn handle_resources_read(req: &JsonRpcRequest) -> JsonRpcResponse {
     let uri = req
         .params
         .get("uri")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let text = if uri == UI_TEMPLATE_URI {
-        render_widget_html(mascot_seed, UI_TEMPLATE_URI)
+        render_widget_html(UI_TEMPLATE_URI)
     } else if uri == FINAL_SUMMARY_UI_TEMPLATE_URI {
-        render_widget_html(mascot_seed, FINAL_SUMMARY_UI_TEMPLATE_URI)
+        render_widget_html(FINAL_SUMMARY_UI_TEMPLATE_URI)
     } else {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
     };
@@ -537,6 +530,7 @@ async fn handle_tools_call(
     req: &JsonRpcRequest,
     session: &mut Session,
     workspace_root: &str,
+    mascot_seed: u64,
     mode: Mode,
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
@@ -570,7 +564,7 @@ async fn handle_tools_call(
             } else if tool_mode.read_tools_enabled() {
                 match tool_name.as_str() {
                     "catdesk_instruction" => {
-                        handle_catdesk_instruction(req, workspace_root, mode, tool_mode)
+                        handle_catdesk_instruction(req, workspace_root, mascot_seed, mode, tool_mode)
                     }
                     "read_file" => handle_read_file(req, workspace_root),
                     "list_files" => handle_list_files(req, workspace_root),
@@ -1017,6 +1011,7 @@ fn catdesk_instruction_structured(
 
 fn catdesk_instruction_widget_payload_with_cards(
     workspace_root: &str,
+    mascot_seed: u64,
     _mode: Mode,
     _tool_mode: ToolMode,
     binagotchy_cards: Vec<mascot::ArchivedBinagotchyCard>,
@@ -1046,6 +1041,10 @@ fn catdesk_instruction_widget_payload_with_cards(
     payload_obj.insert("configPath".to_string(), json!(config_path));
     payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
     payload_obj.insert("binagotchyCards".to_string(), json!(binagotchy_cards));
+    payload_obj.insert(
+        "widgetMascot".to_string(),
+        json!(mascot::build_widget_mascot(mascot_seed)),
+    );
     payload_obj.insert("changedFiles".to_string(), json!([]));
     payload_obj.insert("hasChanges".to_string(), json!(false));
     Ok(payload)
@@ -1053,11 +1052,13 @@ fn catdesk_instruction_widget_payload_with_cards(
 
 fn catdesk_instruction_widget_payload(
     workspace_root: &str,
+    mascot_seed: u64,
     mode: Mode,
     tool_mode: ToolMode,
 ) -> std::io::Result<Value> {
     catdesk_instruction_widget_payload_with_cards(
         workspace_root,
+        mascot_seed,
         mode,
         tool_mode,
         mascot::load_archived_binagotchy_cards()?,
@@ -1067,6 +1068,7 @@ fn catdesk_instruction_widget_payload(
 fn handle_catdesk_instruction(
     req: &JsonRpcRequest,
     workspace_root: &str,
+    mascot_seed: u64,
     mode: Mode,
     tool_mode: ToolMode,
 ) -> JsonRpcResponse {
@@ -1080,15 +1082,16 @@ fn handle_catdesk_instruction(
             );
         }
     };
-    let widget_payload = match catdesk_instruction_widget_payload(workspace_root, mode, tool_mode) {
-        Ok(value) => value,
-        Err(error) => {
-            return tool_error_response(
-                req,
-                format!("Failed to load archived Binagotchy: {error}"),
-            );
-        }
-    };
+    let widget_payload =
+        match catdesk_instruction_widget_payload(workspace_root, mascot_seed, mode, tool_mode) {
+            Ok(value) => value,
+            Err(error) => {
+                return tool_error_response(
+                    req,
+                    format!("Failed to load archived Binagotchy: {error}"),
+                );
+            }
+        };
     let mut response = tool_success_response_with_structured(req, instruction_text, structured);
     if let Some(result) = response.result.as_mut() {
         attach_widget_payload_meta(result, widget_payload);
@@ -2563,6 +2566,7 @@ mod tests {
             &req,
             &mut session,
             &workspace_root_str,
+            1,
             Mode::Both,
             ToolMode::MultiTools,
             false,
@@ -2825,7 +2829,7 @@ hello world"
             .and_then(Value::as_str)
             .map(str::to_string)
             .expect("missing widget resource uri");
-        let resource_resp = handle_resources_read(&resources_read_request(&resource_uri), 1);
+        let resource_resp = handle_resources_read(&resources_read_request(&resource_uri));
         let resource_html = resource_resp
             .result
             .as_ref()
@@ -2923,6 +2927,7 @@ hello world"
                 .expect("structured payload");
         let widget_payload = catdesk_instruction_widget_payload_with_cards(
             "/tmp/workspace",
+            1,
             Mode::Both,
             ToolMode::MultiTools,
             vec![mascot::ArchivedBinagotchyCard {
@@ -2973,5 +2978,6 @@ hello world"
                 .and_then(Value::as_str),
             Some("deadbeef")
         );
+        assert!(widget_payload.get("widgetMascot").is_some());
     }
 }
