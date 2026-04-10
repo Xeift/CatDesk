@@ -55,9 +55,9 @@ enum PlistValueType {
     Real,
 }
 
-#[cfg(target_os = "macos")]
 pub enum LaunchAction {
     Continue,
+    #[cfg(target_os = "macos")]
     ExitAfterProfileBootstrap,
 }
 
@@ -122,11 +122,6 @@ pub fn maybe_relaunch_in_terminal_profile() -> Result<LaunchAction, String> {
     }
 
     Err(last_error.unwrap_or_else(|| "failed to import the Terminal.app profile".to_string()))
-}
-
-#[cfg(not(target_os = "macos"))]
-pub enum LaunchAction {
-    Continue,
 }
 
 #[cfg(not(target_os = "macos"))]

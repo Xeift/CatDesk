@@ -411,6 +411,7 @@ fn drain_server_ui_events(app: &mut AppState, ui_events: &mut UnboundedReceiver<
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match macos_terminal::maybe_relaunch_in_terminal_profile() {
         Ok(macos_terminal::LaunchAction::Continue) => {}
+        #[cfg(target_os = "macos")]
         Ok(macos_terminal::LaunchAction::ExitAfterProfileBootstrap) => {
             eprintln!(
                 "CatDesk applied the Terminal.app profile. Run the same command again in this tab."
