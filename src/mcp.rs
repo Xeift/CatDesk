@@ -563,9 +563,13 @@ async fn handle_tools_call(
                 }
             } else if tool_mode.read_tools_enabled() {
                 match tool_name.as_str() {
-                    "catdesk_instruction" => {
-                        handle_catdesk_instruction(req, workspace_root, mascot_seed, mode, tool_mode)
-                    }
+                    "catdesk_instruction" => handle_catdesk_instruction(
+                        req,
+                        workspace_root,
+                        mascot_seed,
+                        mode,
+                        tool_mode,
+                    ),
                     "read_file" => handle_read_file(req, workspace_root),
                     "list_files" => handle_list_files(req, workspace_root),
                     "search_text" => handle_search_text(req, workspace_root),

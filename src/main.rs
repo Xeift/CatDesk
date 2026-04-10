@@ -2,6 +2,7 @@ mod binagotchy_gen;
 mod browser;
 mod command;
 mod devtools;
+mod macos_terminal;
 mod mascot;
 mod mcp;
 mod ngrok;
@@ -13,8 +14,8 @@ mod workspace_tools;
 use crossterm::{
     ExecutableCommand,
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -25,9 +26,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use state::{
-    AppState, FLOW_ANIM_CELLS, FLOW_BOOTSTRAP_PHASES, FlowAnimKind, FlowAnimSegment,
-    FlowDirection, Mode, ServerUiEvent, SessionFlow, SharedState, ToolMode, UsageTotals,
-    app_config_path, flow_anim_lit_count, load_ngrok_authtoken, save_ngrok_authtoken,
+    AppState, FLOW_ANIM_CELLS, FLOW_BOOTSTRAP_PHASES, FlowAnimKind, FlowAnimSegment, FlowDirection,
+    Mode, ServerUiEvent, SessionFlow, SharedState, ToolMode, UsageTotals, app_config_path,
+    flow_anim_lit_count, load_ngrok_authtoken, save_ngrok_authtoken,
 };
 use std::io::{Write, stdout};
 use std::sync::Arc;
@@ -298,15 +299,9 @@ fn flow_phase_lines(
             let status_padding = status_width.saturating_sub(status_text.chars().count());
             let mut spans = vec![
                 Span::styled(title, label_style),
-                Span::styled(
-                    " ".repeat(title_padding + TITLE_STATUS_GAP),
-                    future_style,
-                ),
+                Span::styled(" ".repeat(title_padding + TITLE_STATUS_GAP), future_style),
                 Span::styled(status_text, status_style),
-                Span::styled(
-                    " ".repeat(status_padding + STATUS_ANIM_GAP),
-                    future_style,
-                ),
+                Span::styled(" ".repeat(status_padding + STATUS_ANIM_GAP), future_style),
             ];
             let (start, _) = flow_phase_bounds(phase_index);
             for (step_offset, _) in phase.steps.iter().enumerate() {
@@ -414,6 +409,22 @@ fn drain_server_ui_events(app: &mut AppState, ui_events: &mut UnboundedReceiver<
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match macos_terminal::maybe_relaunch_in_terminal_profile() {
+        Ok(macos_terminal::LaunchAction::Continue) => {}
+        Ok(macos_terminal::LaunchAction::ExitAfterProfileBootstrap) => {
+            eprintln!(
+                "CatDesk applied the Terminal.app profile. Run the same command again in this tab."
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(std::io::Error::other(format!(
+                "CatDesk: macOS Terminal profile bootstrap failed: {error}"
+            ))
+            .into());
+        }
+    }
+
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -648,13 +659,7 @@ async fn run_ngrok_auth_setup(
     let mut error_message: Option<String> = None;
 
     loop {
-        let (
-            current_theme,
-            current_tool_mode,
-            current_mode,
-            browsers,
-            selected_browser,
-        ) = {
+        let (current_theme, current_tool_mode, current_mode, browsers, selected_browser) = {
             let app = state.lock().await;
             (
                 app.current_theme(),
@@ -859,7 +864,11 @@ fn draw_ngrok_auth_setup(
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
-    let width = area.width.saturating_mul(percent_x).saturating_div(100).max(44);
+    let width = area
+        .width
+        .saturating_mul(percent_x)
+        .saturating_div(100)
+        .max(44);
     let width = width.min(area.width.saturating_sub(2).max(1));
     let popup_height = height.min(area.height.saturating_sub(2).max(1));
     let x = area.x + area.width.saturating_sub(width) / 2;
@@ -881,12 +890,7 @@ async fn run_settings(
     let total_rows = themes.len() + tool_modes.len() + 1;
 
     loop {
-        let (
-            current_theme,
-            current_tool_mode,
-            usage_totals,
-            set_catdesk_as_co_author,
-        ) = {
+        let (current_theme, current_tool_mode, usage_totals, set_catdesk_as_co_author) = {
             let app = state.lock().await;
             (
                 app.current_theme(),
@@ -2267,10 +2271,7 @@ fn draw_ui(
         };
 
         if lit_count == 0 || direction.is_none() {
-            return vec![
-                Span::styled("-".repeat(CELLS), unlit),
-                Span::raw(" "),
-            ];
+            return vec![Span::styled("-".repeat(CELLS), unlit), Span::raw(" ")];
         }
 
         let direction = direction.unwrap_or(FlowDirection::Forward);
@@ -2303,7 +2304,11 @@ fn draw_ui(
     };
     let session_meta_gap_for = |sid_text: &str| -> String {
         const SID_COLUMN_WIDTH: usize = 16;
-        " ".repeat(SID_COLUMN_WIDTH.saturating_sub(sid_text.chars().count()).max(2))
+        " ".repeat(
+            SID_COLUMN_WIDTH
+                .saturating_sub(sid_text.chars().count())
+                .max(2),
+        )
     };
     let status_inner_height = status_height.saturating_sub(2) as usize;
     let flow_block_lines = 2 + FLOW_BOOTSTRAP_PHASES.len();
@@ -2554,10 +2559,7 @@ fn draw_ui(
                 row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
                 row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
                 row.push(Span::styled(sid_text, flow_meta_style));
-                row.push(Span::styled(
-                    sid_gap,
-                    Style::default().fg(palette.muted_fg),
-                ));
+                row.push(Span::styled(sid_gap, Style::default().fg(palette.muted_fg)));
                 row.extend(session_stats_for(app));
                 status_lines.push(Line::from(row));
                 status_lines.extend(flow_phase_lines(Some(flow), &palette, flow_meta_style));
@@ -2665,7 +2667,10 @@ fn draw_ui(
 
     let status_columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(TUI_MASCOT_BLOCK_WIDTH)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(TUI_MASCOT_BLOCK_WIDTH),
+        ])
         .split(chunks[1]);
     let status_block = Block::default()
         .title(" Status ")

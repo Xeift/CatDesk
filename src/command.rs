@@ -314,7 +314,10 @@ where
 }
 
 fn is_shell_command(word: &str) -> bool {
-    matches!(word.rsplit('/').next().unwrap_or(word), "bash" | "sh" | "zsh" | "dash")
+    matches!(
+        word.rsplit('/').next().unwrap_or(word),
+        "bash" | "sh" | "zsh" | "dash"
+    )
 }
 
 fn shell_command_arg_index(words: &[ShellWord], shell_idx: usize) -> Option<usize> {
@@ -444,14 +447,15 @@ mod tests {
         assert!(contains_catdesk_co_author_marker(
             "git commit -m \"co***author___by:::catdesk\""
         ));
-        assert!(!contains_catdesk_co_author_marker("git commit -m \"fix bug\""));
+        assert!(!contains_catdesk_co_author_marker(
+            "git commit -m \"fix bug\""
+        ));
     }
 
     #[test]
     fn inject_catdesk_co_author_trailer_rewrites_each_git_commit_segment() {
-        let rewritten = inject_catdesk_co_author_trailer(
-            "git add . && git commit -m \"test\" && git status",
-        );
+        let rewritten =
+            inject_catdesk_co_author_trailer("git add . && git commit -m \"test\" && git status");
         assert_eq!(
             rewritten,
             "git add . && git commit --trailer 'Co-Authored-By: CatDesk' -m \"test\" && git status"
@@ -472,8 +476,12 @@ mod tests {
     #[test]
     fn command_contains_git_commit_only_matches_real_commit_tokens() {
         assert!(command_contains_git_commit("git commit -m \"x\""));
-        assert!(command_contains_git_commit("FOO=1 git -C repo commit -m \"x\""));
-        assert!(command_contains_git_commit("bash -lc 'git commit -m \"x\"'"));
+        assert!(command_contains_git_commit(
+            "FOO=1 git -C repo commit -m \"x\""
+        ));
+        assert!(command_contains_git_commit(
+            "bash -lc 'git commit -m \"x\"'"
+        ));
         assert!(!command_contains_git_commit("echo git commit"));
     }
 }

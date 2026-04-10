@@ -183,8 +183,7 @@ fn create_vertical_ramp(w: u32, h: u32) -> RgbaImage {
 
     for y in 0..h {
         let t = y as f32 / h.max(1) as f32;
-        let val = (105.0 + 70.0 * (1.0 - (t - 0.55).abs() * 1.55))
-            .clamp(0.0, 255.0) as u8;
+        let val = (105.0 + 70.0 * (1.0 - (t - 0.55).abs() * 1.55)).clamp(0.0, 255.0) as u8;
         for x in 0..w {
             ramp.put_pixel(x, y, rgba(val, val, val, 255));
         }

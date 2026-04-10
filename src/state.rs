@@ -526,7 +526,10 @@ fn prune_finished_segments(queue: &mut VecDeque<FlowAnimSegment>, now_ms: u128) 
     }
 }
 
-fn current_queue_segment(queue: &VecDeque<FlowAnimSegment>, now_ms: u128) -> Option<FlowAnimSegment> {
+fn current_queue_segment(
+    queue: &VecDeque<FlowAnimSegment>,
+    now_ms: u128,
+) -> Option<FlowAnimSegment> {
     if let Some(seg) = queue
         .iter()
         .find(|seg| seg.started_ms <= now_ms && now_ms < seg.ends_ms)
@@ -1104,8 +1107,12 @@ toolCallCount = 0
 
     #[test]
     fn flow_anim_lit_count_interpolates_between_endpoints() {
-        let duration_ms =
-            move_segment_duration_ms(FlowDirection::Forward, derive_flow_step_ms(), 0, FLOW_ANIM_CELLS);
+        let duration_ms = move_segment_duration_ms(
+            FlowDirection::Forward,
+            derive_flow_step_ms(),
+            0,
+            FLOW_ANIM_CELLS,
+        );
         let seg = FlowAnimSegment {
             kind: FlowAnimKind::Move,
             direction: FlowDirection::Forward,
@@ -1124,10 +1131,18 @@ toolCallCount = 0
 
     #[test]
     fn backward_move_uses_longer_duration() {
-        let forward =
-            move_segment_duration_ms(FlowDirection::Forward, derive_flow_step_ms(), 0, FLOW_ANIM_CELLS);
-        let backward =
-            move_segment_duration_ms(FlowDirection::Backward, derive_flow_step_ms(), 0, FLOW_ANIM_CELLS);
+        let forward = move_segment_duration_ms(
+            FlowDirection::Forward,
+            derive_flow_step_ms(),
+            0,
+            FLOW_ANIM_CELLS,
+        );
+        let backward = move_segment_duration_ms(
+            FlowDirection::Backward,
+            derive_flow_step_ms(),
+            0,
+            FLOW_ANIM_CELLS,
+        );
 
         assert_eq!(forward, FLOW_FORWARD_ANIMATION_DURATION_MS as u128);
         assert_eq!(backward, FLOW_BACKWARD_ANIMATION_DURATION_MS as u128);

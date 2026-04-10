@@ -52,14 +52,8 @@ pub fn render_base_sprite<R: Rng>(
     apply_micro_shading(&mut img, &mask, fur_color, rng);
 
     // Draw face features using ONLY normal/animated eyes logic
-    let eye_color_name = draw_face_features(
-        &mut img,
-        canvas,
-        rng,
-        eyes_pref,
-        head_box,
-        eye_openness,
-    );
+    let eye_color_name =
+        draw_face_features(&mut img, canvas, rng, eyes_pref, head_box, eye_openness);
 
     (img, fur_color, eye_color_name)
 }

@@ -1,3 +1,4 @@
+use crate::binagotchy_gen;
 use base64::Engine as _;
 use image::{
     Delay, DynamicImage, Frame, ImageFormat, Rgba, RgbaImage,
@@ -16,7 +17,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use time::{OffsetDateTime, macros::format_description};
-use crate::binagotchy_gen;
 
 const MASCOT_CANVAS: u32 = 32;
 const MASCOT_UPSCALE: u32 = 1;
@@ -157,12 +157,21 @@ fn archive_startup_mascot_to_root(seed: u64, root: &Path) -> std::io::Result<()>
 
     let (frames, delays_ms, traits, use_spirit) = archive_sequence(seed);
     if frames.is_empty() {
-        return Err(std::io::Error::other("generated mascot archive has no frames"));
+        return Err(std::io::Error::other(
+            "generated mascot archive has no frames",
+        ));
     }
     let archive_frames = prepare_archive_frames(&frames)?;
 
-    write_png(&archive_dir.join(CHARACTER_PNG_FILE_NAME), &archive_frames[0])?;
-    write_gif(&archive_dir.join(ANIMATION_GIF_FILE_NAME), &archive_frames, &delays_ms)?;
+    write_png(
+        &archive_dir.join(CHARACTER_PNG_FILE_NAME),
+        &archive_frames[0],
+    )?;
+    write_gif(
+        &archive_dir.join(ANIMATION_GIF_FILE_NAME),
+        &archive_frames,
+        &delays_ms,
+    )?;
 
     let metadata = StoredMascotMetadata {
         seed: seed_hex(seed),
@@ -242,9 +251,7 @@ fn mascot_source_frames(seed: u64) -> Vec<RgbaImage> {
         .collect()
 }
 
-fn mascot_widget_source(
-    seed: u64,
-) -> (Vec<RgbaImage>, Vec<WidgetMascotSequenceStep>, String) {
+fn mascot_widget_source(seed: u64) -> (Vec<RgbaImage>, Vec<WidgetMascotSequenceStep>, String) {
     let use_spirit = mascot_use_spirit(seed);
     let headwear_pref = mascot_headwear_preference(use_spirit);
     let mut poses: Vec<(u8, i32)> = Vec::new();
@@ -381,7 +388,9 @@ pub(crate) fn load_archived_binagotchy_cards() -> std::io::Result<Vec<ArchivedBi
             let folder = entry
                 .file_name()
                 .map(|value| value.to_string_lossy().to_string())
-                .ok_or_else(|| std::io::Error::other("binagotchy archive is missing folder name"))?;
+                .ok_or_else(|| {
+                    std::io::Error::other("binagotchy archive is missing folder name")
+                })?;
             let metadata_text = fs::read_to_string(entry.join(METADATA_FILE_NAME))?;
             let metadata: StoredMascotMetadata =
                 toml::from_str(&metadata_text).map_err(std::io::Error::other)?;
@@ -436,17 +445,17 @@ fn seed_hex(seed: u64) -> String {
     format!("{seed:016x}")
 }
 
-fn required_trait(
-    traits: &HashMap<String, String>,
-    key: &'static str,
-) -> std::io::Result<String> {
+fn required_trait(traits: &HashMap<String, String>, key: &'static str) -> std::io::Result<String> {
     traits
         .get(key)
         .cloned()
         .ok_or_else(|| std::io::Error::other(format!("missing mascot trait: {key}")))
 }
 
-fn resolve_archived_binagotchy_dir_from_root(folder: &str, root: &Path) -> std::io::Result<PathBuf> {
+fn resolve_archived_binagotchy_dir_from_root(
+    folder: &str,
+    root: &Path,
+) -> std::io::Result<PathBuf> {
     if folder.is_empty() || folder == "." || folder == ".." {
         return Err(std::io::Error::other(
             "binagotchy folder name must not be empty or traversal-only",
@@ -531,11 +540,8 @@ fn prepare_archive_frames(frames: &[RgbaImage]) -> std::io::Result<Vec<RgbaImage
                 scaled_height,
                 image::imageops::FilterType::Nearest,
             );
-            let mut canvas = RgbaImage::from_pixel(
-                ARCHIVE_OUTPUT_SIZE,
-                ARCHIVE_OUTPUT_SIZE,
-                Rgba([0, 0, 0, 0]),
-            );
+            let mut canvas =
+                RgbaImage::from_pixel(ARCHIVE_OUTPUT_SIZE, ARCHIVE_OUTPUT_SIZE, Rgba([0, 0, 0, 0]));
             image::imageops::overlay(&mut canvas, &scaled, offset_x.into(), offset_y.into());
             canvas
         })
@@ -551,7 +557,9 @@ fn write_png(path: &Path, image: &RgbaImage) -> std::io::Result<()> {
 
 fn write_gif(path: &Path, frames: &[RgbaImage], delays_ms: &[u64]) -> std::io::Result<()> {
     if frames.len() != delays_ms.len() {
-        return Err(std::io::Error::other("gif frame count does not match delay count"));
+        return Err(std::io::Error::other(
+            "gif frame count does not match delay count",
+        ));
     }
     let file = File::create(path)?;
     let mut encoder = GifEncoder::new(file);
@@ -559,16 +567,14 @@ fn write_gif(path: &Path, frames: &[RgbaImage], delays_ms: &[u64]) -> std::io::R
         .set_repeat(Repeat::Infinite)
         .map_err(std::io::Error::other)?;
 
-    let animation_frames = frames.iter().cloned().zip(delays_ms.iter().copied()).map(
-        |(frame, delay_ms)| {
-            Frame::from_parts(
-                frame,
-                0,
-                0,
-                Delay::from_numer_denom_ms(delay_ms as u32, 1),
-            )
-        },
-    );
+    let animation_frames =
+        frames
+            .iter()
+            .cloned()
+            .zip(delays_ms.iter().copied())
+            .map(|(frame, delay_ms)| {
+                Frame::from_parts(frame, 0, 0, Delay::from_numer_denom_ms(delay_ms as u32, 1))
+            });
     encoder
         .encode_frames(animation_frames)
         .map_err(std::io::Error::other)
@@ -673,9 +679,12 @@ fn create_radial_gradient(
     power: f32,
 ) -> RgbaImage {
     let (cx, cy) = (width as f32 * center.0, height as f32 * center.1);
-    let maxd =
-        ((cx.max(width as f32 - cx)).powi(2) + (cy.max(height as f32 - cy)).powi(2)).sqrt();
-    let mut img = RgbaImage::from_pixel(width, height, Rgba([outer_rgb.0, outer_rgb.1, outer_rgb.2, 255]));
+    let maxd = ((cx.max(width as f32 - cx)).powi(2) + (cy.max(height as f32 - cy)).powi(2)).sqrt();
+    let mut img = RgbaImage::from_pixel(
+        width,
+        height,
+        Rgba([outer_rgb.0, outer_rgb.1, outer_rgb.2, 255]),
+    );
     for y in 0..height {
         for x in 0..width {
             let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() / maxd;
@@ -784,14 +793,7 @@ fn create_vignette(width: u32, height: u32, strength: f32) -> RgbaImage {
     vignette
 }
 
-fn add_elliptical_glow(
-    img: &mut RgbaImage,
-    cx: f32,
-    cy: f32,
-    rx: f32,
-    ry: f32,
-    color: [u8; 4],
-) {
+fn add_elliptical_glow(img: &mut RgbaImage, cx: f32, cy: f32, rx: f32, ry: f32, color: [u8; 4]) {
     let min_x = (cx - rx).floor().max(0.0) as u32;
     let max_x = (cx + rx).ceil().min(img.width() as f32 - 1.0) as u32;
     let min_y = (cy - ry).floor().max(0.0) as u32;
@@ -1065,7 +1067,11 @@ fn gaussian_blur_alpha(img: &RgbaImage, radius: f32) -> RgbaImage {
                 sum += img.get_pixel(nx as u32, y as u32)[0] as f32 * weight;
                 total += weight;
             }
-            let value = if total > 0.0 { (sum / total).round() as u8 } else { 0 };
+            let value = if total > 0.0 {
+                (sum / total).round() as u8
+            } else {
+                0
+            };
             horizontal.put_pixel(x as u32, y as u32, Rgba([value, value, value, 255]));
         }
     }
@@ -1084,7 +1090,11 @@ fn gaussian_blur_alpha(img: &RgbaImage, radius: f32) -> RgbaImage {
                 sum += horizontal.get_pixel(x as u32, ny as u32)[0] as f32 * weight;
                 total += weight;
             }
-            let value = if total > 0.0 { (sum / total).round() as u8 } else { 0 };
+            let value = if total > 0.0 {
+                (sum / total).round() as u8
+            } else {
+                0
+            };
             vertical.put_pixel(x as u32, y as u32, Rgba([value, value, value, 255]));
         }
     }
@@ -1168,12 +1178,7 @@ fn quantize_widget_frames(frames: &[RgbaImage], max_colors: usize) -> Vec<RgbaIm
     }
 
     let mut palette: Vec<([u8; 4], u32)> = color_counts.into_iter().collect();
-    palette.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
-    });
+    palette.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     let palette: Vec<[u8; 4]> = palette
         .into_iter()
         .take(max_colors)
@@ -1328,13 +1333,9 @@ fn build_tui_cell(top: image::Rgba<u8>, bottom: image::Rgba<u8>) -> TuiMascotCel
 #[cfg(test)]
 mod tests {
     use super::{
-        archive_startup_mascot_to_root,
-        build_widget_mascot,
-        mascot_headwear_preference,
-        mascot_use_spirit,
-        openness_value,
+        WIDGET_MASCOT_ALPHABET, archive_startup_mascot_to_root, build_widget_mascot,
+        mascot_headwear_preference, mascot_use_spirit, openness_value,
         save_archived_binagotchy_folder_from_roots,
-        WIDGET_MASCOT_ALPHABET,
     };
     use crate::binagotchy_gen;
 
@@ -1349,7 +1350,11 @@ mod tests {
         let spirit_seed = 0;
         assert!(mascot_use_spirit(spirit_seed));
         let mascot = build_widget_mascot(spirit_seed);
-        assert!(mascot.spirit_hero_background.starts_with("data:image/png;base64,"));
+        assert!(
+            mascot
+                .spirit_hero_background
+                .starts_with("data:image/png;base64,")
+        );
     }
 
     #[test]
@@ -1414,8 +1419,8 @@ mod tests {
         assert!(archive_dir.join(super::CHARACTER_PNG_FILE_NAME).is_file());
         assert!(archive_dir.join(super::ANIMATION_GIF_FILE_NAME).is_file());
 
-        let metadata_text =
-            std::fs::read_to_string(archive_dir.join(super::METADATA_FILE_NAME)).expect("read metadata");
+        let metadata_text = std::fs::read_to_string(archive_dir.join(super::METADATA_FILE_NAME))
+            .expect("read metadata");
         assert!(metadata_text.contains("seed = \"0000000000000001\""));
         assert!(metadata_text.contains("generator_version = \"4.0.0\""));
 
@@ -1453,12 +1458,9 @@ mod tests {
             .expect("folder name")
             .to_string();
 
-        let saved_dir = save_archived_binagotchy_folder_from_roots(
-            &folder,
-            &archive_root,
-            &downloads_root,
-        )
-        .expect("save archived folder");
+        let saved_dir =
+            save_archived_binagotchy_folder_from_roots(&folder, &archive_root, &downloads_root)
+                .expect("save archived folder");
 
         assert_eq!(saved_dir, downloads_root.join(&folder));
         assert!(saved_dir.join(super::METADATA_FILE_NAME).is_file());

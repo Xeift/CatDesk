@@ -137,8 +137,7 @@ fn center_sprite_on_frame(sprite: &RgbaImage, frame_width: u32, frame_height: u3
     let (sprite_width, sprite_height) = sprite.dimensions();
     let frame_width = frame_width.max(sprite.width());
     let frame_height = frame_height.max(sprite.height());
-    let mut frame =
-        RgbaImage::from_pixel(frame_width, frame_height, types::rgba(0, 0, 0, 0));
+    let mut frame = RgbaImage::from_pixel(frame_width, frame_height, types::rgba(0, 0, 0, 0));
     let offset_x = (frame_width - sprite_width) / 2;
     let offset_y = (frame_height - sprite_height) / 2;
     image::imageops::overlay(&mut frame, sprite, offset_x as i64, offset_y as i64);
@@ -189,16 +188,8 @@ mod tests {
 
     #[test]
     fn spirit_mode_disables_headwear() {
-        let (_image, traits) = create_character(
-            Some(42),
-            32,
-            8,
-            "normal",
-            "top_hat",
-            100.0,
-            1.0,
-            0,
-        );
+        let (_image, traits) =
+            create_character(Some(42), 32, 8, "normal", "top_hat", 100.0, 1.0, 0);
 
         assert_eq!(traits.get("headwear").map(String::as_str), Some("none"));
         assert_eq!(traits.get("special").map(String::as_str), Some("spirit"));
@@ -209,7 +200,10 @@ mod tests {
         let (image, _) = create_character(Some(42), 32, 1, "normal", "none", 0.0, 1.0, 0);
         let spirit = apply_mascot_spirit_frame(42, &image, 40, 32);
         let (width, height) = spirit.dimensions();
-        assert_eq!((width, height), (image.width().max(40), image.height().max(32)));
+        assert_eq!(
+            (width, height),
+            (image.width().max(40), image.height().max(32))
+        );
         assert_eq!(spirit.get_pixel(0, 0)[3], 255);
         assert_eq!(spirit.get_pixel(width - 1, 0)[3], 255);
         assert_eq!(spirit.get_pixel(0, height - 1)[3], 255);
@@ -217,8 +211,10 @@ mod tests {
 
     #[test]
     fn non_spirit_frame_size_stays_constant_with_headwear() {
-        let (without_headwear, _) = create_character(Some(42), 32, 1, "normal", "none", 0.0, 1.0, 0);
-        let (with_headwear, _) = create_character(Some(42), 32, 1, "normal", "top_hat", 0.0, 1.0, 0);
+        let (without_headwear, _) =
+            create_character(Some(42), 32, 1, "normal", "none", 0.0, 1.0, 0);
+        let (with_headwear, _) =
+            create_character(Some(42), 32, 1, "normal", "top_hat", 0.0, 1.0, 0);
         assert_eq!(without_headwear.dimensions(), with_headwear.dimensions());
     }
 }
