@@ -944,6 +944,33 @@ fn preferred_agents_text(workspace_root: &str) -> Option<String> {
     read_agents_text(&path)
 }
 
+fn display_path_with_tilde(path: &Path) -> String {
+    let full_path = path.to_string_lossy().to_string();
+    let Ok(home_dir) = user_home_dir() else {
+        return full_path;
+    };
+    if path == home_dir {
+        return "~".to_string();
+    }
+    let Ok(relative_path) = path.strip_prefix(&home_dir) else {
+        return full_path;
+    };
+    if relative_path.as_os_str().is_empty() {
+        return "~".to_string();
+    }
+    Path::new("~")
+        .join(relative_path)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn widget_path_strings(path: &Path) -> (String, String) {
+    (
+        path.to_string_lossy().to_string(),
+        display_path_with_tilde(path),
+    )
+}
+
 fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> String {
     let mut lines: Vec<String> = r#"CatDesk usage instructions
 
@@ -1033,19 +1060,31 @@ fn catdesk_instruction_widget_payload_with_cards(
             "catdesk instruction payload must be a JSON object",
         ));
     };
-    let agents_path = preferred_agents_path(workspace_root)
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|| "-".to_string());
-    let config_path = app_config_path()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "-".to_string());
-    let binagotchy_path = mascot::catdesk_binagotchy_root()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "-".to_string());
-    payload_obj.insert("workspacePath".to_string(), json!(workspace_root));
+    let (workspace_path, workspace_path_display) =
+        widget_path_strings(Path::new(workspace_root));
+    let (agents_path, agents_path_display) = preferred_agents_path(workspace_root)
+        .map(|path| widget_path_strings(&path))
+        .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+    let (config_path, config_path_display) = app_config_path()
+        .map(|path| widget_path_strings(&path))
+        .unwrap_or_else(|_| ("-".to_string(), "-".to_string()));
+    let (binagotchy_path, binagotchy_path_display) = mascot::catdesk_binagotchy_root()
+        .map(|path| widget_path_strings(&path))
+        .unwrap_or_else(|_| ("-".to_string(), "-".to_string()));
+    payload_obj.insert("workspacePath".to_string(), json!(workspace_path));
+    payload_obj.insert(
+        "workspacePathDisplay".to_string(),
+        json!(workspace_path_display),
+    );
     payload_obj.insert("agentsPath".to_string(), json!(agents_path));
+    payload_obj.insert("agentsPathDisplay".to_string(), json!(agents_path_display));
     payload_obj.insert("configPath".to_string(), json!(config_path));
+    payload_obj.insert("configPathDisplay".to_string(), json!(config_path_display));
     payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
+    payload_obj.insert(
+        "binagotchyPathDisplay".to_string(),
+        json!(binagotchy_path_display),
+    );
     payload_obj.insert("binagotchyCards".to_string(), json!(binagotchy_cards));
     payload_obj.insert(
         "widgetMascot".to_string(),
@@ -2966,6 +3005,12 @@ hello world"
         );
         assert_eq!(
             widget_payload.get("workspacePath").and_then(Value::as_str),
+            Some("/tmp/workspace")
+        );
+        assert_eq!(
+            widget_payload
+                .get("workspacePathDisplay")
+                .and_then(Value::as_str),
             Some("/tmp/workspace")
         );
         assert_eq!(

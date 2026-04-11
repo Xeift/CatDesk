@@ -2097,9 +2097,13 @@
             call: "",
             detail: "",
             workspacePath: "",
+            workspacePathDisplay: "",
             agentsPath: "",
+            agentsPathDisplay: "",
             configPath: "",
+            configPathDisplay: "",
             binagotchyPath: "",
+            binagotchyPathDisplay: "",
             binagotchyApiBaseUrl: "",
             partnerBinagotchySeed: "",
             binagotchyCards: [],
@@ -2244,9 +2248,17 @@
 
           if (toolName === "catdesk_instruction") {
             var workspacePath = readNonEmptyString(data.workspacePath);
+            var workspacePathDisplay = readNonEmptyString(
+              data.workspacePathDisplay,
+            );
             var agentsPath = readNonEmptyString(data.agentsPath);
+            var agentsPathDisplay = readNonEmptyString(data.agentsPathDisplay);
             var configPath = readNonEmptyString(data.configPath);
+            var configPathDisplay = readNonEmptyString(data.configPathDisplay);
             var binagotchyPath = readNonEmptyString(data.binagotchyPath);
+            var binagotchyPathDisplay = readNonEmptyString(
+              data.binagotchyPathDisplay,
+            );
             var binagotchyApiBaseUrl = readString(data.binagotchyApiBaseUrl);
             var partnerBinagotchySeed = readString(data.partnerBinagotchySeed);
             var widgetMascot = validateMascotState(data.widgetMascot);
@@ -2256,9 +2268,13 @@
             );
             if (
               workspacePath === null ||
+              workspacePathDisplay === null ||
               agentsPath === null ||
+              agentsPathDisplay === null ||
               configPath === null ||
+              configPathDisplay === null ||
               binagotchyPath === null ||
+              binagotchyPathDisplay === null ||
               binagotchyApiBaseUrl === null ||
               partnerBinagotchySeed === null ||
               widgetMascot === null ||
@@ -2269,9 +2285,13 @@
               );
             }
             next.workspacePath = workspacePath;
+            next.workspacePathDisplay = workspacePathDisplay;
             next.agentsPath = agentsPath;
+            next.agentsPathDisplay = agentsPathDisplay;
             next.configPath = configPath;
+            next.configPathDisplay = configPathDisplay;
             next.binagotchyPath = binagotchyPath;
+            next.binagotchyPathDisplay = binagotchyPathDisplay;
             next.binagotchyApiBaseUrl = binagotchyApiBaseUrl;
             next.partnerBinagotchySeed = partnerBinagotchySeed;
             next.binagotchyCards = binagotchyCards;
@@ -3209,20 +3229,32 @@
             function renderInstructionPathRow(
               iconKind,
               label,
-              value,
+              fullValue,
+              displayValue,
               actionHtml,
             ) {
               var hasAction =
                 typeof actionHtml === "string" && actionHtml.length > 0;
+              var titleText =
+                typeof fullValue === "string" && fullValue !== "-"
+                  ? fullValue
+                  : "";
+              var titleAttr = titleText
+                ? ' title="' + esc(titleText) + '"'
+                : "";
               var trailingHtml = hasAction
                 ? '<span class="instruction-path-trailing">' +
-                  '<span class="instruction-path-code">' +
-                  esc(value || "-") +
+                  '<span class="instruction-path-code"' +
+                  titleAttr +
+                  ">" +
+                  esc(displayValue || "-") +
                   "</span>" +
                   actionHtml +
                   "</span>"
-                : '<span class="instruction-path-code">' +
-                  esc(value || "-") +
+                : '<span class="instruction-path-code"' +
+                  titleAttr +
+                  ">" +
+                  esc(displayValue || "-") +
                   "</span>";
               return (
                 '<div class="summary-row">' +
@@ -3246,21 +3278,25 @@
                 "dir",
                 "workspace",
                 current.workspacePath,
+                current.workspacePathDisplay,
               ) +
               renderInstructionPathRow(
                 "agents",
                 "AGENTS.md",
                 current.agentsPath,
+                current.agentsPathDisplay,
               ) +
               renderInstructionPathRow(
                 "file",
                 "config.toml",
                 current.configPath,
+                current.configPathDisplay,
               ) +
               renderInstructionPathRow(
                 "binagotchy",
                 "binagotchy",
                 current.binagotchyPath,
+                current.binagotchyPathDisplay,
                 renderInstructionPathActionButton(),
               ) +
               "</div>";
