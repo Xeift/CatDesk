@@ -391,7 +391,38 @@ fn clipboard_copy(text: &str) -> bool {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn clipboard_copy(text: &str) -> bool {
+    let mut child = match std::process::Command::new("clip.exe")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.wait();
+        return false;
+    };
+
+    if stdin.write_all(text.as_bytes()).is_err() {
+        drop(stdin);
+        let _ = child.wait();
+        return false;
+    }
+
+    drop(stdin);
+
+    match child.wait() {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn clipboard_copy(text: &str) -> bool {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
