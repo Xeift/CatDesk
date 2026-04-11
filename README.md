@@ -107,7 +107,23 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 Always call catdesk_instruction after list_resources, and follow the instructions it contains.
 ```
 
-10. Start using the connector from ChatGPT Web.
+10. Start using the connector from ChatGPT Web. Some important tips:
+
+- I strongly recommend **NOT** selecting the connector manually. Just let ChatGPT automatically decide which connector to use. This is because the `web` tool that ChatGPT uses to search and open links will be disabled if you explicitly select CatDesk. The `web` tool and a custom connector cannot be used together.
+- However, if you have multiple connectors, you can manually select one using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability.
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/images/connector_slash.png" alt="Select CatDesk from the slash command menu" width="300"><br>
+      <em>Select CatDesk manually with <code>/</code></em>
+    </td>
+    <td align="center">
+      <img src="docs/images/connector_at.png" alt="Select CatDesk from the at-sign menu" width="300"><br>
+      <em>Select CatDesk manually with <code>@</code></em>
+    </td>
+  </tr>
+</table>
 
 # Tools
 
