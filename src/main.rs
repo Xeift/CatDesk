@@ -15,7 +15,7 @@ use crossterm::{
     ExecutableCommand,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind,
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -399,6 +399,88 @@ fn clipboard_copy(text: &str) -> bool {
     stdout().write_all(seq.as_bytes()).is_ok() && stdout().flush().is_ok()
 }
 
+#[cfg(target_os = "macos")]
+fn clipboard_paste() -> Option<String> {
+    let output = std::process::Command::new("/usr/bin/pbpaste")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .filter(|text| !text.is_empty())
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_paste() -> Option<String> {
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .filter(|text| !text.is_empty())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn clipboard_paste() -> Option<String> {
+    const CLIPBOARD_COMMANDS: &[(&str, &[&str])] = &[
+        ("wl-paste", &["-n"]),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["--clipboard", "--output"]),
+    ];
+
+    for (program, args) in CLIPBOARD_COMMANDS {
+        let output = match std::process::Command::new(program)
+            .args(*args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            _ => continue,
+        };
+
+        if let Ok(text) = String::from_utf8(output.stdout) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
+    None
+}
+
+fn key_is_clipboard_paste(key: &crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Insert) && key.modifiers.contains(KeyModifiers::SHIFT)
+        || matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'v'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn normalize_ngrok_authtoken_input(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if let Some(idx) = parts.iter().position(|part| *part == "add-authtoken") {
+        if let Some(token) = parts.get(idx + 1) {
+            return token.trim_matches(['"', '\'']).to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 fn drain_server_ui_events(app: &mut AppState, ui_events: &mut UnboundedReceiver<ServerUiEvent>) {
     while let Ok(event) = ui_events.try_recv() {
         app.apply_server_ui_event(event);
@@ -730,12 +812,12 @@ async fn run_ngrok_auth_setup(
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => return Ok(false),
                     KeyCode::Enter => {
-                        let token = input.trim();
+                        let token = normalize_ngrok_authtoken_input(&input);
                         if token.is_empty() {
                             error_message = Some("NGROK_AUTHTOKEN cannot be empty".into());
                             continue;
                         }
-                        match save_ngrok_authtoken(token) {
+                        match save_ngrok_authtoken(&token) {
                             Ok(saved_path) => {
                                 let mut app = state.lock().await;
                                 app.log(
@@ -758,14 +840,27 @@ async fn run_ngrok_auth_setup(
                         error_message = None;
                     }
                     KeyCode::Char(c) => {
-                        input.push(c);
-                        error_message = None;
+                        if key_is_clipboard_paste(&key) {
+                            if let Some(text) = clipboard_paste() {
+                                input.push_str(&normalize_ngrok_authtoken_input(&text));
+                                error_message = None;
+                            }
+                        } else {
+                            input.push(c);
+                            error_message = None;
+                        }
+                    }
+                    KeyCode::Insert if key_is_clipboard_paste(&key) => {
+                        if let Some(text) = clipboard_paste() {
+                            input.push_str(&normalize_ngrok_authtoken_input(&text));
+                            error_message = None;
+                        }
                     }
                     _ => {}
                 }
             }
             Event::Paste(text) => {
-                input.push_str(&text);
+                input.push_str(&normalize_ngrok_authtoken_input(&text));
                 error_message = None;
             }
             _ => {}
@@ -857,11 +952,49 @@ fn draw_ngrok_auth_setup(
         )))
     } else {
         Paragraph::new(Line::from(Span::styled(
-            "[Enter] Save  [q/Esc] Quit  [Paste] Insert token",
+            "[Enter] Save  [q/Esc] Quit  [Paste/Ctrl+V] Insert token",
             Style::default().fg(palette.muted_fg).bg(modal_bg),
         )))
     };
     f.render_widget(footer, modal_chunks[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{key_is_clipboard_paste, normalize_ngrok_authtoken_input};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn normalizes_plain_ngrok_token() {
+        assert_eq!(
+            normalize_ngrok_authtoken_input("  test-token-123  "),
+            "test-token-123"
+        );
+    }
+
+    #[test]
+    fn extracts_token_from_ngrok_command() {
+        assert_eq!(
+            normalize_ngrok_authtoken_input("ngrok config add-authtoken test-token-123"),
+            "test-token-123"
+        );
+    }
+
+    #[test]
+    fn detects_ctrl_v_as_clipboard_paste() {
+        assert!(key_is_clipboard_paste(&KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
+    fn detects_shift_insert_as_clipboard_paste() {
+        assert!(key_is_clipboard_paste(&KeyEvent::new(
+            KeyCode::Insert,
+            KeyModifiers::SHIFT
+        )));
+    }
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {

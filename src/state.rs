@@ -463,11 +463,35 @@ fn short_session_id(sid: &str) -> String {
     sid[..sid.len().min(8)].to_string()
 }
 
+pub fn user_home_dir() -> std::io::Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(user_profile) =
+            std::env::var_os("USERPROFILE").filter(|value| !value.is_empty())
+        {
+            return Ok(PathBuf::from(user_profile));
+        }
+
+        let home_drive = std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty());
+        let home_path = std::env::var_os("HOMEPATH").filter(|value| !value.is_empty());
+        if let (Some(home_drive), Some(home_path)) = (home_drive, home_path) {
+            let mut path = PathBuf::from(home_drive);
+            path.push(home_path);
+            return Ok(path);
+        }
+    }
+
+    Err(std::io::Error::other(
+        "could not resolve the user home directory from HOME, USERPROFILE, or HOMEDRIVE/HOMEPATH",
+    ))
+}
+
 pub fn app_config_path() -> std::io::Result<PathBuf> {
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        std::io::Error::other("HOME is not set; cannot resolve ~/.catdesk/config.toml")
-    })?;
-    Ok(PathBuf::from(home)
+    Ok(user_home_dir()?
         .join(APP_CONFIG_DIR_NAME)
         .join(APP_CONFIG_FILE_NAME))
 }

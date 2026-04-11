@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::command;
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
-use crate::state::{Mode, ToolMode, app_config_path};
+use crate::state::{Mode, ToolMode, app_config_path, user_home_dir};
 use crate::workspace_tools;
 
 const SERVER_NAME: &str = "catdesk";
@@ -911,8 +911,10 @@ fn workspace_agents_path(workspace_root: &str) -> PathBuf {
 }
 
 fn codex_agents_path() -> PathBuf {
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".codex").join("AGENTS.md")
+    user_home_dir()
+        .unwrap_or_default()
+        .join(".codex")
+        .join("AGENTS.md")
 }
 
 fn preferred_agents_path(workspace_root: &str) -> Option<PathBuf> {

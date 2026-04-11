@@ -355,19 +355,13 @@ fn archive_sequence(seed: u64) -> (Vec<RgbaImage>, Vec<u64>, HashMap<String, Str
 
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn catdesk_binagotchy_root() -> std::io::Result<PathBuf> {
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        std::io::Error::other("HOME is not set; cannot resolve ~/.catdesk/binagotchy")
-    })?;
-    Ok(PathBuf::from(home)
+    Ok(crate::state::user_home_dir()?
         .join(CATDESK_DIR_NAME)
         .join(BINAGOTCHY_DIR_NAME))
 }
 
 pub(crate) fn catdesk_downloads_root() -> std::io::Result<PathBuf> {
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        std::io::Error::other("HOME is not set; cannot resolve ~/.catdesk/downloads")
-    })?;
-    Ok(PathBuf::from(home)
+    Ok(crate::state::user_home_dir()?
         .join(CATDESK_DIR_NAME)
         .join(DOWNLOADS_DIR_NAME))
 }
