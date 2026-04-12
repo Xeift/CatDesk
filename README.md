@@ -104,7 +104,7 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 9. Add this to your ChatGPT system instruction:
 
 ```text
-Always call catdesk_instruction after list_resources, and follow the instructions it contains.
+CatDesk is a coding tool and a custom connector. Always use CatDesk if the user wants to do anything related to file operations. Always call `catdesk_instruction` after `list_resources`, and follow the instructions it contains.
 ```
 
 10. Start using the connector from ChatGPT Web. Some important tips:
@@ -158,12 +158,20 @@ According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and
 
 ### Can I turn off the red CSP button?
 
-<p align="center">
-  <img src="docs/images/csp_button.png" alt="The red CSP button shows in every tool call" width="100"><br>
-  <em>The red CSP button shows in every tool call</em>
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/images/csp_button.png" alt="The red CSP button shown in tool calls" height="96"><br>
+      <em>The red CSP button</em>
+    </td>
+    <td align="center">
+      <img src="docs/images/enforce_csp.png" alt="Advanced connector settings with Enforce CSP in developer mode" height="96"><br>
+      <em><code>Enforce CSP in developer mode</code> in Advanced connector settings</em>
+    </td>
+  </tr>
+</table>
 
-No. That button is not part of the widget, so CatDesk cannot control it. I agree it looks annoying, but there is nothing this project can do about it right now.
+Yes. Open [Advanced connector settings](https://chatgpt.com/#settings/Connectors/Advanced) and turn on `Enforce CSP in developer mode`. That setting removes the red button. CatDesk automatically adds the current ngrok domain to the widget CSP, so the widget should keep working with CSP enforcement enabled.
 
 ### Can I skip approval, like with `--yolo` or `--dangerously-skip-permissions`?
 

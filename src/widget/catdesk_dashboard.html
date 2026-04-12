@@ -928,26 +928,6 @@
         word-break: break-word;
       }
 
-      .binagotchy-notice-message a {
-        color: var(--text);
-        text-decoration: underline;
-      }
-
-      .binagotchy-notice-message code {
-        display: inline;
-        padding: 0 4px;
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        background: #242323;
-        color: var(--text-2);
-        font:
-          11px/1.45 "SFMono-Regular",
-          Menlo,
-          Consolas,
-          "Liberation Mono",
-          monospace;
-      }
-
       .binagotchy-notice-code {
         display: none;
         margin: -2px 0 0;
@@ -3418,17 +3398,7 @@
           return !!(noticeRoot && noticeRoot.classList.contains("is-open"));
         }
 
-        function openBinagotchyNotice(
-          title,
-          message,
-          isError,
-          codeValue,
-          linkLabel,
-          linkUrl,
-          messageSuffix,
-          inlineCodeValue,
-          inlineCodeSuffix,
-        ) {
+        function openBinagotchyNotice(title, message, isError, codeValue) {
           var noticeRoot = document.getElementById("binagotchy-notice-root");
           var titleNode = document.getElementById("binagotchy-notice-title");
           var messageNode = document.getElementById(
@@ -3440,44 +3410,7 @@
           );
           if (!noticeRoot || !titleNode || !messageNode || !codeNode) return;
           titleNode.textContent = title || "Notice";
-          messageNode.textContent = "";
-          if (message) {
-            messageNode.appendChild(document.createTextNode(message));
-          }
-          if (linkLabel && linkUrl) {
-            if (message) {
-              messageNode.appendChild(document.createTextNode(" "));
-            }
-            var linkNode = document.createElement("a");
-            linkNode.href = linkUrl;
-            linkNode.target = "_blank";
-            linkNode.rel = "noreferrer noopener";
-            linkNode.textContent = linkLabel;
-            messageNode.appendChild(linkNode);
-            if (messageSuffix) {
-              messageNode.appendChild(
-                document.createTextNode(" " + messageSuffix),
-              );
-            }
-          } else if (messageSuffix) {
-            if (message) {
-              messageNode.appendChild(document.createTextNode(" "));
-            }
-            messageNode.appendChild(document.createTextNode(messageSuffix));
-          }
-          if (inlineCodeValue) {
-            if (message || linkLabel || messageSuffix) {
-              messageNode.appendChild(document.createTextNode(" "));
-            }
-            var inlineCodeNode = document.createElement("code");
-            inlineCodeNode.textContent = inlineCodeValue;
-            messageNode.appendChild(inlineCodeNode);
-            if (inlineCodeSuffix) {
-              messageNode.appendChild(
-                document.createTextNode(" " + inlineCodeSuffix),
-              );
-            }
-          }
+          messageNode.textContent = message || "";
           messageNode.classList.toggle("is-error", !!isError);
           codeNode.textContent = codeValue || "";
           codeNode.classList.toggle("is-open", !!codeValue);
@@ -3573,36 +3506,13 @@
               openBinagotchyBrowser();
             })
             .catch(function (error) {
-              var message =
-                error && error.message
-                  ? error.message
-                  : "Failed to set partner";
-              var codeValue = "";
-              var linkLabel = "";
-              var linkUrl = "";
-              var messageSuffix = "";
-              var inlineCodeValue = "";
-              var inlineCodeSuffix = "";
-              if (message === "Failed to fetch") {
-                message = "Failed to fetch. In ChatGPT, open";
-                linkLabel = "Advanced connector settings";
-                linkUrl =
-                  "https://chatgpt.com/#settings/Connectors/Advanced";
-                messageSuffix = "and turn off";
-                inlineCodeValue = "Enforce CSP in developer mode";
-                inlineCodeSuffix = "then refresh the page.";
-              }
               console.error(error);
               openBinagotchyNotice(
                 "Failed to set partner",
-                message,
+                error && error.message
+                  ? error.message
+                  : "Failed to set partner",
                 true,
-                codeValue,
-                linkLabel,
-                linkUrl,
-                messageSuffix,
-                inlineCodeValue,
-                inlineCodeSuffix,
               );
             })
             .finally(function () {

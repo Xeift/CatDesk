@@ -826,6 +826,7 @@ async fn post_mcp(
             session,
             &workspace_root,
             mascot_seed,
+            ngrok_url.as_deref(),
             mode,
             tool_mode,
             set_catdesk_as_co_author,

@@ -173,6 +173,7 @@ pub async fn handle_request(
     session: &mut Session,
     workspace_root: &str,
     mascot_seed: u64,
+    public_base_url: Option<&str>,
     mode: Mode,
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
@@ -221,8 +222,8 @@ pub async fn handle_request(
             )
             .await,
         ),
-        "resources/list" => Some(handle_resources_list(req)),
-        "resources/read" => Some(handle_resources_read(req)),
+        "resources/list" => Some(handle_resources_list(req, public_base_url)),
+        "resources/read" => Some(handle_resources_read(req, public_base_url)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
         _ => Some(JsonRpcResponse::error(
             req.id.clone(),
@@ -247,7 +248,23 @@ fn handle_initialize(req: &JsonRpcRequest, session: &mut Session) -> JsonRpcResp
     )
 }
 
-fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
+fn widget_resource_ui_meta(public_base_url: Option<&str>) -> Value {
+    let mut ui = Map::new();
+    ui.insert("prefersBorder".to_string(), Value::Bool(true));
+    if let Some(origin) = public_base_url.filter(|value| !value.is_empty()) {
+        ui.insert(
+            "csp".to_string(),
+            json!({
+                "connectDomains": [origin],
+                "resourceDomains": [],
+            }),
+        );
+    }
+    Value::Object(ui)
+}
+
+fn handle_resources_list(req: &JsonRpcRequest, public_base_url: Option<&str>) -> JsonRpcResponse {
+    let ui_meta = widget_resource_ui_meta(public_base_url);
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
@@ -257,14 +274,14 @@ fn handle_resources_list(req: &JsonRpcRequest) -> JsonRpcResponse {
                     "name": "CatDesk dashboard widget",
                     "description": "Embedded ChatGPT widget for CatDesk status and timeline data.",
                     "mimeType": UI_TEMPLATE_MIME_TYPE,
-                    "_meta": { "ui": { "prefersBorder": true } }
+                    "_meta": { "ui": ui_meta.clone() }
                 },
                 {
                     "uri": FINAL_SUMMARY_UI_TEMPLATE_URI,
                     "name": "CatDesk final summary widget",
                     "description": "Embedded ChatGPT widget for CatDesk final summary review data.",
                     "mimeType": UI_TEMPLATE_MIME_TYPE,
-                    "_meta": { "ui": { "prefersBorder": true } }
+                    "_meta": { "ui": ui_meta }
                 }
             ],
             "nextCursor": null
@@ -276,7 +293,7 @@ fn render_widget_html(resource_uri: &str) -> String {
     CATDESK_WIDGET_HTML.replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
 }
 
-fn handle_resources_read(req: &JsonRpcRequest) -> JsonRpcResponse {
+fn handle_resources_read(req: &JsonRpcRequest, public_base_url: Option<&str>) -> JsonRpcResponse {
     let uri = req
         .params
         .get("uri")
@@ -296,7 +313,7 @@ fn handle_resources_read(req: &JsonRpcRequest) -> JsonRpcResponse {
                 "uri": uri,
                 "mimeType": UI_TEMPLATE_MIME_TYPE,
                 "text": text,
-                "_meta": { "ui": { "prefersBorder": true } }
+                "_meta": { "ui": widget_resource_ui_meta(public_base_url) }
             }]
         }),
     )
@@ -2874,7 +2891,7 @@ hello world"
             .and_then(Value::as_str)
             .map(str::to_string)
             .expect("missing widget resource uri");
-        let resource_resp = handle_resources_read(&resources_read_request(&resource_uri));
+        let resource_resp = handle_resources_read(&resources_read_request(&resource_uri), None);
         let resource_html = resource_resp
             .result
             .as_ref()
@@ -2922,6 +2939,45 @@ hello world"
         assert_eq!(resource_uri, FINAL_SUMMARY_UI_TEMPLATE_URI);
         assert!(!resource_html.contains("var EMBEDDED_WIDGET_PAYLOAD = "));
         assert!(!resource_html.contains("\"changedFiles\":"));
+    }
+
+    #[test]
+    fn resources_read_includes_widget_csp_connect_domains() {
+        let resource_resp = handle_resources_read(
+            &resources_read_request(UI_TEMPLATE_URI),
+            Some("https://example.ngrok.app"),
+        );
+        let ui_meta = resource_resp
+            .result
+            .as_ref()
+            .and_then(|result| result.get("contents"))
+            .and_then(Value::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(|entry| entry.get("_meta"))
+            .and_then(|meta| meta.get("ui"))
+            .expect("missing widget ui meta");
+
+        assert_eq!(
+            ui_meta.get("prefersBorder").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            ui_meta
+                .get("csp")
+                .and_then(|csp| csp.get("connectDomains"))
+                .and_then(Value::as_array)
+                .and_then(|domains| domains.first())
+                .and_then(Value::as_str),
+            Some("https://example.ngrok.app")
+        );
+        assert_eq!(
+            ui_meta
+                .get("csp")
+                .and_then(|csp| csp.get("resourceDomains"))
+                .and_then(Value::as_array)
+                .map(|domains| domains.len()),
+            Some(0)
+        );
     }
 
     #[test]
