@@ -585,11 +585,14 @@
         width: fit-content;
         max-width: min(100%, 440px);
         justify-self: start;
+        display: inline-flex;
+        align-items: center;
+        height: 26px;
         overflow: hidden;
         text-overflow: ellipsis;
-        padding: 4px 6px;
+        padding: 0 10px;
         border: 1px solid var(--line);
-        border-radius: 6px;
+        border-radius: 12px;
         background: var(--bg);
         color: var(--text-2);
         font:
@@ -601,35 +604,58 @@
         white-space: nowrap;
       }
 
+      .instruction-path-combo {
+        min-width: 0;
+        display: inline-flex;
+        align-items: stretch;
+        justify-self: start;
+        height: 26px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--bg);
+        overflow: hidden;
+      }
+
+      .instruction-path-combo .instruction-path-code {
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        padding-right: 8px;
+      }
+
       .instruction-path-action {
-        width: 24px;
-        height: 24px;
+        width: 30px;
+        height: 100%;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        background: var(--bg);
+        padding: 0;
+        border: 0;
+        border-left: 1px solid var(--line);
+        background: transparent;
         color: var(--text-2);
+        cursor: pointer;
       }
 
       .instruction-path-action svg {
-        width: 16px;
-        height: 16px;
+        width: 15px;
+        height: 15px;
         display: block;
         stroke: none !important;
         fill: currentColor !important;
       }
 
-      .instruction-path-action svg path {
-        stroke: none !important;
-        fill: currentColor !important;
+      .instruction-path-action:hover,
+      .instruction-path-action:focus-visible {
+        background: var(--panel-2);
+        color: var(--text);
+        outline: none;
       }
 
       .instruction-path-trailing {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        gap: 0;
         justify-self: start;
       }
 
@@ -3219,8 +3245,8 @@
             function renderInstructionPathActionButton() {
               return (
                 '<button type="button" class="instruction-path-action" data-open-binagotchy-browser aria-label="Open binagotchy browser">' +
-                '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="stroke:none;fill:currentColor">' +
-                '<path transform="translate(12 12) scale(1.08) translate(-12 -12)" d="M19.14 12.936c.036-.3.06-.607.06-.936 0-.328-.024-.636-.06-.936l2.03-1.58c.18-.144.23-.414.116-.618l-1.92-3.32c-.115-.22-.37-.294-.59-.22l-2.39.96c-.496-.38-1.026-.7-1.616-.94l-.36-2.544C14.364 2.58 14.168 2.4 13.924 2.4h-3.84c-.244 0-.44.18-.476.415l-.36 2.544c-.59.24-1.12.56-1.616.94l-2.39-.96c-.22-.074-.475 0-.59.22l-1.92 3.32c-.114.204-.064.474.116.618l2.03 1.58c-.036.3-.06.608-.06.936 0 .328.024.636.06.936l-2.03 1.58c-.18.144-.23.414-.116.618l1.92 3.32c.115.22.37.294.59.22l2.39-.96c.496.38 1.026.7 1.616.94l.36 2.544c.036.235.232.415.476.415h3.84c.244 0 .44-.18.476-.415l.36-2.544c.59-.24 1.12-.56 1.616-.94l2.39.96c.22.074.475 0 .59-.22l1.92-3.32c.114-.204.064-.474-.116-.618l-2.03-1.58zM12 15.6c-1.987 0-3.6-1.613-3.6-3.6s1.613-3.6 3.6-3.6 3.6 1.613 3.6 3.6-1.613 3.6-3.6 3.6z"></path>' +
+                '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+                '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"></path>' +
                 "</svg>" +
                 "</button>"
               );
@@ -3244,12 +3270,14 @@
                 : "";
               var trailingHtml = hasAction
                 ? '<span class="instruction-path-trailing">' +
+                  '<span class="instruction-path-combo">' +
                   '<span class="instruction-path-code"' +
                   titleAttr +
                   ">" +
                   esc(displayValue || "-") +
                   "</span>" +
                   actionHtml +
+                  "</span>" +
                   "</span>"
                 : '<span class="instruction-path-code"' +
                   titleAttr +
