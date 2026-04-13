@@ -616,11 +616,21 @@
         overflow: hidden;
       }
 
+      .instruction-path-combo.has-popout {
+        position: relative;
+        overflow: visible;
+      }
+
       .instruction-path-combo .instruction-path-code {
         border: 0;
         border-radius: 0;
         background: transparent;
         padding-right: 8px;
+      }
+
+      .instruction-path-combo.has-popout .instruction-path-code {
+        border-top-left-radius: 12px;
+        border-bottom-left-radius: 12px;
       }
 
       .instruction-path-action {
@@ -635,6 +645,12 @@
         background: transparent;
         color: var(--text-2);
         cursor: pointer;
+      }
+
+      .instruction-path-combo.has-popout .instruction-path-action {
+        width: 32px;
+        border-top-right-radius: 12px;
+        border-bottom-right-radius: 12px;
       }
 
       .instruction-path-action svg {
@@ -657,6 +673,195 @@
         align-items: center;
         gap: 0;
         justify-self: start;
+      }
+
+      .agents-fan-root {
+        position: relative;
+        display: inline-flex;
+        flex: 0 0 auto;
+        z-index: 1;
+      }
+
+      .agents-fan-root.is-open {
+        z-index: 12;
+      }
+
+      .agents-fan-trigger.is-open {
+        background: var(--panel-2);
+        color: var(--text);
+      }
+
+      .agents-fan-menu {
+        position: fixed;
+        display: none;
+        left: 0;
+        top: 0;
+        width: 124px;
+        height: 176px;
+        transform: translateY(-50%) scale(0.86);
+        transform-origin: 24px 88px;
+        opacity: 0;
+        transition:
+          opacity 140ms ease,
+          transform 180ms cubic-bezier(0.2, 0.78, 0.25, 1);
+        z-index: 48;
+        filter: drop-shadow(0 18px 26px rgba(0, 0, 0, 0.28));
+        pointer-events: none;
+      }
+
+      .agents-fan-root.is-open .agents-fan-menu {
+        display: block;
+        opacity: 1;
+        transform: translateY(-50%) scale(1);
+      }
+
+      .summary-stat .agents-fan-svg {
+        width: 124px;
+        height: 176px;
+        display: block;
+        flex: none;
+        overflow: visible;
+        pointer-events: none;
+      }
+
+      .agents-fan-hint {
+        position: fixed;
+        display: none;
+        left: 0;
+        top: 0;
+        min-width: 118px;
+        max-width: none;
+        padding: 7px 9px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        background: rgba(26, 26, 28, 0.96);
+        box-shadow: 0 14px 24px rgba(0, 0, 0, 0.28);
+        color: var(--text-2);
+        font-size: 11px;
+        line-height: 1.35;
+        white-space: nowrap;
+        opacity: 0;
+        transform: translate(8px, -50%) scale(0.96);
+        transform-origin: left center;
+        transition:
+          opacity 120ms ease,
+          transform 160ms cubic-bezier(0.2, 0.78, 0.25, 1),
+          top 160ms ease;
+        pointer-events: none;
+        z-index: 49;
+      }
+
+      .agents-fan-hint::before {
+        content: "";
+        position: absolute;
+        left: -5px;
+        top: 50%;
+        width: 10px;
+        height: 10px;
+        border-left: 1px solid rgba(255, 255, 255, 0.1);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(26, 26, 28, 0.96);
+        transform: translateY(-50%) rotate(45deg);
+      }
+
+      .agents-fan-hint.is-visible {
+        display: block;
+        opacity: 1;
+        transform: translate(0, -50%) scale(1);
+      }
+
+      .agents-fan-sector-group {
+        cursor: pointer;
+        pointer-events: all;
+        outline: none;
+      }
+
+      .agents-fan-sector-group.is-disabled {
+        cursor: not-allowed;
+      }
+
+      .agents-fan-sector {
+        fill: rgba(33, 33, 33, 0.94);
+        stroke: var(--line);
+        stroke-width: 1;
+        transition:
+          fill 140ms ease,
+          stroke 140ms ease,
+          opacity 140ms ease;
+      }
+
+      .agents-fan-sector-shadow {
+        fill: rgba(0, 0, 0, 0.18);
+        stroke: none;
+      }
+
+      .agents-fan-sector-group .agents-fan-icon {
+        color: var(--text-2);
+        transition: color 140ms ease;
+      }
+
+      .agents-fan-sector-group .agents-fan-icon path,
+      .agents-fan-sector-group .agents-fan-icon polyline,
+      .agents-fan-sector-group .agents-fan-icon line,
+      .agents-fan-sector-group .agents-fan-icon circle {
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .agents-fan-sector-group.is-disabled .agents-fan-icon {
+        color: var(--text-3);
+      }
+
+      .agents-fan-sector-group.is-disabled .agents-fan-sector {
+        fill: rgba(255, 255, 255, 0.02);
+        stroke: rgba(255, 255, 255, 0.12);
+      }
+
+      .agents-fan-sector-group.is-selected .agents-fan-sector {
+        fill: rgba(2, 133, 255, 0.12);
+        stroke: rgba(2, 133, 255, 0.68);
+      }
+
+      .agents-fan-sector-group.is-selected .agents-fan-icon {
+        color: var(--text);
+      }
+
+      .agents-fan-sector-group:not(.is-disabled):hover .agents-fan-sector,
+      .agents-fan-sector-group:not(.is-disabled):focus-visible .agents-fan-sector {
+        fill: rgba(255, 255, 255, 0.06);
+        stroke: var(--text-3);
+      }
+
+      .agents-fan-sector-group.is-selected:not(.is-disabled):hover .agents-fan-sector,
+      .agents-fan-sector-group.is-selected:not(.is-disabled):focus-visible .agents-fan-sector {
+        fill: rgba(2, 133, 255, 0.16);
+        stroke: var(--accent);
+      }
+
+      .agents-fan-guide {
+        fill: none;
+        stroke: rgba(255, 255, 255, 0.08);
+        stroke-width: 1;
+        stroke-dasharray: 2 4;
+      }
+
+      .section.is-instruction-popout {
+        position: relative;
+        overflow: visible;
+        z-index: 2;
+      }
+
+      .section.is-instruction-popout .section-body,
+      .section.is-instruction-popout .instruction-panel {
+        overflow: visible;
+      }
+
+      .section.is-instruction-popout .instruction-panel {
+        padding-top: 26px;
+        padding-bottom: 26px;
       }
 
       .binagotchy-modal-root {
@@ -1424,6 +1629,10 @@
         align-items: stretch;
       }
 
+      .files-token-row.has-instruction-popout .main-stack {
+        align-self: start;
+      }
+
       .completion-shell {
         position: relative;
         border-radius: 10px;
@@ -1843,6 +2052,7 @@
         };
 
         var binagotchyBrowserBindingsBound = false;
+        var agentsFanBindingsBound = false;
 
         var MASCOT_ALPHABET =
           ".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
@@ -1938,6 +2148,16 @@
 
         function validateFileStatus(value) {
           return value === "added" || value === "deleted" || value === "modified"
+            ? value
+            : null;
+        }
+
+        function validateAgentsPathMode(value) {
+          return value === "default" ||
+            value === "workspace" ||
+            value === "catdesk" ||
+            value === "codex" ||
+            value === "disabled"
             ? value
             : null;
         }
@@ -2120,8 +2340,20 @@
             detail: "",
             workspacePath: "",
             workspacePathDisplay: "",
+            agentsPathMode: "default",
+            agentsPathModeUrl: "",
+            agentsPathStateUrl: "",
             agentsPath: "",
             agentsPathDisplay: "",
+            agentsWorkspacePath: "",
+            agentsWorkspacePathDisplay: "",
+            agentsWorkspaceAvailable: false,
+            agentsCatdeskPath: "",
+            agentsCatdeskPathDisplay: "",
+            agentsCatdeskAvailable: false,
+            agentsCodexPath: "",
+            agentsCodexPathDisplay: "",
+            agentsCodexAvailable: false,
             configPath: "",
             configPathDisplay: "",
             binagotchyPath: "",
@@ -2273,8 +2505,30 @@
             var workspacePathDisplay = readNonEmptyString(
               data.workspacePathDisplay,
             );
+            var agentsPathMode = validateAgentsPathMode(data.agentsPathMode);
+            var agentsPathModeUrl = readString(data.agentsPathModeUrl);
+            var agentsPathStateUrl = readString(data.agentsPathStateUrl);
             var agentsPath = readNonEmptyString(data.agentsPath);
             var agentsPathDisplay = readNonEmptyString(data.agentsPathDisplay);
+            var agentsWorkspacePath = readNonEmptyString(data.agentsWorkspacePath);
+            var agentsWorkspacePathDisplay = readNonEmptyString(
+              data.agentsWorkspacePathDisplay,
+            );
+            var agentsWorkspaceAvailable = readBoolean(
+              data.agentsWorkspaceAvailable,
+            );
+            var agentsCatdeskPath = readNonEmptyString(data.agentsCatdeskPath);
+            var agentsCatdeskPathDisplay = readNonEmptyString(
+              data.agentsCatdeskPathDisplay,
+            );
+            var agentsCatdeskAvailable = readBoolean(
+              data.agentsCatdeskAvailable,
+            );
+            var agentsCodexPath = readNonEmptyString(data.agentsCodexPath);
+            var agentsCodexPathDisplay = readNonEmptyString(
+              data.agentsCodexPathDisplay,
+            );
+            var agentsCodexAvailable = readBoolean(data.agentsCodexAvailable);
             var configPath = readNonEmptyString(data.configPath);
             var configPathDisplay = readNonEmptyString(data.configPathDisplay);
             var binagotchyPath = readNonEmptyString(data.binagotchyPath);
@@ -2291,8 +2545,20 @@
             if (
               workspacePath === null ||
               workspacePathDisplay === null ||
+              agentsPathMode === null ||
+              agentsPathModeUrl === null ||
+              agentsPathStateUrl === null ||
               agentsPath === null ||
               agentsPathDisplay === null ||
+              agentsWorkspacePath === null ||
+              agentsWorkspacePathDisplay === null ||
+              agentsWorkspaceAvailable === null ||
+              agentsCatdeskPath === null ||
+              agentsCatdeskPathDisplay === null ||
+              agentsCatdeskAvailable === null ||
+              agentsCodexPath === null ||
+              agentsCodexPathDisplay === null ||
+              agentsCodexAvailable === null ||
               configPath === null ||
               configPathDisplay === null ||
               binagotchyPath === null ||
@@ -2308,8 +2574,20 @@
             }
             next.workspacePath = workspacePath;
             next.workspacePathDisplay = workspacePathDisplay;
+            next.agentsPathMode = agentsPathMode;
+            next.agentsPathModeUrl = agentsPathModeUrl;
+            next.agentsPathStateUrl = agentsPathStateUrl;
             next.agentsPath = agentsPath;
             next.agentsPathDisplay = agentsPathDisplay;
+            next.agentsWorkspacePath = agentsWorkspacePath;
+            next.agentsWorkspacePathDisplay = agentsWorkspacePathDisplay;
+            next.agentsWorkspaceAvailable = agentsWorkspaceAvailable;
+            next.agentsCatdeskPath = agentsCatdeskPath;
+            next.agentsCatdeskPathDisplay = agentsCatdeskPathDisplay;
+            next.agentsCatdeskAvailable = agentsCatdeskAvailable;
+            next.agentsCodexPath = agentsCodexPath;
+            next.agentsCodexPathDisplay = agentsCodexPathDisplay;
+            next.agentsCodexAvailable = agentsCodexAvailable;
             next.configPath = configPath;
             next.configPathDisplay = configPathDisplay;
             next.binagotchyPath = binagotchyPath;
@@ -2880,6 +3158,15 @@
         }
 
         function listingIconSvg(kind) {
+          if (kind === "workspace") {
+            return (
+              '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+              '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"></path>' +
+              '<path d="m3.3 7 8.7 5 8.7-5"></path>' +
+              '<path d="M12 22V12"></path>' +
+              "</svg>"
+            );
+          }
           if (kind === "dir") {
             return (
               '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
@@ -2919,6 +3206,14 @@
             '<circle cx="8" cy="8" r="5.25"></circle>' +
             '<path d="M8 5.5v5"></path>' +
             '<path d="M5.5 8h5"></path>' +
+            "</svg>"
+          );
+        }
+
+        function materialEditIconSvg() {
+          return (
+            '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+            '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"></path>' +
             "</svg>"
           );
         }
@@ -3238,12 +3533,146 @@
             current.configPath ||
             current.binagotchyPath
           ) {
+            function renderAgentsFanSector(
+              optionKey,
+              ariaLabel,
+              hintText,
+              sectorPath,
+              iconTransform,
+              iconHtml,
+              isDisabled,
+            ) {
+              var isSelected = current.agentsPathMode === optionKey;
+              var classes =
+                "agents-fan-sector-group" +
+                (isDisabled ? " is-disabled" : "") +
+                (isSelected ? " is-selected" : "");
+              return (
+                '<g class="' +
+                classes +
+                '" data-agents-option="' +
+                esc(optionKey) +
+                '" data-agents-hint="' +
+                esc(hintText) +
+                '"' +
+                (isDisabled
+                  ? ' tabindex="-1" role="button" aria-disabled="true" aria-label="' +
+                    esc(ariaLabel) +
+                    '"'
+                  : ' tabindex="0" role="button" aria-label="' +
+                    esc(ariaLabel) +
+                    '"') +
+                ">" +
+                '<path class="agents-fan-sector-shadow" d="' +
+                sectorPath +
+                '" transform="translate(1 1)"></path>' +
+                '<path class="agents-fan-sector" d="' +
+                sectorPath +
+                '"></path>' +
+                '<g class="agents-fan-icon" transform="' +
+                iconTransform +
+                '">' +
+                iconHtml +
+                "</g>" +
+                "</g>"
+              );
+            }
+
+            function renderAgentsPathActionButton() {
+              if (!current.agentsPathModeUrl) return "";
+              return (
+                '<span class="agents-fan-root" data-agents-fan-root data-agents-selected="' +
+                esc(current.agentsPathMode) +
+                '" data-agents-path-mode-url="' +
+                esc(current.agentsPathModeUrl) +
+                '" data-agents-path-state-url="' +
+                esc(current.agentsPathStateUrl) +
+                '">' +
+                '<button type="button" class="instruction-path-action agents-fan-trigger" data-agents-fan-trigger aria-label="Choose source">' +
+                materialEditIconSvg() +
+                "</button>" +
+                '<span class="agents-fan-menu" data-agents-fan-menu aria-hidden="true" hidden>' +
+                '<svg class="agents-fan-svg" viewBox="0 0 124 176" aria-hidden="true" focusable="false">' +
+                '<path class="agents-fan-guide" d="M21.28 62.14L17.94 30.32"></path>' +
+                '<path class="agents-fan-guide" d="M48.55 79.45L78.77 68.93"></path>' +
+                '<path class="agents-fan-guide" d="M48.55 96.55L78.77 107.07"></path>' +
+                renderAgentsFanSector(
+                  "default",
+                  "Use automatic resolution",
+                  "Auto resolve",
+                  "M21.28 62.14L17.94 30.32A58 58 0 0 1 55.08 39.03L37.93 66.05A26 26 0 0 0 21.28 62.14Z",
+                  "translate(33.36 48.08)",
+                  '<path d="M0 -7.5l-1.2 3.65a2 2 0 0 1-1.46 1.31L-6.3-1.35l3.64 1.19a2 2 0 0 1 1.31 1.46L0 4.95l1.2-3.65a2 2 0 0 1 1.46-1.46l3.64-1.19-3.64-1.19A2 2 0 0 1 1.2-3.85L0 -7.5Z"></path>',
+                  false,
+                ) +
+                renderAgentsFanSector(
+                  "disabled",
+                  "Disable",
+                  "Disable",
+                  "M37.93 66.05L55.08 39.03A58 58 0 0 1 78.77 68.93L48.55 79.45A26 26 0 0 0 37.93 66.05Z",
+                  "translate(56.13 62.53)",
+                  '<circle cx="0" cy="0" r="6.5"></circle>' +
+                    '<line x1="3" y1="-3" x2="-3" y2="3"></line>' +
+                    '<line x1="-3" y1="-3" x2="3" y2="3"></line>',
+                  false,
+                ) +
+                renderAgentsFanSector(
+                  "workspace",
+                  current.agentsWorkspaceAvailable
+                    ? "Use workspace"
+                    : "workspace is unavailable",
+                  current.agentsWorkspaceAvailable
+                    ? "workspace"
+                    : "workspace (unavailable)",
+                  "M48.55 79.45L78.77 68.93A58 58 0 0 1 78.77 107.07L48.55 96.55A26 26 0 0 0 48.55 79.45Z",
+                  "translate(65 88)",
+                  '<path d="M-6 -3h4l1.6 2H6"></path>' +
+                    '<path d="M-6 -2h12v7h-12z"></path>',
+                  !current.agentsWorkspaceAvailable,
+                ) +
+                renderAgentsFanSector(
+                  "catdesk",
+                  current.agentsCatdeskAvailable
+                    ? "Use ~/.catdesk"
+                    : "~/.catdesk is unavailable",
+                  current.agentsCatdeskAvailable
+                    ? "~/.catdesk"
+                    : "~/.catdesk (unavailable)",
+                  "M48.55 96.55L78.77 107.07A58 58 0 0 1 55.08 136.97L37.93 109.95A26 26 0 0 0 48.55 96.55Z",
+                  "translate(56.13 113.47)",
+                  '<g transform="translate(-8 -8)">' +
+                    '<path d="M2.8 6.6L3.8 2.5L6.3 4.8H9.7L12.2 2.5L13.2 6.6V10.5L11.4 12.6H4.6L2.8 10.5Z"></path>' +
+                    '<path d="M6.55 7.45L6.48 8.05"></path>' +
+                    '<path d="M9.55 7.45L9.48 8.05"></path>' +
+                    "</g>",
+                  !current.agentsCatdeskAvailable,
+                ) +
+                renderAgentsFanSector(
+                  "codex",
+                  current.agentsCodexAvailable
+                    ? "Use ~/.codex"
+                    : "~/.codex is unavailable",
+                  current.agentsCodexAvailable
+                    ? "~/.codex"
+                    : "~/.codex (unavailable)",
+                  "M37.93 109.95L55.08 136.97A58 58 0 0 1 17.94 145.68L21.28 113.86A26 26 0 0 0 37.93 109.95Z",
+                  "translate(33.36 127.92)",
+                  '<path d="M-4.6 -4L-8 0l3.4 4"></path>' +
+                    '<path d="M4.6 -4L8 0l-3.4 4"></path>' +
+                    '<path d="M1.6 -5.4L-1.6 5.4"></path>',
+                  !current.agentsCodexAvailable,
+                ) +
+                "</svg>" +
+                "</span>" +
+                '<span class="agents-fan-hint" data-agents-fan-hint aria-hidden="true" hidden></span>' +
+                "</span>"
+              );
+            }
+
             function renderInstructionPathActionButton() {
               return (
                 '<button type="button" class="instruction-path-action" data-open-binagotchy-browser aria-label="Open binagotchy browser">' +
-                '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
-                '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"></path>' +
-                "</svg>" +
+                materialEditIconSvg() +
                 "</button>"
               );
             }
@@ -3254,6 +3683,7 @@
               fullValue,
               displayValue,
               actionHtml,
+              comboClassName,
             ) {
               var hasAction =
                 typeof actionHtml === "string" && actionHtml.length > 0;
@@ -3264,9 +3694,15 @@
               var titleAttr = titleText
                 ? ' title="' + esc(titleText) + '"'
                 : "";
+              var comboClassAttr =
+                comboClassName && comboClassName.length > 0
+                  ? " " + comboClassName
+                  : "";
               var trailingHtml = hasAction
                 ? '<span class="instruction-path-trailing">' +
-                  '<span class="instruction-path-combo">' +
+                  '<span class="instruction-path-combo' +
+                  comboClassAttr +
+                  '">' +
                   '<span class="instruction-path-code"' +
                   titleAttr +
                   ">" +
@@ -3299,7 +3735,7 @@
             pathsHtml =
               '<div class="instruction-paths">' +
               renderInstructionPathRow(
-                "dir",
+                "workspace",
                 "workspace",
                 current.workspacePath,
                 current.workspacePathDisplay,
@@ -3309,6 +3745,8 @@
                 "AGENTS.md",
                 current.agentsPath,
                 current.agentsPathDisplay,
+                renderAgentsPathActionButton(),
+                current.agentsPathModeUrl ? "has-popout" : "",
               ) +
               renderInstructionPathRow(
                 "file",
@@ -3434,6 +3872,376 @@
           codeNode.classList.remove("is-open");
         }
 
+        function syncAgentsPathState(payload) {
+          if (!payload || !isPlainObject(payload)) return false;
+          var agentsPathMode = validateAgentsPathMode(payload.agentsPathMode);
+          var agentsPath = readNonEmptyString(payload.agentsPath);
+          var agentsPathDisplay = readNonEmptyString(payload.agentsPathDisplay);
+          var agentsWorkspacePath = readNonEmptyString(payload.agentsWorkspacePath);
+          var agentsWorkspacePathDisplay = readNonEmptyString(
+            payload.agentsWorkspacePathDisplay,
+          );
+          var agentsWorkspaceAvailable = readBoolean(
+            payload.agentsWorkspaceAvailable,
+          );
+          var agentsCatdeskPath = readNonEmptyString(payload.agentsCatdeskPath);
+          var agentsCatdeskPathDisplay = readNonEmptyString(
+            payload.agentsCatdeskPathDisplay,
+          );
+          var agentsCatdeskAvailable = readBoolean(payload.agentsCatdeskAvailable);
+          var agentsCodexPath = readNonEmptyString(payload.agentsCodexPath);
+          var agentsCodexPathDisplay = readNonEmptyString(
+            payload.agentsCodexPathDisplay,
+          );
+          var agentsCodexAvailable = readBoolean(payload.agentsCodexAvailable);
+          if (
+            !view ||
+            agentsPathMode === null ||
+            agentsPath === null ||
+            agentsPathDisplay === null ||
+            agentsWorkspacePath === null ||
+            agentsWorkspacePathDisplay === null ||
+            agentsWorkspaceAvailable === null ||
+            agentsCatdeskPath === null ||
+            agentsCatdeskPathDisplay === null ||
+            agentsCatdeskAvailable === null ||
+            agentsCodexPath === null ||
+            agentsCodexPathDisplay === null ||
+            agentsCodexAvailable === null
+          ) {
+            return false;
+          }
+          view.agentsPathMode = agentsPathMode;
+          view.agentsPath = agentsPath;
+          view.agentsPathDisplay = agentsPathDisplay;
+          view.agentsWorkspacePath = agentsWorkspacePath;
+          view.agentsWorkspacePathDisplay = agentsWorkspacePathDisplay;
+          view.agentsWorkspaceAvailable = agentsWorkspaceAvailable;
+          view.agentsCatdeskPath = agentsCatdeskPath;
+          view.agentsCatdeskPathDisplay = agentsCatdeskPathDisplay;
+          view.agentsCatdeskAvailable = agentsCatdeskAvailable;
+          view.agentsCodexPath = agentsCodexPath;
+          view.agentsCodexPathDisplay = agentsCodexPathDisplay;
+          view.agentsCodexAvailable = agentsCodexAvailable;
+          return true;
+        }
+
+        function hideAgentsHint(fanRoot) {
+          var hintNode = fanRoot && fanRoot.querySelector("[data-agents-fan-hint]");
+          if (!hintNode) return;
+          hintNode.classList.remove("is-visible");
+          hintNode.setAttribute("aria-hidden", "true");
+          hintNode.hidden = true;
+        }
+
+        function positionAgentsFanOverlay(fanRoot) {
+          if (!fanRoot) return;
+          var menu = fanRoot.querySelector("[data-agents-fan-menu]");
+          if (!menu) return;
+          var fanRect = fanRoot.getBoundingClientRect();
+          menu.style.left = Math.round(fanRect.left - 9) + "px";
+          menu.style.top =
+            Math.round(fanRect.top + fanRect.height / 2) + "px";
+        }
+
+        function openAgentsFan(fanRoot) {
+          if (!fanRoot) return;
+          var trigger = fanRoot.querySelector("[data-agents-fan-trigger]");
+          var menu = fanRoot.querySelector("[data-agents-fan-menu]");
+          if (!trigger || !menu) return;
+          closeAgentsFans(fanRoot);
+          fanRoot.classList.add("is-open");
+          trigger.classList.add("is-open");
+          positionAgentsFanOverlay(fanRoot);
+          menu.hidden = false;
+          menu.setAttribute("aria-hidden", "false");
+        }
+
+        function updateAgentsPathDisplayDom(fanRoot) {
+          if (!fanRoot || !view) return;
+          var combo = fanRoot.closest(".instruction-path-combo");
+          if (!combo) return;
+          var codeNode = combo.querySelector(".instruction-path-code");
+          if (!codeNode) return;
+          codeNode.textContent = view.agentsPathDisplay || "-";
+          if (view.agentsPath && view.agentsPath !== "-") {
+            codeNode.setAttribute("title", view.agentsPath);
+          } else {
+            codeNode.removeAttribute("title");
+          }
+        }
+
+        function syncAgentsFanDom(fanRoot) {
+          if (!fanRoot || !view) return;
+          fanRoot.setAttribute("data-agents-selected", view.agentsPathMode);
+          updateAgentsPathDisplayDom(fanRoot);
+
+          Array.prototype.forEach.call(
+            fanRoot.querySelectorAll("[data-agents-option]"),
+            function (node) {
+              var option = node.getAttribute("data-agents-option") || "";
+              var isDisabled = false;
+              var hintText = "";
+              var ariaLabel = "";
+
+              if (option === "default") {
+                hintText = "Auto resolve";
+                ariaLabel = "Use automatic resolution";
+              } else if (option === "disabled") {
+                hintText = "Disable";
+                ariaLabel = "Disable";
+              } else if (option === "workspace") {
+                isDisabled = !view.agentsWorkspaceAvailable;
+                hintText = isDisabled
+                  ? "workspace (unavailable)"
+                  : "workspace";
+                ariaLabel = isDisabled
+                  ? "workspace is unavailable"
+                  : "Use workspace";
+              } else if (option === "catdesk") {
+                isDisabled = !view.agentsCatdeskAvailable;
+                hintText = isDisabled
+                  ? "~/.catdesk (unavailable)"
+                  : "~/.catdesk";
+                ariaLabel = isDisabled
+                  ? "~/.catdesk is unavailable"
+                  : "Use ~/.catdesk";
+              } else if (option === "codex") {
+                isDisabled = !view.agentsCodexAvailable;
+                hintText = isDisabled
+                  ? "~/.codex (unavailable)"
+                  : "~/.codex";
+                ariaLabel = isDisabled
+                  ? "~/.codex is unavailable"
+                  : "Use ~/.codex";
+              }
+
+              node.classList.toggle("is-selected", view.agentsPathMode === option);
+              node.classList.toggle("is-disabled", isDisabled);
+              node.setAttribute("data-agents-hint", hintText);
+              node.setAttribute("aria-label", ariaLabel);
+              if (isDisabled) {
+                node.setAttribute("tabindex", "-1");
+                node.setAttribute("aria-disabled", "true");
+              } else {
+                node.setAttribute("tabindex", "0");
+                node.removeAttribute("aria-disabled");
+              }
+            },
+          );
+
+          hideAgentsHint(fanRoot);
+          positionAgentsFanOverlay(fanRoot);
+        }
+
+        function closeAgentsFans(exceptRoot) {
+          Array.prototype.forEach.call(
+            document.querySelectorAll("[data-agents-fan-root]"),
+            function (fanRoot) {
+              if (fanRoot === exceptRoot) return;
+              fanRoot.classList.remove("is-open");
+              var trigger = fanRoot.querySelector("[data-agents-fan-trigger]");
+              var menu = fanRoot.querySelector("[data-agents-fan-menu]");
+              if (trigger) trigger.classList.remove("is-open");
+              if (menu) {
+                menu.setAttribute("aria-hidden", "true");
+                menu.hidden = true;
+              }
+              hideAgentsHint(fanRoot);
+            },
+          );
+        }
+
+        function showAgentsHint(fanRoot, node) {
+          var hintNode = fanRoot && fanRoot.querySelector("[data-agents-fan-hint]");
+          if (!hintNode || !fanRoot.classList.contains("is-open")) return;
+          positionAgentsFanOverlay(fanRoot);
+          var hintText = node.getAttribute("data-agents-hint") || "";
+          var menu = fanRoot.querySelector("[data-agents-fan-menu]");
+          var menuRect = menu ? menu.getBoundingClientRect() : null;
+          var nodeRect = node.getBoundingClientRect();
+          hintNode.textContent = hintText;
+          hintNode.style.left =
+            Math.round((menuRect ? menuRect.left : nodeRect.right) + 114) + "px";
+          hintNode.style.top =
+            Math.round(nodeRect.top + nodeRect.height / 2) + "px";
+          hintNode.hidden = false;
+          hintNode.classList.add("is-visible");
+          hintNode.setAttribute("aria-hidden", "false");
+        }
+
+        function refreshAgentsPathState(fanRoot) {
+          var url =
+            (fanRoot && fanRoot.getAttribute("data-agents-path-state-url")) ||
+            view.agentsPathStateUrl ||
+            "";
+          if (!url) {
+            return Promise.reject(new Error("Missing source state URL"));
+          }
+          var requestUrl =
+            url +
+            (url.indexOf("?") === -1 ? "?" : "&") +
+            "_ts=" +
+            String(Date.now());
+          closeBinagotchyNotice();
+          return window.fetch(requestUrl, {
+            method: "GET",
+            cache: "no-store",
+            headers: {
+              "ngrok-skip-browser-warning": "1",
+            },
+          }).then(function (response) {
+            return response
+              .json()
+              .catch(function () {
+                return null;
+              })
+              .then(function (payload) {
+                if (!response.ok || !payload || payload.ok !== true) {
+                  var message =
+                    payload && payload.error
+                      ? String(payload.error)
+                      : "Failed to refresh source state";
+                  throw new Error(message);
+                }
+                if (!syncAgentsPathState(payload)) {
+                  throw new Error("Failed to refresh source state");
+                }
+                return payload;
+              });
+          });
+        }
+
+        function submitAgentsPathMode(fanRoot, node) {
+          var mode = node.getAttribute("data-agents-option") || "";
+          var url =
+            fanRoot.getAttribute("data-agents-path-mode-url") ||
+            view.agentsPathModeUrl ||
+            "";
+          if (!mode || !url) return;
+          closeBinagotchyNotice();
+          window
+            .fetch(url, {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/x-www-form-urlencoded;charset=UTF-8",
+                "ngrok-skip-browser-warning": "1",
+              },
+              body: "mode=" + encodeURIComponent(mode),
+            })
+            .then(function (response) {
+              return response
+                .json()
+                .catch(function () {
+                  return null;
+                })
+                .then(function (payload) {
+                  if (!response.ok || !payload || payload.ok !== true) {
+                    var message =
+                      payload && payload.error
+                        ? String(payload.error)
+                        : "Failed to update source";
+                    throw new Error(message);
+                  }
+                  if (!syncAgentsPathState(payload)) {
+                    throw new Error("Failed to update source");
+                  }
+                  render();
+                });
+            })
+            .catch(function (error) {
+              console.error(error);
+              openBinagotchyNotice(
+                "Failed to set source",
+                error && error.message ? error.message : "Failed to set source",
+                true,
+              );
+            });
+        }
+
+        function bindAgentsPathFans(root) {
+          if (!root) return;
+          Array.prototype.forEach.call(
+            root.querySelectorAll("[data-agents-fan-root]"),
+            function (fanRoot) {
+              var trigger = fanRoot.querySelector("[data-agents-fan-trigger]");
+              var menu = fanRoot.querySelector("[data-agents-fan-menu]");
+              var optionNodes = fanRoot.querySelectorAll("[data-agents-option]");
+              if (!trigger || !menu || !optionNodes.length) return;
+
+              trigger.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (fanRoot.classList.contains("is-open")) {
+                  closeAgentsFans(null);
+                  return;
+                }
+                openAgentsFan(fanRoot);
+                refreshAgentsPathState(fanRoot)
+                  .then(function () {
+                    syncAgentsFanDom(fanRoot);
+                  })
+                  .catch(function (error) {
+                    console.error(error);
+                    openBinagotchyNotice(
+                      "Failed to refresh source",
+                      error && error.message
+                        ? error.message
+                        : "Failed to refresh source",
+                      true,
+                    );
+                  });
+              });
+
+              Array.prototype.forEach.call(optionNodes, function (node) {
+                function selectOption(event) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (node.classList.contains("is-disabled")) {
+                    return;
+                  }
+                  closeAgentsFans(null);
+                  submitAgentsPathMode(fanRoot, node);
+                }
+
+                node.addEventListener("mousedown", function (event) {
+                  event.preventDefault();
+                });
+                node.addEventListener("mouseenter", function () {
+                  showAgentsHint(fanRoot, node);
+                });
+                node.addEventListener("mouseleave", function () {
+                  hideAgentsHint(fanRoot);
+                });
+                node.addEventListener("focus", function () {
+                  showAgentsHint(fanRoot, node);
+                });
+                node.addEventListener("blur", function () {
+                  hideAgentsHint(fanRoot);
+                });
+                node.addEventListener("click", selectOption);
+                node.addEventListener("keydown", function (event) {
+                  if (event.key === "Enter" || event.key === " ") {
+                    selectOption(event);
+                  }
+                });
+              });
+            },
+          );
+
+          if (!agentsFanBindingsBound) {
+            document.addEventListener("click", function (event) {
+              if (event.target.closest("[data-agents-fan-root]")) return;
+              closeAgentsFans(null);
+            });
+            window.addEventListener("keydown", function (event) {
+              if (event.key === "Escape") closeAgentsFans(null);
+            });
+            agentsFanBindingsBound = true;
+          }
+        }
+
         function applyWidgetMascotToView(mascot) {
           if (!view) return false;
           var mascotState = validateMascotState(mascot);
@@ -3487,6 +4295,7 @@
               headers: {
                 "Content-Type":
                   "application/x-www-form-urlencoded;charset=UTF-8",
+                "ngrok-skip-browser-warning": "1",
               },
               body: "seed=" + encodeURIComponent(seed),
             })
@@ -3530,6 +4339,9 @@
           window
             .fetch(url, {
               method: "POST",
+              headers: {
+                "ngrok-skip-browser-warning": "1",
+              },
             })
             .then(function (response) {
               if (!response.ok) {
@@ -4277,7 +5089,7 @@
           var instructionSectionHtml = "";
           if (isCatDeskInstruction) {
             instructionSectionHtml =
-              '<section class="section">' +
+              '<section class="section is-instruction-popout">' +
               '<div class="section-body">' +
               renderCatDeskInstructionPanel(view) +
               "</div>" +
@@ -4359,7 +5171,9 @@
           var contentRowHtml = "";
           if (mainContentHtml && tokenPanelHtml) {
             contentRowHtml =
-              '<div class="files-token-row">' +
+              '<div class="files-token-row' +
+              (isCatDeskInstruction ? " has-instruction-popout" : "") +
+              '">' +
               '<div class="main-stack">' +
               mainContentHtml +
               "</div>" +
@@ -4384,6 +5198,7 @@
             bindInstructionReplay(instructionHero, view);
           }
           bindBinagotchyBrowser(root);
+          bindAgentsPathFans(root);
 
           playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
           if (fromLoading && !shouldAnimateLiveTokenFace(view)) {

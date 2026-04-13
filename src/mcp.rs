@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::command;
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
-use crate::state::{Mode, ToolMode, app_config_path, user_home_dir};
+use crate::state::{AgentsPathMode, Mode, ToolMode, app_config_path, load_app_config, user_home_dir};
 use crate::workspace_tools;
 
 const SERVER_NAME: &str = "catdesk";
@@ -927,6 +927,10 @@ fn workspace_agents_path(workspace_root: &str) -> PathBuf {
     Path::new(workspace_root).join("AGENTS.md")
 }
 
+fn catdesk_agents_path() -> std::io::Result<PathBuf> {
+    Ok(user_home_dir()?.join(".catdesk").join("AGENTS.md"))
+}
+
 fn codex_agents_path() -> PathBuf {
     user_home_dir()
         .unwrap_or_default()
@@ -934,16 +938,104 @@ fn codex_agents_path() -> PathBuf {
         .join("AGENTS.md")
 }
 
-fn preferred_agents_path(workspace_root: &str) -> Option<PathBuf> {
-    let workspace_path = workspace_agents_path(workspace_root);
-    if workspace_path.is_file() {
-        return Some(workspace_path);
+#[derive(Clone)]
+struct AgentsOptionState {
+    path: PathBuf,
+    path_string: String,
+    display_path: String,
+    available: bool,
+}
+
+#[derive(Clone)]
+struct AgentsWidgetState {
+    mode: AgentsPathMode,
+    current_path_string: String,
+    current_display_path: String,
+    resolved_path: Option<PathBuf>,
+    workspace: AgentsOptionState,
+    catdesk: AgentsOptionState,
+    codex: AgentsOptionState,
+}
+
+fn agents_option_state(path: PathBuf) -> AgentsOptionState {
+    let (path_string, display_path) = widget_path_strings(&path);
+    AgentsOptionState {
+        available: path.is_file(),
+        path,
+        path_string,
+        display_path,
     }
-    let codex_path = codex_agents_path();
-    if codex_path.is_file() {
-        return Some(codex_path);
-    }
-    None
+}
+
+fn agents_widget_state(workspace_root: &str) -> std::io::Result<AgentsWidgetState> {
+    let mode = load_app_config()?.agents_path_mode;
+    let workspace = agents_option_state(workspace_agents_path(workspace_root));
+    let catdesk = agents_option_state(catdesk_agents_path()?);
+    let codex = agents_option_state(codex_agents_path());
+
+    let (current_path_string, current_display_path, resolved_path) = match mode {
+        AgentsPathMode::Default => {
+            let resolved = if workspace.available {
+                Some(workspace.path.clone())
+            } else if catdesk.available {
+                Some(catdesk.path.clone())
+            } else if codex.available {
+                Some(codex.path.clone())
+            } else {
+                None
+            };
+            if let Some(path) = resolved.as_ref() {
+                let (path_string, display_path) = widget_path_strings(path);
+                (path_string, display_path, resolved)
+            } else {
+                ("-".to_string(), "-".to_string(), None)
+            }
+        }
+        AgentsPathMode::Workspace => (
+            workspace.path_string.clone(),
+            workspace.display_path.clone(),
+            workspace.available.then_some(workspace.path.clone()),
+        ),
+        AgentsPathMode::Catdesk => (
+            catdesk.path_string.clone(),
+            catdesk.display_path.clone(),
+            catdesk.available.then_some(catdesk.path.clone()),
+        ),
+        AgentsPathMode::Codex => (
+            codex.path_string.clone(),
+            codex.display_path.clone(),
+            codex.available.then_some(codex.path.clone()),
+        ),
+        AgentsPathMode::Disabled => ("-".to_string(), "(disabled)".to_string(), None),
+    };
+
+    Ok(AgentsWidgetState {
+        mode,
+        current_path_string,
+        current_display_path,
+        resolved_path,
+        workspace,
+        catdesk,
+        codex,
+    })
+}
+
+pub(crate) fn agents_widget_state_payload(workspace_root: &str) -> std::io::Result<Value> {
+    let state = agents_widget_state(workspace_root)?;
+    Ok(json!({
+        "agentsPathMode": state.mode,
+        "agentsPath": state.current_path_string,
+        "agentsPathDisplay": state.current_display_path,
+        "agentsWorkspacePath": state.workspace.path_string,
+        "agentsWorkspacePathDisplay": state.workspace.display_path,
+        "agentsWorkspaceAvailable": state.workspace.available,
+        "agentsCatdeskPath": state.catdesk.path_string,
+        "agentsCatdeskPathDisplay": state.catdesk.display_path,
+        "agentsCatdeskAvailable": state.catdesk.available,
+        "agentsCodexPath": state.codex.path_string,
+        "agentsCodexPathDisplay": state.codex.display_path,
+        "agentsCodexAvailable": state.codex.available,
+    }))
 }
 
 fn read_agents_text(path: &Path) -> Option<String> {
@@ -956,9 +1048,9 @@ fn read_agents_text(path: &Path) -> Option<String> {
     }
 }
 
-fn preferred_agents_text(workspace_root: &str) -> Option<String> {
-    let path = preferred_agents_path(workspace_root)?;
-    read_agents_text(&path)
+fn preferred_agents_text(workspace_root: &str) -> std::io::Result<Option<String>> {
+    let path = agents_widget_state(workspace_root)?.resolved_path;
+    Ok(path.as_deref().and_then(read_agents_text))
 }
 
 fn display_path_with_tilde(path: &Path) -> String {
@@ -988,7 +1080,11 @@ fn widget_path_strings(path: &Path) -> (String, String) {
     )
 }
 
-fn catdesk_instruction_text(workspace_root: &str, mode: Mode, tool_mode: ToolMode) -> String {
+fn catdesk_instruction_text(
+    workspace_root: &str,
+    mode: Mode,
+    tool_mode: ToolMode,
+) -> std::io::Result<String> {
     let mut lines: Vec<String> = r#"CatDesk usage instructions
 
 Prefer dedicated MCP tools whenever a dedicated tool can complete the task.
@@ -1035,7 +1131,7 @@ Always specify the branch explicitly when using `git push`."#
         );
     }
 
-    if let Some(agents_text) = preferred_agents_text(workspace_root) {
+    if let Some(agents_text) = preferred_agents_text(workspace_root)? {
         lines.push("".to_string());
         lines.push("Workspace-specific instructions from AGENTS.md:".to_string());
         lines.push(agents_text);
@@ -1044,7 +1140,7 @@ Always specify the branch explicitly when using `git push`."#
         "When the work is complete and you are ready to report back, always call render_final_summary_widget."
             .to_string(),
     );
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 fn catdesk_instruction_structured(
@@ -1052,7 +1148,7 @@ fn catdesk_instruction_structured(
     mode: Mode,
     tool_mode: ToolMode,
 ) -> std::io::Result<Value> {
-    let instruction_text = catdesk_instruction_text(workspace_root, mode, tool_mode);
+    let instruction_text = catdesk_instruction_text(workspace_root, mode, tool_mode)?;
     Ok(json!({
         "toolName": "catdesk_instruction",
         "instructionText": instruction_text,
@@ -1079,9 +1175,7 @@ fn catdesk_instruction_widget_payload_with_cards(
     };
     let (workspace_path, workspace_path_display) =
         widget_path_strings(Path::new(workspace_root));
-    let (agents_path, agents_path_display) = preferred_agents_path(workspace_root)
-        .map(|path| widget_path_strings(&path))
-        .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+    let agents_state = agents_widget_state_payload(workspace_root)?;
     let (config_path, config_path_display) = app_config_path()
         .map(|path| widget_path_strings(&path))
         .unwrap_or_else(|_| ("-".to_string(), "-".to_string()));
@@ -1093,8 +1187,11 @@ fn catdesk_instruction_widget_payload_with_cards(
         "workspacePathDisplay".to_string(),
         json!(workspace_path_display),
     );
-    payload_obj.insert("agentsPath".to_string(), json!(agents_path));
-    payload_obj.insert("agentsPathDisplay".to_string(), json!(agents_path_display));
+    if let Some(agents_state_obj) = agents_state.as_object() {
+        for (key, value) in agents_state_obj {
+            payload_obj.insert(key.clone(), value.clone());
+        }
+    }
     payload_obj.insert("configPath".to_string(), json!(config_path));
     payload_obj.insert("configPathDisplay".to_string(), json!(config_path_display));
     payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
@@ -1134,13 +1231,21 @@ fn handle_catdesk_instruction(
     mode: Mode,
     tool_mode: ToolMode,
 ) -> JsonRpcResponse {
-    let instruction_text = catdesk_instruction_text(workspace_root, mode, tool_mode);
+    let instruction_text = match catdesk_instruction_text(workspace_root, mode, tool_mode) {
+        Ok(value) => value,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("Failed to resolve AGENTS.md configuration: {error}"),
+            );
+        }
+    };
     let structured = match catdesk_instruction_structured(workspace_root, mode, tool_mode) {
         Ok(value) => value,
         Err(error) => {
             return tool_error_response(
                 req,
-                format!("Failed to load archived Binagotchy: {error}"),
+                format!("Failed to resolve AGENTS.md configuration: {error}"),
             );
         }
     };
@@ -1150,7 +1255,7 @@ fn handle_catdesk_instruction(
             Err(error) => {
                 return tool_error_response(
                     req,
-                    format!("Failed to load archived Binagotchy: {error}"),
+                    format!("Failed to build catdesk_instruction widget payload: {error}"),
                 );
             }
         };
@@ -3069,6 +3174,10 @@ hello world"
                 .and_then(Value::as_str),
             Some("/tmp/workspace")
         );
+        assert!(widget_payload.get("agentsPathMode").is_some());
+        assert!(widget_payload.get("agentsWorkspacePath").is_some());
+        assert!(widget_payload.get("agentsCatdeskPath").is_some());
+        assert!(widget_payload.get("agentsCodexPath").is_some());
         assert_eq!(
             widget_payload
                 .get("binagotchyCards")

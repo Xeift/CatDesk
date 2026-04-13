@@ -13,7 +13,10 @@ use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, Session, WIDGET_PAYLOAD_META_KEY};
-use crate::state::{FlowDirection, ServerUiEvent, SharedState, UsageTotals, parse_seed_hex};
+use crate::state::{
+    AgentsPathMode, FlowDirection, ServerUiEvent, SharedState, UsageTotals, parse_seed_hex,
+    save_agents_path_mode,
+};
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
@@ -44,19 +47,34 @@ pub fn router(
             "/binagotchy/archive/{folder}/save",
             post(post_save_binagotchy_folder).options(options_binagotchy_archive_save),
         )
-        .route("/binagotchy/partner", post(post_binagotchy_partner))
+        .route(
+            "/binagotchy/partner",
+            post(post_binagotchy_partner).options(options_binagotchy_partner),
+        )
+        .route(
+            "/agents/path-mode",
+            post(post_agents_path_mode).options(options_agents_path_mode),
+        )
+        .route(
+            "/agents/path-state",
+            get(get_agents_path_state).options(options_agents_path_state),
+        )
         .route(&mcp_path, post(post_mcp))
         .route(&mcp_path, get(get_mcp))
         .route(&mcp_path, delete(delete_mcp))
         .with_state(state)
 }
 
-fn with_binagotchy_action_cors(
+fn with_widget_action_cors(
     mut builder: axum::http::response::Builder,
 ) -> axum::http::response::Builder {
     builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
-    builder = builder.header(header::ACCESS_CONTROL_ALLOW_METHODS, "POST, OPTIONS");
-    builder = builder.header(header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type");
+    builder = builder.header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, OPTIONS");
+    builder = builder.header(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        "content-type, ngrok-skip-browser-warning",
+    );
+    builder = builder.header(header::CACHE_CONTROL, "no-store");
     builder
 }
 
@@ -252,10 +270,22 @@ fn attach_catdesk_instruction_actions(
         return;
     };
 
-    let action_base_url = public_base_url.map(|base| format!("{base}/binagotchy"));
+    let binagotchy_action_base_url = public_base_url.map(|base| format!("{base}/binagotchy"));
     widget_payload.insert(
         "binagotchyApiBaseUrl".to_string(),
-        json!(action_base_url.clone().unwrap_or_default()),
+        json!(binagotchy_action_base_url.clone().unwrap_or_default()),
+    );
+    widget_payload.insert(
+        "agentsPathModeUrl".to_string(),
+        json!(public_base_url
+            .map(|base| format!("{base}/agents/path-mode"))
+            .unwrap_or_default()),
+    );
+    widget_payload.insert(
+        "agentsPathStateUrl".to_string(),
+        json!(public_base_url
+            .map(|base| format!("{base}/agents/path-state"))
+            .unwrap_or_default()),
     );
     widget_payload.insert(
         "partnerBinagotchySeed".to_string(),
@@ -285,7 +315,7 @@ fn attach_catdesk_instruction_actions(
                 .zip(card_obj.get("seed").and_then(Value::as_str))
                 .is_some_and(|(partner_seed, card_seed)| partner_seed == card_seed);
             card_obj.insert("isPartner".to_string(), json!(is_partner));
-            if let Some(base) = action_base_url.as_deref() {
+            if let Some(base) = binagotchy_action_base_url.as_deref() {
                 card_obj.insert(
                     "saveFolderUrl".to_string(),
                     json!(format!("{base}/archive/{folder}/save")),
@@ -304,7 +334,7 @@ async fn post_save_binagotchy_folder(
     State(_s): State<ServerState>,
 ) -> Response<Body> {
     match crate::mascot::save_archived_binagotchy_folder(&folder) {
-        Ok(saved_path) => with_binagotchy_action_cors(Response::builder())
+        Ok(saved_path) => with_widget_action_cors(Response::builder())
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -316,7 +346,7 @@ async fn post_save_binagotchy_folder(
                 .to_string(),
             ))
             .unwrap(),
-        Err(error) => with_binagotchy_action_cors(Response::builder())
+        Err(error) => with_widget_action_cors(Response::builder())
             .status(StatusCode::BAD_REQUEST)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -330,9 +360,120 @@ async fn options_binagotchy_archive_save(
     Path(_folder): Path<String>,
     State(_s): State<ServerState>,
 ) -> Response<Body> {
-    with_binagotchy_action_cors(Response::builder())
+    with_widget_action_cors(Response::builder())
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
+        .unwrap()
+}
+
+async fn options_binagotchy_partner(State(_s): State<ServerState>) -> Response<Body> {
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn parse_agents_path_mode(value: &str) -> Option<AgentsPathMode> {
+    match value.trim() {
+        "default" => Some(AgentsPathMode::Default),
+        "workspace" => Some(AgentsPathMode::Workspace),
+        "catdesk" => Some(AgentsPathMode::Catdesk),
+        "codex" => Some(AgentsPathMode::Codex),
+        "disabled" => Some(AgentsPathMode::Disabled),
+        _ => None,
+    }
+}
+
+async fn post_agents_path_mode(
+    State(s): State<ServerState>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response<Body> {
+    let Some(mode_raw) = form.get("mode").map(String::as_str) else {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": "missing mode" }).to_string(),
+            ))
+            .unwrap();
+    };
+    let Some(mode) = parse_agents_path_mode(mode_raw) else {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": "invalid mode" }).to_string(),
+            ))
+            .unwrap();
+    };
+
+    let workspace_root = {
+        let app = s.app.lock().await;
+        app.workspace_root.clone()
+    };
+
+    if let Err(error) = save_agents_path_mode(mode) {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": error.to_string() }).to_string(),
+            ))
+            .unwrap();
+    }
+
+    agents_state_response(&workspace_root)
+}
+
+async fn options_agents_path_mode(State(_s): State<ServerState>) -> Response<Body> {
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn get_agents_path_state(State(s): State<ServerState>) -> Response<Body> {
+    let workspace_root = {
+        let app = s.app.lock().await;
+        app.workspace_root.clone()
+    };
+    agents_state_response(&workspace_root)
+}
+
+async fn options_agents_path_state(State(_s): State<ServerState>) -> Response<Body> {
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn agents_state_response(workspace_root: &str) -> Response<Body> {
+    let agents_state = match mcp::agents_widget_state_payload(workspace_root) {
+        Ok(value) => value,
+        Err(error) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": error.to_string() }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let mut payload = json!({ "ok": true });
+    if let (Some(payload_obj), Some(agents_obj)) =
+        (payload.as_object_mut(), agents_state.as_object())
+    {
+        for (key, value) in agents_obj {
+            payload_obj.insert(key.clone(), value.clone());
+        }
+    }
+
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
         .unwrap()
 }
 
@@ -564,6 +705,18 @@ mod tests {
                 .get("partnerBinagotchySeed")
                 .and_then(Value::as_str),
             Some("deadbeef")
+        );
+        assert_eq!(
+            widget_payload
+                .get("agentsPathModeUrl")
+                .and_then(Value::as_str),
+            Some("https://example.ngrok.app/agents/path-mode")
+        );
+        assert_eq!(
+            widget_payload
+                .get("agentsPathStateUrl")
+                .and_then(Value::as_str),
+            Some("https://example.ngrok.app/agents/path-state")
         );
         assert!(widget_payload.get("widgetMascot").is_some());
         assert_eq!(card.get("isPartner").and_then(Value::as_bool), Some(true));

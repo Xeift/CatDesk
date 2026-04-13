@@ -66,10 +66,23 @@ impl UsageTotals {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentsPathMode {
+    #[default]
+    Default,
+    Workspace,
+    Catdesk,
+    Codex,
+    Disabled,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub ngrok_authtoken: Option<String>,
+    #[serde(default)]
+    pub agents_path_mode: AgentsPathMode,
     #[serde(default)]
     pub partner_binagotchy_seed: Option<String>,
     #[serde(default)]
@@ -85,6 +98,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             ngrok_authtoken: None,
+            agents_path_mode: AgentsPathMode::Default,
             partner_binagotchy_seed: None,
             set_catdesk_as_co_author: false,
             theme: theme::DEFAULT_THEME_ID.to_string(),
@@ -508,6 +522,14 @@ pub fn save_ngrok_authtoken(token: &str) -> std::io::Result<PathBuf> {
     let path = app_config_path()?;
     let mut config = AppConfig::load_from_path(&path)?;
     config.ngrok_authtoken = Some(token.to_string());
+    config.save_to_path(&path)?;
+    Ok(path)
+}
+
+pub fn save_agents_path_mode(mode: AgentsPathMode) -> std::io::Result<PathBuf> {
+    let path = app_config_path()?;
+    let mut config = AppConfig::load_from_path(&path)?;
+    config.agents_path_mode = mode;
     config.save_to_path(&path)?;
     Ok(path)
 }
@@ -1080,6 +1102,30 @@ toolCallCount = 7
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
         assert_eq!(saved.ngrok_authtoken.as_deref(), Some("test-token-123"));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_config_round_trips_agents_path_mode() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace =
+            std::env::temp_dir().join(format!("catdesk-config-agents-mode-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp config dir");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let config = AppConfig {
+            agents_path_mode: AgentsPathMode::Codex,
+            ..AppConfig::default()
+        };
+        config.save_to_path(&config_path).expect("save config");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("load config");
+        assert!(matches!(saved.agents_path_mode, AgentsPathMode::Codex));
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
