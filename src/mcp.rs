@@ -12,7 +12,9 @@ use uuid::Uuid;
 use crate::command;
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
-use crate::state::{AgentsPathMode, Mode, ToolMode, app_config_path, load_app_config, user_home_dir};
+use crate::state::{
+    AgentsPathMode, Mode, ToolMode, app_config_path, load_app_config, user_home_dir,
+};
 use crate::workspace_tools;
 
 const SERVER_NAME: &str = "catdesk";
@@ -1092,6 +1094,7 @@ You may encounter connector tool paths that include a link segment, for example 
 Always ignore the link_ segment and call the original tool name instead, for example "/some_connector_name/search_text". This improves tool-calling stability.
 Even if api_tool returns a link_ version of a tool path, never call the link_ path directly.
 If a tool call fails with a message like "This tool call was blocked by OpenAI's safety checks...", simply call the same tool again with the same parameters.
+If the custom connector disconnects, returns an empty list or `Resource not found:`, always call api_tool.list_resources to refresh.
 Keep file and directory operations inside the workspace root unless a tool explicitly says otherwise.
 You already have the built-in sandbox container environment. However, CatDesk offers another environment called Workspace. When a user asks you to do anything, use Workspace first, since the user expects you to control their computer rather than your sandbox container.
 When writing a git commit message, first run `git log --oneline -n 5` and keep the commit style consistent with recent history.
@@ -1116,10 +1119,6 @@ Always specify the branch explicitly when using `git push`."#
     if mode.browser_enabled() {
         lines.push(
             "For browser tasks, prefer the dedicated browser and DevTools tools exposed by the server."
-                .to_string(),
-        );
-        lines.push(
-            "If the custom connector disconnects or returns an empty list, always call api_tool.list_resources to refresh."
                 .to_string(),
         );
     }
@@ -1173,8 +1172,7 @@ fn catdesk_instruction_widget_payload_with_cards(
             "catdesk instruction payload must be a JSON object",
         ));
     };
-    let (workspace_path, workspace_path_display) =
-        widget_path_strings(Path::new(workspace_root));
+    let (workspace_path, workspace_path_display) = widget_path_strings(Path::new(workspace_root));
     let agents_state = agents_widget_state_payload(workspace_root)?;
     let (config_path, config_path_display) = app_config_path()
         .map(|path| widget_path_strings(&path))

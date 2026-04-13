@@ -109,8 +109,9 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 10. Start using the connector from ChatGPT Web. Some important tips:
 
-- I strongly recommend **NOT** selecting the connector manually. Just let ChatGPT automatically decide which connector to use. This is because the `web` tool that ChatGPT uses to search and open links will be disabled if you explicitly select CatDesk. The `web` tool and a custom connector cannot be used together.
-- However, if you have multiple connectors, you can manually select one using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability.
+- I strongly recommend manually selecting the connector using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability.
+- **Do NOT let ChatGPT automatically decide which connector to use.** There is a strange bug where ChatGPT keeps saying _"Resource not found."_ This bug is driving me crazy. It is also very unstable if you do not explicitly select CatDesk.
+- However, the `web` tool that ChatGPT uses to search and open links will be disabled if you explicitly select CatDesk. The `web` tool and a custom connector cannot be used at the same time. If you need to search some docs, click the x to remove CatDesk temporarily. After finishing the search, add it back.
 
 <table align="center">
   <tr>
