@@ -693,26 +693,23 @@
 
       .agents-fan-menu {
         position: fixed;
-        display: none;
         left: 0;
         top: 0;
         width: 124px;
         height: 176px;
-        transform: translateY(-50%) scale(0.86);
+        transform: translateY(-50%);
         transform-origin: 24px 88px;
         opacity: 0;
-        transition:
-          opacity 140ms ease,
-          transform 180ms cubic-bezier(0.2, 0.78, 0.25, 1);
+        transition: opacity 120ms ease;
         z-index: 48;
         filter: drop-shadow(0 18px 26px rgba(0, 0, 0, 0.28));
         pointer-events: none;
       }
 
       .agents-fan-root.is-open .agents-fan-menu {
-        display: block;
         opacity: 1;
-        transform: translateY(-50%) scale(1);
+        transform: translateY(-50%);
+        transition: opacity 180ms ease;
       }
 
       .summary-stat .agents-fan-svg {
@@ -770,34 +767,70 @@
         transform: translate(0, -50%) scale(1);
       }
 
+      @keyframes g6-pointer-lock {
+        0%,
+        99% {
+          pointer-events: none;
+        }
+
+        100% {
+          pointer-events: all;
+        }
+      }
+
       .agents-fan-sector-group {
         cursor: pointer;
-        pointer-events: all;
+        pointer-events: none;
         outline: none;
+        transform-origin: 24px 88px;
+        transform-box: view-box;
+        transform: translate(var(--start-x), var(--start-y)) scale(0.1);
+        opacity: 0;
+        transition:
+          opacity 100ms ease,
+          transform 120ms ease-in;
       }
 
       .agents-fan-sector-group.is-disabled {
         cursor: not-allowed;
       }
 
+      .agents-fan-root.is-open .agents-fan-sector-group {
+        opacity: 1;
+        transform: translate(var(--end-x), var(--end-y)) scale(1);
+        transition:
+          opacity 100ms ease,
+          transform 350ms cubic-bezier(0.175, 0.885, 0.32, 1.25);
+        transition-delay: calc(var(--fan-delay) * 2.5);
+        animation: g6-pointer-lock calc(var(--fan-delay) * 2.5 + 350ms)
+          forwards;
+      }
+
       .agents-fan-sector {
         fill: rgba(33, 33, 33, 0.94);
         stroke: var(--line);
         stroke-width: 1;
-        transition:
-          fill 140ms ease,
-          stroke 140ms ease,
-          opacity 140ms ease;
+        transform-origin: center;
+        transform-box: fill-box;
+        transition: fill 140ms ease, stroke 140ms ease;
       }
 
       .agents-fan-sector-shadow {
         fill: rgba(0, 0, 0, 0.18);
         stroke: none;
+        display: none;
       }
 
       .agents-fan-sector-group .agents-fan-icon {
         color: var(--text-2);
-        transition: color 140ms ease;
+        opacity: 0;
+        transition: color 140ms ease, opacity 80ms ease;
+      }
+
+      .agents-fan-root.is-open .agents-fan-sector-group .agents-fan-icon {
+        opacity: 1;
+        transition: color 140ms ease, opacity 100ms ease;
+        transition-delay: calc(var(--fan-delay) * 2.5);
       }
 
       .agents-fan-sector-group .agents-fan-icon path,
@@ -831,14 +864,28 @@
 
       .agents-fan-sector-group:not(.is-disabled):hover .agents-fan-sector,
       .agents-fan-sector-group:not(.is-disabled):focus-visible .agents-fan-sector {
-        fill: rgba(255, 255, 255, 0.06);
-        stroke: var(--text-3);
+        fill: rgba(2, 133, 255, 0.35);
+        stroke: rgba(2, 133, 255, 1);
+        stroke-width: 1.5px;
       }
 
       .agents-fan-sector-group.is-selected:not(.is-disabled):hover .agents-fan-sector,
       .agents-fan-sector-group.is-selected:not(.is-disabled):focus-visible .agents-fan-sector {
-        fill: rgba(2, 133, 255, 0.16);
-        stroke: var(--accent);
+        fill: rgba(2, 133, 255, 0.35);
+        stroke: rgba(2, 133, 255, 1);
+        stroke-width: 1.5px;
+      }
+
+      .agents-fan-sector-group:not(.is-disabled):hover,
+      .agents-fan-sector-group:not(.is-disabled):focus-visible {
+        transform: translate(var(--hover-x), var(--hover-y)) scale(1.02) !important;
+        transition: transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+        transition-delay: 0ms !important;
+      }
+
+      .agents-fan-sector-group:not(.is-disabled):hover .agents-fan-icon,
+      .agents-fan-sector-group:not(.is-disabled):focus-visible .agents-fan-icon {
+        color: #ffffff;
       }
 
       .agents-fan-guide {
@@ -846,6 +893,57 @@
         stroke: rgba(255, 255, 255, 0.08);
         stroke-width: 1;
         stroke-dasharray: 2 4;
+        display: none;
+      }
+
+      .agents-fan-sector-group[data-agents-option="default"] {
+        --fan-delay: 0ms;
+        --start-x: -9px;
+        --start-y: 39px;
+        --end-x: 1.1px;
+        --end-y: -4.9px;
+        --hover-x: 2.7px;
+        --hover-y: -11.7px;
+      }
+
+      .agents-fan-sector-group[data-agents-option="disabled"] {
+        --fan-delay: 22ms;
+        --start-x: -31.3px;
+        --start-y: 24.9px;
+        --end-x: 3.9px;
+        --end-y: -3.1px;
+        --hover-x: 9.4px;
+        --hover-y: -7.4px;
+      }
+
+      .agents-fan-sector-group[data-agents-option="workspace"] {
+        --fan-delay: 44ms;
+        --start-x: -40px;
+        --start-y: 0px;
+        --end-x: 5px;
+        --end-y: 0px;
+        --hover-x: 12px;
+        --hover-y: 0px;
+      }
+
+      .agents-fan-sector-group[data-agents-option="catdesk"] {
+        --fan-delay: 66ms;
+        --start-x: -31.3px;
+        --start-y: -24.9px;
+        --end-x: 3.9px;
+        --end-y: 3.1px;
+        --hover-x: 9.4px;
+        --hover-y: 7.4px;
+      }
+
+      .agents-fan-sector-group[data-agents-option="codex"] {
+        --fan-delay: 88ms;
+        --start-x: -9px;
+        --start-y: -39px;
+        --end-x: 1.1px;
+        --end-y: 4.9px;
+        --hover-x: 2.7px;
+        --hover-y: 11.7px;
       }
 
       .section.is-instruction-popout {
@@ -3934,6 +4032,18 @@
           hintNode.hidden = true;
         }
 
+        function clearAgentsFanTimers(fanRoot) {
+          if (!fanRoot) return;
+          if (fanRoot._agentsFanHideTimer) {
+            window.clearTimeout(fanRoot._agentsFanHideTimer);
+            fanRoot._agentsFanHideTimer = null;
+          }
+          if (fanRoot._agentsFanOpenFrame) {
+            window.cancelAnimationFrame(fanRoot._agentsFanOpenFrame);
+            fanRoot._agentsFanOpenFrame = null;
+          }
+        }
+
         function positionAgentsFanOverlay(fanRoot) {
           if (!fanRoot) return;
           var menu = fanRoot.querySelector("[data-agents-fan-menu]");
@@ -3950,11 +4060,18 @@
           var menu = fanRoot.querySelector("[data-agents-fan-menu]");
           if (!trigger || !menu) return;
           closeAgentsFans(fanRoot);
-          fanRoot.classList.add("is-open");
-          trigger.classList.add("is-open");
+          clearAgentsFanTimers(fanRoot);
           positionAgentsFanOverlay(fanRoot);
           menu.hidden = false;
           menu.setAttribute("aria-hidden", "false");
+          fanRoot.classList.remove("is-open");
+          trigger.classList.remove("is-open");
+          void menu.offsetWidth;
+          fanRoot._agentsFanOpenFrame = window.requestAnimationFrame(function () {
+            fanRoot._agentsFanOpenFrame = null;
+            fanRoot.classList.add("is-open");
+            trigger.classList.add("is-open");
+          });
         }
 
         function updateAgentsPathDisplayDom(fanRoot) {
@@ -4039,13 +4156,17 @@
             document.querySelectorAll("[data-agents-fan-root]"),
             function (fanRoot) {
               if (fanRoot === exceptRoot) return;
+              clearAgentsFanTimers(fanRoot);
               fanRoot.classList.remove("is-open");
               var trigger = fanRoot.querySelector("[data-agents-fan-trigger]");
               var menu = fanRoot.querySelector("[data-agents-fan-menu]");
               if (trigger) trigger.classList.remove("is-open");
               if (menu) {
                 menu.setAttribute("aria-hidden", "true");
-                menu.hidden = true;
+                fanRoot._agentsFanHideTimer = window.setTimeout(function () {
+                  menu.hidden = true;
+                  fanRoot._agentsFanHideTimer = null;
+                }, 180);
               }
               hideAgentsHint(fanRoot);
             },
