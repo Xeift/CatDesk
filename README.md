@@ -245,7 +245,27 @@ File tools use this directory as their base path, and paths outside the workspac
 
 ### Where to put my AGENTS.md?
 
-Put it in the workspace root. If not set, will use `~/.codex/AGENTS.md`. CatDesk reads `AGENTS.md` every time `catdesk_instruction` is called.
+You can put it in 3 places.
+
+1. Workspace root
+2. `~/.catdesk/AGENTS.md`
+3. `~/.codex/AGENTS.md`
+
+CatDesk checks these locations for `AGENTS.md` in this order. This happens every time `catdesk_instruction` is called. You can also manually choose which `AGENTS.md` to use.
+
+<p align="center">
+  <img src="docs/images/set_agents_md.png" alt="Set AGENTS.md manually" width="500"><br>
+  <em>Set AGENTS.md manually</em>
+</p>
+
+### What to do if the widget is blank?
+
+<p align="center">
+  <img src="docs/images/blank_widget.png" alt="Empty widget/function call" width="500"><br>
+  <em>Empty widget/function call</em>
+</p>
+
+Interrupt the response and send the message again. This is a bug on ChatGPT's side. There is nothing I can do about it, and changing the code will not solve the issue. This bug was probably introduced in April.
 
 # Safety
 
