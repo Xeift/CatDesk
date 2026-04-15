@@ -425,20 +425,6 @@ async fn handle_tools_list(
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
             tools.push(json!({
-                "name": "make_directory",
-                "title": "Make directory",
-                "description": "Create a directory in workspace.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "recursive": { "type": "boolean", "description": "Create parent directories if missing (default true)" }
-                    },
-                    "required": ["path"]
-                },
-                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
-            }));
-            tools.push(json!({
                 "name": "move_path",
                 "title": "Move path",
                 "description": "Move or rename file/directory inside workspace.",
@@ -582,7 +568,6 @@ async fn handle_tools_call(
                             match tool_name.as_str() {
                                 "write_file" => handle_write_file(req, workspace_root),
                                 "append_file" => handle_append_file(req, workspace_root),
-                                "make_directory" => handle_make_directory(req, workspace_root),
                                 "move_path" => handle_move_path(req, workspace_root),
                                 "delete_path" => handle_delete_path(req, workspace_root),
                                 "replace_in_file" => handle_replace_in_file(req, workspace_root),
@@ -611,7 +596,6 @@ async fn handle_tools_call(
                 match tool_name.as_str() {
                     "write_file" => handle_write_file(req, workspace_root),
                     "append_file" => handle_append_file(req, workspace_root),
-                    "make_directory" => handle_make_directory(req, workspace_root),
                     "move_path" => handle_move_path(req, workspace_root),
                     "delete_path" => handle_delete_path(req, workspace_root),
                     "replace_in_file" => handle_replace_in_file(req, workspace_root),
@@ -1157,7 +1141,7 @@ Always specify the branch explicitly when using `git push`."#
         );
         if tool_mode.write_tools_enabled() {
             lines.push(
-                "Use write_file, append_file, replace_in_file, make_directory, move_path, and delete_path for direct workspace edits and filesystem changes."
+                "Use write_file or append_file with create_dirs=true to create files in new directories. Use replace_in_file, move_path, and delete_path for other workspace edits and filesystem changes."
                     .to_string(),
             );
         }
@@ -1445,7 +1429,6 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
             | "read_file"
             | "write_file"
             | "append_file"
-            | "make_directory"
             | "move_path"
             | "delete_path"
             | "replace_in_file"
@@ -1926,7 +1909,7 @@ fn collect_watch_targets(req: &JsonRpcRequest, workspace_root: &str) -> Vec<Watc
         "write_file" | "append_file" | "replace_in_file" => {
             add_target(arguments.get("path").and_then(Value::as_str), false);
         }
-        "delete_path" | "make_directory" => {
+        "delete_path" => {
             add_target(arguments.get("path").and_then(Value::as_str), true);
         }
         "move_path" => {
@@ -2432,7 +2415,6 @@ fn is_local_destructive_tool(tool_name: &str) -> bool {
         "run_command"
             | "write_file"
             | "append_file"
-            | "make_directory"
             | "move_path"
             | "delete_path"
             | "replace_in_file"
@@ -2582,30 +2564,6 @@ fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
                 "searchTruncated": output.truncated,
                 "searchLimit": output.limit,
                 "searchResults": output.results,
-            }),
-        ),
-        Err(e) => tool_error_response(req, e),
-    }
-}
-
-fn handle_make_directory(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
-    let arguments = tool_arguments(req);
-    let path = match arguments.get("path").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: path".into()),
-    };
-    let recursive = arguments
-        .get("recursive")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    match workspace_tools::make_directory(workspace_root, path, recursive) {
-        Ok(text) => tool_success_response_with_structured(
-            req,
-            text,
-            json!({
-                "toolName": "make_directory",
-                "path": path,
-                "recursive": recursive,
             }),
         ),
         Err(e) => tool_error_response(req, e),

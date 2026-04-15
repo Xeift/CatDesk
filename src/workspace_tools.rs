@@ -446,35 +446,6 @@ pub fn search_text(
     })
 }
 
-pub fn make_directory(workspace_root: &str, path: &str, recursive: bool) -> Result<String, String> {
-    let root = workspace_root_path(workspace_root)?;
-    let target = resolve_target_path(workspace_root, path)?;
-
-    if target.exists() {
-        if target.is_dir() {
-            return Ok(format!(
-                "directory already exists: {}",
-                to_workspace_relative(&root, &target)
-            ));
-        }
-        return Err(format!(
-            "Path exists and is not a directory: {}",
-            target.display()
-        ));
-    }
-
-    if recursive {
-        fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    } else {
-        fs::create_dir(&target).map_err(|e| e.to_string())?;
-    }
-
-    Ok(format!(
-        "created directory: {}",
-        to_workspace_relative(&root, &target)
-    ))
-}
-
 pub fn delete_path(workspace_root: &str, path: &str, recursive: bool) -> Result<String, String> {
     let root = workspace_root_path(workspace_root)?;
     let target = resolve_target_path(workspace_root, path)?;

@@ -3048,7 +3048,7 @@
         }
 
         function renderFileBody(file) {
-          if (view.toolName === "make_directory" || isDirectoryFile(file)) {
+          if (isDirectoryFile(file)) {
             return renderDirectorySummary(file);
           }
           return renderDiffLines(file.diff);
@@ -3058,8 +3058,7 @@
           var statusText = prettyStatus(file.status);
           var plus = "+" + file.added;
           var minus = "-" + file.removed;
-          var isDirectory =
-            view.toolName === "make_directory" || isDirectoryFile(file);
+          var isDirectory = isDirectoryFile(file);
           var metaHtml = isDirectory
             ? '<span class="status-label">' +
               esc(directoryMetaLabel(file)) +

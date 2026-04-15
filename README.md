@@ -137,7 +137,6 @@ CatDesk's tools are:
 | `search_text`         | Read  | Searches text across files in the workspace                             |
 | `write_file`          | Write | Creates or overwrites a file                                            |
 | `append_file`         | Write | Appends text to a file, or creates it if missing                        |
-| `make_directory`      | Write | Creates a directory                                                     |
 | `move_path`           | Write | Moves or renames a file or directory                                    |
 | `delete_path`         | Write | Deletes a file or directory                                             |
 | `replace_in_file`     | Write | Replaces text inside a file                                             |
