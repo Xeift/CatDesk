@@ -337,7 +337,7 @@ async fn handle_tools_list(
             tools.push(json!({
                 "name": "run_command",
                 "title": "Run command",
-                "description": "Execute a shell command inside the workspace root. Prefer dedicated tools first, and use this only when available tools cannot complete the operation. Returns stdout and stderr.",
+                "description": "Execute a shell command inside the workspace root. Common directory-listing commands are parsed before execution and may return structured workspace listings instead of raw shell output. Returns stdout and stderr for non-intercepted commands.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -372,20 +372,6 @@ async fn handle_tools_list(
                         "path": { "type": "string", "description": "File path relative to workspace root or absolute path within it" }
                     },
                     "required": ["path"]
-                },
-                "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
-            }));
-            tools.push(json!({
-                "name": "list_files",
-                "title": "List files",
-                "description": "Recursively list files and directories under workspace.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Directory path (default: workspace root)" },
-                        "include_hidden": { "type": "boolean", "description": "Include dotfiles and dot-directories" },
-                        "limit": { "type": "number", "description": "Max listed items (1..1000)" }
-                    }
                 },
                 "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
             }));
@@ -590,7 +576,6 @@ async fn handle_tools_call(
                         tool_mode,
                     ),
                     "read_file" => handle_read_file(req, workspace_root),
-                    "list_files" => handle_list_files(req, workspace_root),
                     "search_text" => handle_search_text(req, workspace_root),
                     _ => {
                         if tool_mode.write_tools_enabled() {
@@ -785,6 +770,43 @@ async fn handle_run_command(
     } else {
         cmd.to_string()
     };
+
+    if let Some(intercept) = command::detect_list_files_intercept(&effective_command) {
+        let listing_path = match command::resolve_command_path(
+            workspace_root,
+            &cwd,
+            intercept.path.as_deref(),
+        ) {
+            Ok(path) => path,
+            Err(e) => {
+                return tool_error_response(
+                    req,
+                    format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {e}"),
+                );
+            }
+        };
+        let listing_path_str = listing_path.to_string_lossy().to_string();
+        match workspace_tools::list_files_filtered(
+            workspace_root,
+            Some(&listing_path_str),
+            intercept.include_hidden,
+            None,
+            intercept.filter,
+        ) {
+            Ok(listing) => {
+                let output = listing.render_text();
+                let structured = build_run_command_listing_structured(
+                    &effective_command,
+                    &cwd,
+                    &output,
+                    &listing,
+                );
+                return tool_success_response_with_structured(req, output, structured);
+            }
+            Err(e) => return tool_error_response(req, e),
+        }
+    }
+
     let result = command::run_command(&effective_command, &cwd, effective_timeout).await;
     let output = command::format_result(&result);
     let structured = json!({
@@ -801,6 +823,31 @@ async fn handle_run_command(
     } else {
         tool_error_response_with_structured(req, output, structured)
     }
+}
+
+fn build_run_command_listing_structured(
+    command_text: &str,
+    cwd: &Path,
+    stdout: &str,
+    listing: &workspace_tools::ListFilesOutput,
+) -> Value {
+    json!({
+        "toolName": "run_command",
+        "interceptedToolName": "list_files",
+        "command": command_text,
+        "cwd": cwd.to_string_lossy().to_string(),
+        "stdout": stdout,
+        "stderr": "",
+        "success": true,
+        "listPath": listing.path,
+        "listItemCount": listing.item_count,
+        "listDirectoryCount": listing.directory_count,
+        "listFileCount": listing.file_count,
+        "listOtherCount": listing.other_count,
+        "listTruncated": listing.truncated,
+        "listLimit": listing.limit,
+        "listEntries": listing.entries,
+    })
 }
 
 fn tool_response(
@@ -1105,7 +1152,7 @@ Always specify the branch explicitly when using `git push`."#
 
     if mode.computer_enabled() && tool_mode.read_tools_enabled() {
         lines.push(
-            "Use read_file to read files, list_files to inspect directories, and search_text to search the workspace."
+            "Use read_file to read files and search_text to search the workspace. For directory inspection, run_command can intercept plain listing commands such as find, tree, ls -R, and rg --files."
                 .to_string(),
         );
         if tool_mode.write_tools_enabled() {
@@ -1394,7 +1441,6 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
         name,
         "run_command"
             | "catdesk_instruction"
-            | "list_files"
             | "search_text"
             | "read_file"
             | "write_file"
@@ -1577,9 +1623,12 @@ fn result_structured_content(result: &Value) -> Option<&Map<String, Value>> {
     result.get("structuredContent").and_then(Value::as_object)
 }
 
-fn build_list_files_widget_payload(result: &Value) -> Option<Value> {
-    let structured = result_structured_content(result)?;
-    let mut payload = base_widget_payload("tool_call", "List Files", "done", Some("list_files"));
+fn build_list_files_widget_payload_from_structured(
+    structured: &Map<String, Value>,
+    title: &str,
+    state: &str,
+) -> Option<Value> {
+    let mut payload = base_widget_payload("tool_call", title, state, Some("list_files"));
     payload.insert("listPath".to_string(), structured.get("listPath")?.clone());
     payload.insert(
         "listItemCount".to_string(),
@@ -1702,6 +1751,17 @@ fn build_run_command_widget_payload(
     is_error: bool,
 ) -> Option<Value> {
     let structured = result_structured_content(result)?;
+    if structured
+        .get("interceptedToolName")
+        .and_then(Value::as_str)
+        == Some("list_files")
+    {
+        return build_list_files_widget_payload_from_structured(
+            structured,
+            "List Files",
+            widget_state(is_error, widget_context),
+        );
+    }
     let mut payload = base_widget_payload(
         "tool_call",
         "Command Output",
@@ -1780,15 +1840,6 @@ fn build_auto_widget_payload(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     match tool_name.as_str() {
-        "list_files" => match build_list_files_widget_payload(result) {
-            Some(payload) => payload,
-            None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
-            None => build_widget_payload_error(
-                req,
-                widget_context,
-                "Failed to build list_files widget payload from structuredContent.".into(),
-            ),
-        },
         "search_text" => match build_search_text_widget_payload(result, is_error) {
             Some(payload) => payload,
             None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
@@ -1883,12 +1934,21 @@ fn collect_watch_targets(req: &JsonRpcRequest, workspace_root: &str) -> Vec<Watc
             add_target(arguments.get("to").and_then(Value::as_str), true);
         }
         "run_command" => {
-            if let Ok(cwd) = command::resolve_workspace_path(
-                workspace_root,
-                arguments.get("cwd").and_then(Value::as_str),
-            ) {
-                let entry = dedup.entry(cwd).or_insert(false);
-                *entry = true;
+            if command::detect_list_files_intercept(
+                arguments
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+            .is_none()
+            {
+                if let Ok(cwd) = command::resolve_workspace_path(
+                    workspace_root,
+                    arguments.get("cwd").and_then(Value::as_str),
+                ) {
+                    let entry = dedup.entry(cwd).or_insert(false);
+                    *entry = true;
+                }
             }
         }
         _ => {}
@@ -2494,37 +2554,6 @@ fn handle_append_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
     }
 }
 
-fn handle_list_files(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
-    let arguments = tool_arguments(req);
-    let path = arguments.get("path").and_then(|v| v.as_str());
-    let include_hidden = arguments
-        .get("include_hidden")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let limit = arguments
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
-    match workspace_tools::list_files(workspace_root, path, include_hidden, limit) {
-        Ok(listing) => {
-            let text = listing.render_text();
-            let structured = json!({
-                "toolName": "list_files",
-                "listPath": listing.path,
-                "listItemCount": listing.item_count,
-                "listDirectoryCount": listing.directory_count,
-                "listFileCount": listing.file_count,
-                "listOtherCount": listing.other_count,
-                "listTruncated": listing.truncated,
-                "listLimit": listing.limit,
-                "listEntries": listing.entries,
-            });
-            tool_success_response_with_structured(req, text, structured)
-        }
-        Err(e) => tool_error_response(req, e),
-    }
-}
-
 fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let query = match arguments.get("query").and_then(|v| v.as_str()) {
@@ -2768,6 +2797,76 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(workspace_root.join("notes.txt"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_command_listing_intercept_uses_list_widget_payload() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-run-command-list-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(workspace_root.join("src")).expect("create workspace");
+        std::fs::write(workspace_root.join("src/lib.rs"), "pub fn ping() {}\n")
+            .expect("write file");
+
+        let req = tool_call_request(
+            "run_command",
+            json!({
+                "command": "find src",
+            }),
+        );
+        let mut session = Session::new();
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &mut session,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::OneTool,
+            false,
+            &None,
+        )
+        .await;
+
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        let widget_payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+
+        assert_eq!(
+            structured.get("toolName").and_then(Value::as_str),
+            Some("run_command")
+        );
+        assert_eq!(
+            structured
+                .get("interceptedToolName")
+                .and_then(Value::as_str),
+            Some("list_files")
+        );
+        assert_eq!(
+            widget_payload.get("toolName").and_then(Value::as_str),
+            Some("list_files")
+        );
+        assert_eq!(
+            widget_payload.get("listPath").and_then(Value::as_str),
+            Some("src")
+        );
+        assert_eq!(
+            widget_payload
+                .get("listEntries")
+                .and_then(Value::as_array)
+                .map(|entries| entries.len()),
+            Some(1)
+        );
+
+        let _ = std::fs::remove_file(workspace_root.join("src/lib.rs"));
         let _ = std::fs::remove_dir_all(workspace_root);
     }
 

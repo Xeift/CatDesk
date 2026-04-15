@@ -130,19 +130,18 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 CatDesk's tools are:
 
-| Tool                  | Type  | What it does                                                                                               |
-| --------------------- | ----- | ---------------------------------------------------------------------------------------------------------- |
-| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and reads your workspace `AGENTS.md`                                    |
-| `read_file`           | Read  | Reads a text file from the workspace                                                                       |
-| `list_files`          | Read  | Recursively lists files and directories in the workspace                                                   |
-| `search_text`         | Read  | Searches text across files in the workspace                                                                |
-| `write_file`          | Write | Creates or overwrites a file                                                                               |
-| `append_file`         | Write | Appends text to a file, or creates it if missing                                                           |
-| `make_directory`      | Write | Creates a directory                                                                                        |
-| `move_path`           | Write | Moves or renames a file or directory                                                                       |
-| `delete_path`         | Write | Deletes a file or directory                                                                                |
-| `replace_in_file`     | Write | Replaces text inside a file                                                                                |
-| `run_command`         | Shell | Runs a shell command inside the workspace. Use it as a last resort when a dedicated tool cannot do the job |
+| Tool                  | Type  | What it does                                                            |
+| --------------------- | ----- | ----------------------------------------------------------------------- |
+| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and reads your workspace `AGENTS.md` |
+| `read_file`           | Read  | Reads a text file from the workspace                                    |
+| `search_text`         | Read  | Searches text across files in the workspace                             |
+| `write_file`          | Write | Creates or overwrites a file                                            |
+| `append_file`         | Write | Appends text to a file, or creates it if missing                        |
+| `make_directory`      | Write | Creates a directory                                                     |
+| `move_path`           | Write | Moves or renames a file or directory                                    |
+| `delete_path`         | Write | Deletes a file or directory                                             |
+| `replace_in_file`     | Write | Replaces text inside a file                                             |
+| `run_command`         | Shell | Runs a shell command inside the workspace.                              |
 
 If browser mode is enabled, CatDesk can also expose extra browser/devtools tools. Those are provided by the browser bridge, so the exact list depends on your environment.
 

@@ -22,6 +22,8 @@ ngrok = "0.18.0"
 toml = "0.8"
 time = { version = "0.3", features = ["formatting", "macros"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25.1"
 
 [profile.release]
 lto = true

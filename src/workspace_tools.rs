@@ -250,11 +250,12 @@ pub fn append_file(
     ))
 }
 
-pub fn list_files(
+pub fn list_files_filtered(
     workspace_root: &str,
     path: Option<&str>,
     include_hidden: bool,
     limit: Option<usize>,
+    filter: command::FileListingFilter,
 ) -> Result<ListFilesOutput, String> {
     let root = workspace_root_path(workspace_root)?;
     let start = command::resolve_workspace_path(workspace_root, path)?;
@@ -297,30 +298,42 @@ pub fn list_files(
             let depth = rel_from_start.components().count().saturating_sub(1);
 
             if ft.is_dir() {
-                directory_count += 1;
-                entries.push(ListFilesEntry {
-                    path: rel,
-                    name,
-                    kind: "dir".into(),
-                    depth,
-                });
+                if matches!(
+                    filter,
+                    command::FileListingFilter::All | command::FileListingFilter::DirectoriesOnly
+                ) {
+                    directory_count += 1;
+                    entries.push(ListFilesEntry {
+                        path: rel,
+                        name,
+                        kind: "dir".into(),
+                        depth,
+                    });
+                }
                 queue.push_back(path);
             } else if ft.is_file() {
-                file_count += 1;
-                entries.push(ListFilesEntry {
-                    path: rel,
-                    name,
-                    kind: "file".into(),
-                    depth,
-                });
+                if matches!(
+                    filter,
+                    command::FileListingFilter::All | command::FileListingFilter::FilesOnly
+                ) {
+                    file_count += 1;
+                    entries.push(ListFilesEntry {
+                        path: rel,
+                        name,
+                        kind: "file".into(),
+                        depth,
+                    });
+                }
             } else {
-                other_count += 1;
-                entries.push(ListFilesEntry {
-                    path: rel,
-                    name,
-                    kind: "other".into(),
-                    depth,
-                });
+                if matches!(filter, command::FileListingFilter::All) {
+                    other_count += 1;
+                    entries.push(ListFilesEntry {
+                        path: rel,
+                        name,
+                        kind: "other".into(),
+                        depth,
+                    });
+                }
             }
 
             if entries.len() >= max_items {

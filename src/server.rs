@@ -771,7 +771,7 @@ mod tests {
         let response = post_mcp(
             State(server_state),
             headers,
-            tool_call_body("list_files", json!({ "path": "." })),
+            tool_call_body("run_command", json!({ "command": "find ." })),
         )
         .await;
 
