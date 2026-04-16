@@ -2723,7 +2723,7 @@
             return validPayload(next);
           }
 
-          if (toolName === "search_text") {
+          if (toolName === "search") {
             var searchQuery = readString(data.searchQuery);
             var searchPath = readNonEmptyString(data.searchPath);
             var filesScanned = readNonNegativeInteger(data.filesScanned);
@@ -2742,7 +2742,7 @@
               searchTruncated === null
             ) {
               return invalidPayload(
-                "search_text widget payload is missing required fields.",
+                "search widget payload is missing required fields.",
               );
             }
             next.searchQuery = searchQuery;
@@ -2754,7 +2754,7 @@
             return validPayload(next);
           }
 
-          if (toolName === "read_file") {
+          if (toolName === "read") {
             var readFilePath = readNonEmptyString(data.path);
             var readFileBytes = readNonNegativeInteger(data.bytes);
             var readFileText = readString(data.text);
@@ -2766,7 +2766,7 @@
               readFileTruncated === null
             ) {
               return invalidPayload(
-                "read_file widget payload is missing required fields.",
+                "read widget payload is missing required fields.",
               );
             }
             next.readFilePath = readFilePath;
@@ -5204,9 +5204,9 @@
           var isRunCommand =
             view.panelMode === "tool_call" && view.toolName === "run_command";
           var isSearchText =
-            view.panelMode === "tool_call" && view.toolName === "search_text";
+            view.panelMode === "tool_call" && view.toolName === "search";
           var isReadFile =
-            view.panelMode === "tool_call" && view.toolName === "read_file";
+            view.panelMode === "tool_call" && view.toolName === "read";
           var isListFiles =
             view.panelMode === "tool_call" && view.toolName === "list_files";
           var filesEmpty = isFinal
@@ -5434,8 +5434,8 @@
             !nextView.hasChanges &&
             nextView.toolName !== "catdesk_instruction" &&
             nextView.toolName !== "run_command" &&
-            nextView.toolName !== "search_text" &&
-            nextView.toolName !== "read_file" &&
+            nextView.toolName !== "search" &&
+            nextView.toolName !== "read" &&
             nextView.toolName !== "list_files" &&
             !nextView.call &&
             !nextView.detail &&
