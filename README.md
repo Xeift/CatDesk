@@ -265,7 +265,10 @@ CatDesk checks these locations for `AGENTS.md` in this order. This happens every
   <em>Empty widget/function call</em>
 </p>
 
-Interrupt the response and send the message again. This is a bug on ChatGPT's side. There is nothing I can do about it, and changing the code will not solve the issue. This bug was probably introduced in April.
+1. Simply refresh the page and reconnect the connector.
+2. Stop the response and send the message again.
+
+This is a bug on ChatGPT's side. There is nothing I can do about it, and changing the code will not solve the issue. This bug was probably introduced on Apr 15th.
 
 # Safety
 

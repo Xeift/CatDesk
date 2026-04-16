@@ -184,14 +184,6 @@ fn summarize_response(resp: &Value) -> String {
     format!("id={id}:unknown")
 }
 
-fn tool_name_from_jsonrpc_request(req: &JsonRpcRequest) -> &str {
-    req.params
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("unknown_tool")
-}
-
 fn extract_turn_token_usage(result: Option<&Value>) -> Option<(u64, u64)> {
     let usage = result
         .and_then(|value| value.get("_meta"))
@@ -973,7 +965,6 @@ async fn post_mcp(
         };
 
         let session = sessions.get_mut(&session_id).unwrap();
-        let tool_name = tool_name_from_jsonrpc_request(&req).to_string();
         if let Some(resp) = mcp::handle_request(
             &req,
             session,
@@ -989,12 +980,10 @@ async fn post_mcp(
         {
             let mut resp = resp;
             if req.method == "tools/call" {
-                if tool_name != "render_final_summary_widget" {
-                    if let Some((input_tokens, output_tokens)) =
-                        extract_turn_token_usage(resp.result.as_ref())
-                    {
-                        usage_totals.accumulate(input_tokens, output_tokens, 1);
-                    }
+                if let Some((input_tokens, output_tokens)) =
+                    extract_turn_token_usage(resp.result.as_ref())
+                {
+                    usage_totals.accumulate(input_tokens, output_tokens, 1);
                 }
                 attach_history_usage(&mut resp.result, &usage_totals);
                 attach_catdesk_instruction_actions(

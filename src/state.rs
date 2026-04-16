@@ -279,10 +279,6 @@ const FLOW_BOOTSTRAP_PHASE_3_STEPS: &[FlowBootstrapStep] = &[
         event: "resources/read",
         label: "dashboard.html",
     },
-    FlowBootstrapStep {
-        event: "resources/read",
-        label: "final-summary.html",
-    },
 ];
 
 const FLOW_BOOTSTRAP_PHASE_4_STEPS: &[FlowBootstrapStep] = &[
@@ -305,10 +301,6 @@ const FLOW_BOOTSTRAP_PHASE_4_STEPS: &[FlowBootstrapStep] = &[
     FlowBootstrapStep {
         event: "resources/read",
         label: "dashboard.html",
-    },
-    FlowBootstrapStep {
-        event: "resources/read",
-        label: "final-summary.html",
     },
 ];
 
