@@ -2,7 +2,7 @@ use axum::{
     Router,
     body::{Body, Bytes},
     extract::{Form, Path, State},
-    http::{HeaderMap, Response, StatusCode, header},
+    http::{Response, StatusCode, header},
     response::Json,
     routing::{delete, get, post},
 };
@@ -12,17 +12,17 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::devtools::DevtoolsBridge;
-use crate::mcp::{self, JsonRpcRequest, Session, WIDGET_PAYLOAD_META_KEY};
+use crate::mcp::{self, JsonRpcRequest, WIDGET_PAYLOAD_META_KEY};
 use crate::state::{
     AgentsPathMode, FlowDirection, ServerUiEvent, SharedState, UsageTotals, parse_seed_hex,
     save_agents_path_mode,
 };
 
-type Sessions = Arc<Mutex<HashMap<String, Session>>>;
+const STATELESS_FLOW_ID: &str = "stateless";
+const STATELESS_FLOW_LABEL: &str = "stateless";
 
 #[derive(Clone)]
 struct ServerState {
-    sessions: Sessions,
     app: SharedState,
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
     ui_events: UnboundedSender<ServerUiEvent>,
@@ -36,7 +36,6 @@ pub fn router(
     ui_events: UnboundedSender<ServerUiEvent>,
 ) -> Router {
     let state = ServerState {
-        sessions: Arc::new(Mutex::new(HashMap::new())),
         app: app_state,
         devtools,
         ui_events,
@@ -78,52 +77,17 @@ fn with_widget_action_cors(
     builder
 }
 
-fn sse_error_response(
-    status: StatusCode,
-    code: i64,
-    msg: &str,
-    session_id: Option<&str>,
-) -> Response<Body> {
-    let error_json = serde_json::to_string(&json!({
+fn jsonrpc_error_response(status: StatusCode, code: i64, msg: &str) -> Response<Body> {
+    let body = serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "error": {"code": code, "message": msg}
     }))
     .unwrap();
-    let sse_body = format!("event: message\ndata: {error_json}\n\n");
-    let mut builder = Response::builder()
+    Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache, no-transform");
-    if let Some(sid) = session_id {
-        builder = builder.header("mcp-session-id", sid);
-    }
-    builder.body(Body::from(sse_body)).unwrap()
-}
-
-fn short_session_id(sid: &str) -> String {
-    sid[..sid.len().min(8)].to_string()
-}
-
-fn single_active_session_id(sessions: &HashMap<String, Session>) -> Option<String> {
-    if sessions.len() == 1 {
-        sessions.keys().next().cloned()
-    } else {
-        None
-    }
-}
-
-fn summarize_list(items: &[String], max_items: usize) -> String {
-    if items.is_empty() {
-        return "-".into();
-    }
-    if items.len() <= max_items {
-        return items.join(", ");
-    }
-    format!(
-        "{} ... (+{} more)",
-        items[..max_items].join(", "),
-        items.len() - max_items
-    )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
 }
 
 fn request_id(req: &Value) -> String {
@@ -269,15 +233,19 @@ fn attach_catdesk_instruction_actions(
     );
     widget_payload.insert(
         "agentsPathModeUrl".to_string(),
-        json!(public_base_url
-            .map(|base| format!("{base}/agents/path-mode"))
-            .unwrap_or_default()),
+        json!(
+            public_base_url
+                .map(|base| format!("{base}/agents/path-mode"))
+                .unwrap_or_default()
+        ),
     );
     widget_payload.insert(
         "agentsPathStateUrl".to_string(),
-        json!(public_base_url
-            .map(|base| format!("{base}/agents/path-state"))
-            .unwrap_or_default()),
+        json!(
+            public_base_url
+                .map(|base| format!("{base}/agents/path-state"))
+                .unwrap_or_default()
+        ),
     );
     widget_payload.insert(
         "partnerBinagotchySeed".to_string(),
@@ -538,7 +506,6 @@ mod tests {
     use super::*;
     use crate::state::{AppState, Mode, ToolMode};
     use axum::body::to_bytes;
-    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -740,29 +707,13 @@ mod tests {
         let app_state = Arc::new(Mutex::new(app));
         let (ui_tx, _ui_rx) = unbounded_channel();
         let server_state = ServerState {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
             app: app_state.clone(),
             devtools: None,
             ui_events: ui_tx,
         };
 
-        let session = Session::new();
-        let session_id = session.id.clone();
-        server_state
-            .sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), session);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "mcp-session-id",
-            session_id.parse().expect("parse session header"),
-        );
-
         let response = post_mcp(
             State(server_state),
-            headers,
             tool_call_body("run_command", json!({ "command": "find ." })),
         )
         .await;
@@ -772,17 +723,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("read response body");
-        let sse_text = String::from_utf8(body.to_vec()).expect("response body utf8");
-        let payload_line = sse_text
-            .lines()
-            .find(|line| line.starts_with("data: "))
-            .expect("missing sse data line");
-        let payload: Value = serde_json::from_str(
-            payload_line
-                .strip_prefix("data: ")
-                .expect("strip sse prefix"),
-        )
-        .expect("parse sse json");
+        let payload: Value = serde_json::from_slice(&body).expect("parse json body");
 
         let widget_payload = payload
             .get("result")
@@ -822,183 +763,125 @@ mod tests {
 
 // ── POST /<slug>/mcp ────────────────────────────────────────
 
-async fn post_mcp(
-    State(s): State<ServerState>,
-    headers: HeaderMap,
-    body_bytes: Bytes,
-) -> Response<Body> {
+async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<Body> {
     let body: Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
-            return sse_error_response(
+            return jsonrpc_error_response(
                 StatusCode::BAD_REQUEST,
                 -32700,
                 &format!("Parse error: {e}"),
-                None,
             );
         }
     };
+    if !body.is_object() {
+        return jsonrpc_error_response(
+            StatusCode::BAD_REQUEST,
+            -32600,
+            "Invalid request: expected a single JSON-RPC message object",
+        );
+    }
 
     let _ = s.ui_events.send(ServerUiEvent::IncrementRequestCount);
+    let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(true));
+    let _ = s.ui_events.send(ServerUiEvent::SetSessionCount(0));
+
+    let has_method = body.get("method").and_then(Value::as_str).is_some();
+    if !has_method {
+        let mcp_path = {
+            let app = s.app.lock().await;
+            app.mcp_path()
+        };
+        let _ = s.ui_events.send(ServerUiEvent::Log {
+            level: "INFO",
+            message: format!(
+                "POST {mcp_path} sid={STATELESS_FLOW_LABEL} accepted non-request JSON-RPC message"
+            ),
+        });
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .body(Body::empty())
+            .unwrap();
+    }
 
     let mut usage_totals = {
         let app = s.app.lock().await;
         app.usage_totals.clone()
     };
 
-    let requests: Vec<Value> = if body.is_array() {
-        body.as_array().unwrap().clone()
-    } else {
-        vec![body]
-    };
-    let request_summary: Vec<String> = requests.iter().map(summarize_request).collect();
-    let request_flow_events: Vec<String> = requests.iter().map(request_flow_label).collect();
-    let response_flow_events: Vec<String> = requests
-        .iter()
-        .filter(|r| r.get("id").is_some())
-        .map(request_flow_label)
-        .collect();
-
-    let session_id_header = headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let has_initialize = requests
-        .iter()
-        .any(|r| r.get("method").and_then(|m| m.as_str()) == Some("initialize"));
-    let has_any_request = requests.iter().any(|r| r.get("id").is_some());
-
-    let mut sessions = s.sessions.lock().await;
-
-    let session_id: String;
-    if has_initialize {
-        if let Some(ref sid) = session_id_header {
-            if sessions.contains_key(sid) {
-                // important: ChatGPT MCP client will initialize 8 times
-                // use same session id if the sid already exists
-                session_id = sid.clone();
-            } else if let Some(active_sid) = single_active_session_id(&sessions) {
-                session_id = active_sid;
-            } else {
-                let new_session = Session::new();
-                session_id = new_session.id.clone();
-                sessions.insert(session_id.clone(), new_session);
-            }
-        } else if let Some(active_sid) = single_active_session_id(&sessions) {
-            session_id = active_sid;
-        } else {
-            let new_session = Session::new();
-            session_id = new_session.id.clone();
-            sessions.insert(session_id.clone(), new_session);
-        }
-        let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(true));
-    } else if let Some(ref sid) = session_id_header {
-        if !sessions.contains_key(sid) {
-            drop(sessions);
-            let mut app = s.app.lock().await;
-            app.log(
-                "WARN",
-                format!("Session not found: {}", short_session_id(sid)),
-            );
-            return sse_error_response(
-                StatusCode::NOT_FOUND,
-                -32000,
-                "Session not found. Please reinitialize.",
-                None,
-            );
-        }
-        session_id = sid.clone();
-    } else {
-        drop(sessions);
-        return sse_error_response(
-            StatusCode::BAD_REQUEST,
-            -32000,
-            "Missing Mcp-Session-Id header",
-            None,
-        );
-    }
-
-    let mut responses: Vec<Value> = Vec::new();
+    let request_summary = summarize_request(&body);
+    let request_flow_event = request_flow_label(&body);
 
     let _ = s.ui_events.send(ServerUiEvent::RecordSessionFlow {
-        sid: session_id.clone(),
-        events: request_flow_events.clone(),
+        sid: STATELESS_FLOW_ID.to_string(),
+        events: vec![request_flow_event.clone()],
         direction: FlowDirection::Forward,
     });
 
-    for req_val in &requests {
-        let req: JsonRpcRequest = match serde_json::from_value(req_val.clone()) {
-            Ok(r) => r,
-            Err(e) => {
-                responses.push(
-                    serde_json::to_value(mcp::JsonRpcResponse::error(
-                        None,
-                        -32700,
-                        format!("Parse error: {e}"),
-                    ))
-                    .unwrap(),
-                );
-                continue;
-            }
-        };
-
-        let (
-            workspace_root,
-            mascot_seed,
-            mode,
-            tool_mode,
-            set_catdesk_as_co_author,
-            ngrok_url,
-            partner_binagotchy_seed,
-        ) = {
-            let app = s.app.lock().await;
-            (
-                app.workspace_root.clone(),
-                app.mascot_seed,
-                app.mode,
-                app.tool_mode,
-                app.set_catdesk_as_co_author,
-                app.ngrok_url.clone(),
-                app.partner_binagotchy_seed.clone(),
-            )
-        };
-
-        let session = sessions.get_mut(&session_id).unwrap();
-        if let Some(resp) = mcp::handle_request(
-            &req,
-            session,
-            &workspace_root,
-            mascot_seed,
-            ngrok_url.as_deref(),
-            mode,
-            tool_mode,
-            set_catdesk_as_co_author,
-            &s.devtools,
-        )
-        .await
-        {
-            let mut resp = resp;
-            if req.method == "tools/call" {
-                if let Some((input_tokens, output_tokens)) =
-                    extract_turn_token_usage(resp.result.as_ref())
-                {
-                    usage_totals.accumulate(input_tokens, output_tokens, 1);
-                }
-                attach_history_usage(&mut resp.result, &usage_totals);
-                attach_catdesk_instruction_actions(
-                    &mut resp.result,
-                    ngrok_url.as_deref(),
-                    mascot_seed,
-                    partner_binagotchy_seed.as_deref(),
-                );
-            }
-            responses.push(serde_json::to_value(resp).unwrap());
+    let req: JsonRpcRequest = match serde_json::from_value(body.clone()) {
+        Ok(r) => r,
+        Err(e) => {
+            return jsonrpc_error_response(
+                StatusCode::BAD_REQUEST,
+                -32600,
+                &format!("Invalid request: {e}"),
+            );
         }
+    };
+
+    let (
+        workspace_root,
+        mascot_seed,
+        mode,
+        tool_mode,
+        set_catdesk_as_co_author,
+        ngrok_url,
+        partner_binagotchy_seed,
+    ) = {
+        let app = s.app.lock().await;
+        (
+            app.workspace_root.clone(),
+            app.mascot_seed,
+            app.mode,
+            app.tool_mode,
+            app.set_catdesk_as_co_author,
+            app.ngrok_url.clone(),
+            app.partner_binagotchy_seed.clone(),
+        )
+    };
+
+    let mut response_json: Option<Value> = None;
+    if let Some(resp) = mcp::handle_request(
+        &req,
+        &workspace_root,
+        mascot_seed,
+        ngrok_url.as_deref(),
+        mode,
+        tool_mode,
+        set_catdesk_as_co_author,
+        &s.devtools,
+    )
+    .await
+    {
+        let mut resp = resp;
+        if req.method == "tools/call" {
+            if let Some((input_tokens, output_tokens)) =
+                extract_turn_token_usage(resp.result.as_ref())
+            {
+                usage_totals.accumulate(input_tokens, output_tokens, 1);
+            }
+            attach_history_usage(&mut resp.result, &usage_totals);
+            attach_catdesk_instruction_actions(
+                &mut resp.result,
+                ngrok_url.as_deref(),
+                mascot_seed,
+                partner_binagotchy_seed.as_deref(),
+            );
+        }
+        response_json = Some(serde_json::to_value(resp).unwrap());
     }
 
     {
-        let session_count = sessions.len();
         let mut app = s.app.lock().await;
         if app.usage_totals != usage_totals {
             app.usage_totals = usage_totals.clone();
@@ -1006,161 +889,81 @@ async fn post_mcp(
         }
         let mcp_path = app.mcp_path();
         drop(app);
-        let response_summary: Vec<String> = responses.iter().map(summarize_response).collect();
-        let _ = s
-            .ui_events
-            .send(ServerUiEvent::SetSessionCount(session_count));
-        let _ = s.ui_events.send(ServerUiEvent::RecordSessionFlow {
-            sid: session_id.clone(),
-            events: response_flow_events.clone(),
-            direction: FlowDirection::Backward,
-        });
+        if req.id.is_some() {
+            let _ = s.ui_events.send(ServerUiEvent::RecordSessionFlow {
+                sid: STATELESS_FLOW_ID.to_string(),
+                events: vec![request_flow_event.clone()],
+                direction: FlowDirection::Backward,
+            });
+        }
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "INFO",
             message: format!(
-                "POST {mcp_path} request sid={} [{}]",
-                short_session_id(&session_id),
-                summarize_list(&request_summary, 6),
+                "POST {mcp_path} sid={STATELESS_FLOW_LABEL} [{}]",
+                request_summary,
             ),
         });
-        let _ = s.ui_events.send(ServerUiEvent::Log {
-            level: "INFO",
-            message: format!(
-                "POST {mcp_path} response sid={} [{}]",
-                short_session_id(&session_id),
-                summarize_list(&response_summary, 6),
-            ),
-        });
+        if let Some(ref resp_json) = response_json {
+            let response_summary = summarize_response(resp_json);
+            let _ = s.ui_events.send(ServerUiEvent::Log {
+                level: "INFO",
+                message: format!(
+                    "POST {mcp_path} sid={STATELESS_FLOW_LABEL} response [{response_summary}]"
+                ),
+            });
+        }
     }
 
-    drop(sessions);
-
-    if !has_any_request {
+    if req.id.is_none() {
         return Response::builder()
             .status(StatusCode::ACCEPTED)
-            .header("mcp-session-id", &session_id)
             .body(Body::empty())
             .unwrap();
     }
 
-    let mut sse_body = String::new();
-    for resp in &responses {
-        sse_body.push_str("event: message\n");
-        sse_body.push_str("data: ");
-        sse_body.push_str(&serde_json::to_string(resp).unwrap());
-        sse_body.push_str("\n\n");
-    }
+    let Some(response_json) = response_json else {
+        return jsonrpc_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            -32603,
+            "Internal error: request did not produce a JSON-RPC response",
+        );
+    };
+    let response_body = serde_json::to_string(&response_json).unwrap();
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache, no-transform")
-        .header(header::CONNECTION, "keep-alive")
-        .header("mcp-session-id", &session_id)
-        .body(Body::from(sse_body))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(response_body))
         .unwrap()
 }
 
-// ── GET /<slug>/mcp — SSE ───────────────────────────────────
+// ── GET /<slug>/mcp — pure HTTP mode (no SSE) ───────────────
 
-async fn get_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<Body> {
-    let session_id = headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let sessions = s.sessions.lock().await;
-    match &session_id {
-        Some(sid) if sessions.contains_key(sid) => {}
-        Some(_) => {
-            return sse_error_response(StatusCode::NOT_FOUND, -32000, "Session not found", None);
-        }
-        None => {
-            return sse_error_response(
-                StatusCode::BAD_REQUEST,
-                -32000,
-                "Missing Mcp-Session-Id header",
-                None,
-            );
-        }
-    }
-    let sid = session_id.unwrap();
-    drop(sessions);
-
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, std::convert::Infallible>>(16);
-    let mcp_path = {
-        let app = s.app.lock().await;
-        app.mcp_path()
-    };
-    let _ = tx
-        .send(Ok(format!("event: endpoint\ndata: {mcp_path}\n\n")))
-        .await;
-
-    let sid_clone = sid.clone();
-    let ui_events = s.ui_events.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            if tx.send(Ok(": keepalive\n\n".to_string())).await.is_err() {
-                let _ = ui_events.send(ServerUiEvent::BeginSessionFlowClose {
-                    sid: sid_clone.clone(),
-                });
-                let _ = ui_events.send(ServerUiEvent::Log {
-                    level: "INFO",
-                    message: format!("SSE stream closed: {}", short_session_id(&sid_clone)),
-                });
-                break;
-            }
-        }
-    });
-
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+async fn get_mcp() -> Response<Body> {
     Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache, no-transform")
-        .header(header::CONNECTION, "keep-alive")
-        .header("mcp-session-id", &sid)
-        .body(Body::from_stream(stream))
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"GET SSE stream is disabled in pure HTTP mode"}}"#,
+        ))
         .unwrap()
 }
 
 // ── DELETE /<slug>/mcp ──────────────────────────────────────
 
-async fn delete_mcp(State(s): State<ServerState>, headers: HeaderMap) -> Response<Body> {
-    let session_id = headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    if let Some(sid) = session_id {
-        let mut sessions = s.sessions.lock().await;
-        if sessions.remove(&sid).is_some() {
-            let session_count = sessions.len();
-            let _ = s
-                .ui_events
-                .send(ServerUiEvent::SetSessionCount(session_count));
-            let _ = s
-                .ui_events
-                .send(ServerUiEvent::BeginSessionFlowClose { sid: sid.clone() });
-            if sessions.is_empty() {
-                let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(false));
-            }
-            let _ = s.ui_events.send(ServerUiEvent::Log {
-                level: "INFO",
-                message: format!("Session closed: {}", short_session_id(&sid)),
-            });
-            return Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"status":"session closed"}"#))
-                .unwrap();
-        }
-    }
-
+async fn delete_mcp(State(s): State<ServerState>) -> Response<Body> {
+    let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(false));
+    let _ = s.ui_events.send(ServerUiEvent::SetSessionCount(0));
+    let _ = s.ui_events.send(ServerUiEvent::BeginSessionFlowClose {
+        sid: STATELESS_FLOW_ID.to_string(),
+    });
+    let _ = s.ui_events.send(ServerUiEvent::Log {
+        level: "INFO",
+        message: "DELETE mcp endpoint: stateless reset".to_string(),
+    });
     Response::builder()
-        .status(StatusCode::NOT_FOUND)
+        .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"error":"Session not found"}"#))
+        .body(Body::from(r#"{"status":"ok"}"#))
         .unwrap()
 }

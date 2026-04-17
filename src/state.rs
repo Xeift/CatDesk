@@ -1105,8 +1105,7 @@ toolCallCount = 7
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let workspace =
-            std::env::temp_dir().join(format!("catdesk-config-agents-mode-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-agents-mode-{unique}"));
         std::fs::create_dir_all(&workspace).expect("create temp config dir");
         let config_path = workspace.join(APP_CONFIG_FILE_NAME);
 

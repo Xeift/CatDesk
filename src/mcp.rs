@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tiktoken_rs::o200k_base_singleton;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 use crate::command;
 use crate::devtools::DevtoolsBridge;
@@ -82,27 +81,6 @@ impl JsonRpcResponse {
     }
 }
 
-// ── Session ─────────────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct Session {
-    pub id: String,
-    pub initialized: bool,
-    changed_files: HashMap<String, FileDiffEntry>,
-    baseline_files: HashMap<String, Option<FileSnapshot>>,
-}
-
-impl Session {
-    pub fn new() -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            initialized: false,
-            changed_files: HashMap::new(),
-            baseline_files: HashMap::new(),
-        }
-    }
-}
-
 #[derive(Clone, Default)]
 struct TokenUsage {
     input_tokens: u64,
@@ -118,7 +96,6 @@ impl TokenUsage {
             total_tokens: input_tokens.saturating_add(output_tokens),
         }
     }
-
 }
 
 #[derive(Clone, Default)]
@@ -161,7 +138,6 @@ struct AutoWidgetContext {
 
 pub async fn handle_request(
     req: &JsonRpcRequest,
-    session: &mut Session,
     workspace_root: &str,
     mascot_seed: u64,
     public_base_url: Option<&str>,
@@ -191,19 +167,13 @@ pub async fn handle_request(
                     .notify(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
                     .await;
             }
-            Some(handle_initialize(req, session))
+            Some(handle_initialize(req))
         }
-        m if m.starts_with("notifications/") => {
-            if m == "notifications/initialized" {
-                session.initialized = true;
-            }
-            None
-        }
+        m if m.starts_with("notifications/") => None,
         "tools/list" => Some(handle_tools_list(req, mode, tool_mode, devtools).await),
         "tools/call" => Some(
             handle_tools_call(
                 req,
-                session,
                 workspace_root,
                 mascot_seed,
                 mode,
@@ -224,8 +194,7 @@ pub async fn handle_request(
     }
 }
 
-fn handle_initialize(req: &JsonRpcRequest, session: &mut Session) -> JsonRpcResponse {
-    session.initialized = true;
+fn handle_initialize(req: &JsonRpcRequest) -> JsonRpcResponse {
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
@@ -477,7 +446,6 @@ async fn handle_tools_list(
 
 async fn handle_tools_call(
     req: &JsonRpcRequest,
-    session: &mut Session,
     workspace_root: &str,
     mascot_seed: u64,
     mode: Mode,
@@ -577,7 +545,6 @@ async fn handle_tools_call(
 
     let after_snapshot = collect_watched_snapshot(&watch_targets, workspace_root);
     let turn_files = diff_changed_files(&before_snapshot, &after_snapshot);
-    update_session_changed_files(session, &before_snapshot, &after_snapshot);
     let is_error = response
         .result
         .as_ref()
@@ -706,19 +673,16 @@ async fn handle_run_command(
     };
 
     if let Some(intercept) = command::detect_list_files_intercept(&effective_command) {
-        let listing_path = match command::resolve_command_path(
-            workspace_root,
-            &cwd,
-            intercept.path.as_deref(),
-        ) {
-            Ok(path) => path,
-            Err(e) => {
-                return tool_error_response(
-                    req,
-                    format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {e}"),
-                );
-            }
-        };
+        let listing_path =
+            match command::resolve_command_path(workspace_root, &cwd, intercept.path.as_deref()) {
+                Ok(path) => path,
+                Err(e) => {
+                    return tool_error_response(
+                        req,
+                        format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {e}"),
+                    );
+                }
+            };
         let listing_path_str = listing_path.to_string_lossy().to_string();
         match workspace_tools::list_files_filtered(
             workspace_root,
@@ -2236,48 +2200,10 @@ fn diff_changed_files(before: &WatchedSnapshot, after: &WatchedSnapshot) -> Vec<
     changed
 }
 
-fn update_session_changed_files(
-    session: &mut Session,
-    before: &WatchedSnapshot,
-    after: &WatchedSnapshot,
-) {
-    let mut paths: Vec<String> = before
-        .files
-        .keys()
-        .chain(after.files.keys())
-        .cloned()
-        .collect();
-    paths.sort();
-    paths.dedup();
-
-    for path in paths {
-        session
-            .baseline_files
-            .entry(path.clone())
-            .or_insert_with(|| before.files.get(&path).cloned());
-        let baseline = session
-            .baseline_files
-            .get(&path)
-            .and_then(|value| value.as_ref());
-        let current = after.files.get(&path);
-
-        if let Some(entry) = build_entry_from_states(&path, baseline, current) {
-            session.changed_files.insert(path.clone(), entry);
-        } else {
-            session.changed_files.remove(&path);
-        }
-    }
-}
-
 fn is_local_destructive_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "run_command"
-            | "write"
-            | "append_file"
-            | "move_path"
-            | "delete"
-            | "replace_in_file"
+        "run_command" | "write" | "append_file" | "move_path" | "delete" | "replace_in_file"
     )
 }
 
@@ -2523,6 +2449,7 @@ fn handle_replace_in_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     fn resources_read_request(uri: &str) -> JsonRpcRequest {
         JsonRpcRequest {
@@ -2560,11 +2487,9 @@ mod tests {
                 "content": "hello world\n",
             }),
         );
-        let mut session = Session::new();
         let workspace_root_str = workspace_root.to_string_lossy().into_owned();
         let response = handle_tools_call(
             &req,
-            &mut session,
             &workspace_root_str,
             1,
             Mode::Both,
@@ -2620,11 +2545,9 @@ mod tests {
                 "command": "find src",
             }),
         );
-        let mut session = Session::new();
         let workspace_root_str = workspace_root.to_string_lossy().into_owned();
         let response = handle_tools_call(
             &req,
-            &mut session,
             &workspace_root_str,
             1,
             Mode::Both,
