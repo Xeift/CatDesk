@@ -104,7 +104,7 @@ impl Default for AppConfig {
             set_catdesk_as_co_author: false,
             theme: theme::DEFAULT_THEME_ID.to_string(),
             mode: Mode::Both,
-            tool_mode: ToolMode::OneTool,
+            tool_mode: ToolMode::MultiTools,
             usage_totals: UsageTotals::default(),
             selected_browser: None,
         }
@@ -375,21 +375,18 @@ impl Mode {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ToolMode {
-    OneTool,    // only run_command
     MultiTools, // codex/claude-style workspace tools
     ReadOnly,   // read-only safe tools only
 }
 
 impl ToolMode {
     pub fn all() -> &'static [Self] {
-        const TOOL_MODES: [ToolMode; 3] =
-            [ToolMode::OneTool, ToolMode::MultiTools, ToolMode::ReadOnly];
+        const TOOL_MODES: [ToolMode; 2] = [ToolMode::MultiTools, ToolMode::ReadOnly];
         &TOOL_MODES
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            ToolMode::OneTool => "1-tool",
             ToolMode::MultiTools => "multi-tools",
             ToolMode::ReadOnly => "read-only",
         }
@@ -397,18 +394,13 @@ impl ToolMode {
 
     pub fn description(self) -> &'static str {
         match self {
-            ToolMode::OneTool => "Expose only the run_command tool.",
             ToolMode::MultiTools => "Expose workspace read/write tools plus run_command.",
             ToolMode::ReadOnly => "Expose safe read-only workspace tools only.",
         }
     }
 
     pub fn run_command_enabled(self) -> bool {
-        matches!(self, ToolMode::OneTool | ToolMode::MultiTools)
-    }
-
-    pub fn read_tools_enabled(self) -> bool {
-        matches!(self, ToolMode::MultiTools | ToolMode::ReadOnly)
+        matches!(self, ToolMode::MultiTools)
     }
 
     pub fn write_tools_enabled(self) -> bool {
@@ -1155,7 +1147,7 @@ toolCallCount = 7
             r#"
 theme = "concise"
 mode = "both"
-toolMode = "oneTool"
+toolMode = "multiTools"
 partnerBinagotchySeed = "00000000000000ff"
 
 [usageTotals]

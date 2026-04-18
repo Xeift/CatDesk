@@ -836,7 +836,7 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
                 "Control Computer   ",
                 Style::default().fg(palette.primary_fg),
             ),
-            Span::styled("(run_command)", Style::default().fg(palette.muted_fg)),
+            Span::styled("(local tools)", Style::default().fg(palette.muted_fg)),
         ]),
         Line::from(vec![
             Span::styled(

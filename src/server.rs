@@ -751,7 +751,7 @@ mod tests {
         assert!(app.usage_totals.total_tokens > 0);
         assert_eq!(app.usage_totals.tool_call_count, 1);
         assert!(matches!(app.mode, Mode::Both));
-        assert!(matches!(app.tool_mode, ToolMode::OneTool));
+        assert!(matches!(app.tool_mode, ToolMode::MultiTools));
         drop(app);
 
         let _ = std::fs::remove_file(workspace_root.join("hello.txt"));

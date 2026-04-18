@@ -300,47 +300,45 @@ async fn handle_tools_list(
             }));
         }
 
-        if tool_mode.read_tools_enabled() {
-            tools.push(json!({
-                "name": "catdesk_instruction",
-                "title": "Get usage instructions",
-                "description": "Read CatDesk operating guidance. Call this first if you are unsure which tool to use. Prefer dedicated tools over run_command whenever possible.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {}
+        tools.push(json!({
+            "name": "catdesk_instruction",
+            "title": "Get usage instructions",
+            "description": "Read CatDesk operating guidance. Call this first if you are unsure which tool to use. Prefer dedicated tools over run_command whenever possible.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }));
+        tools.push(json!({
+            "name": "read",
+            "title": "Read file",
+            "description": "Read a text file from workspace.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path relative to workspace root or absolute path within it" }
                 },
-                "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
-            }));
-            tools.push(json!({
-                "name": "read",
-                "title": "Read file",
-                "description": "Read a text file from workspace.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "File path relative to workspace root or absolute path within it" }
-                    },
-                    "required": ["path"]
+                "required": ["path"]
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }));
+        tools.push(json!({
+            "name": "search",
+            "title": "Search text",
+            "description": "Search text across files in workspace.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search string" },
+                    "path": { "type": "string", "description": "Directory path (default: workspace root)" },
+                    "include_hidden": { "type": "boolean", "description": "Include dotfiles and dot-directories" },
+                    "limit": { "type": "number", "description": "Max matches (1..500)" }
                 },
-                "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
-            }));
-            tools.push(json!({
-                "name": "search",
-                "title": "Search text",
-                "description": "Search text across files in workspace.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Search string" },
-                        "path": { "type": "string", "description": "Directory path (default: workspace root)" },
-                        "include_hidden": { "type": "boolean", "description": "Include dotfiles and dot-directories" },
-                        "limit": { "type": "number", "description": "Max matches (1..500)" }
-                    },
-                    "required": ["query"]
-                },
-                "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
-            }));
-        }
+                "required": ["query"]
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }));
 
         if tool_mode.write_tools_enabled() {
             tools.push(json!({
@@ -459,7 +457,7 @@ async fn handle_tools_call(
                 } else {
                     tool_error_response(req, format!("Unknown tool: {tool_name}"))
                 }
-            } else if tool_mode.read_tools_enabled() {
+            } else {
                 match tool_name.as_str() {
                     "catdesk_instruction" => handle_catdesk_instruction(
                         req,
@@ -498,26 +496,6 @@ async fn handle_tools_call(
                         }
                     }
                 }
-            } else if tool_mode.write_tools_enabled() {
-                match tool_name.as_str() {
-                    "write" => handle_write_file(req, workspace_root),
-                    "edit" => handle_edit_file(req, workspace_root),
-                    "move_path" => handle_move_path(req, workspace_root),
-                    "delete" => handle_delete_path(req, workspace_root),
-                    _ => {
-                        if mode.browser_enabled() {
-                            forward_to_devtools(req, &tool_name, tool_mode, devtools).await
-                        } else {
-                            tool_error_response(req, format!("Unknown tool: {tool_name}"))
-                        }
-                    }
-                }
-            } else if tool_mode.read_only() && is_local_destructive_tool(&tool_name) {
-                read_only_blocked_response(req, &tool_name)
-            } else if mode.browser_enabled() {
-                forward_to_devtools(req, &tool_name, tool_mode, devtools).await
-            } else {
-                tool_error_response(req, format!("Unknown tool: {tool_name}"))
             }
         } else if mode.browser_enabled() {
             forward_to_devtools(req, &tool_name, tool_mode, devtools).await
@@ -969,11 +947,14 @@ Always specify the branch explicitly when using `git push`."#
         .map(str::to_string)
         .collect();
 
-    if mode.computer_enabled() && tool_mode.read_tools_enabled() {
-        lines.push(
-            "Use read to read files and search to search the workspace. For directory inspection, run_command can intercept plain listing commands such as find, tree, ls -R, and rg --files."
-                .to_string(),
-        );
+    if mode.computer_enabled() {
+        lines.push("Use read to read files and search to search the workspace.".to_string());
+        if tool_mode.run_command_enabled() {
+            lines.push(
+                "For directory inspection, run_command can intercept plain listing commands such as find, tree, ls -R, and rg --files."
+                    .to_string(),
+            );
+        }
         if tool_mode.write_tools_enabled() {
             lines.push(
                 "Use write with create_dirs=true to create files in new directories. Use edit for targeted exact string replacements, including append-like changes by replacing the current file ending. Use move_path and delete for other filesystem changes."
@@ -2475,6 +2456,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_only_tools_list_exposes_only_local_read_tools() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+
+        let response = handle_tools_list(&req, Mode::Both, ToolMode::ReadOnly, &None).await;
+        let names = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["catdesk_instruction", "read", "search"]);
+    }
+
+    #[tokio::test]
     async fn write_file_widget_payload_includes_changed_files_after_tool_call() {
         let workspace_root =
             std::env::temp_dir().join(format!("catdesk-mcp-write-file-{}", Uuid::new_v4()));
@@ -2669,7 +2673,7 @@ mod tests {
             &workspace_root_str,
             1,
             Mode::Both,
-            ToolMode::OneTool,
+            ToolMode::MultiTools,
             false,
             &None,
         )

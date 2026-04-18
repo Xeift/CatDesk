@@ -127,7 +127,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 # Tools
 
-CatDesk has three local tool modes: `1-tool` exposes 1 tool, `read-only` exposes 3 tools, and `multi-tools` exposes 8 tools.
+CatDesk has two local tool modes: `multi-tools` exposes 8 tools, and `read-only` exposes 3 tools.
 
 CatDesk's local tools in `multi-tools` mode are:
 
