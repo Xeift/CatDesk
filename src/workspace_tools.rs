@@ -1,8 +1,8 @@
 use crate::command;
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_READ_BYTES: usize = 512 * 1024;
@@ -201,50 +201,6 @@ pub fn write_file(
     fs::write(&target, content).map_err(|e| e.to_string())?;
     Ok(format!(
         "wrote {} bytes to {}",
-        content.len(),
-        to_workspace_relative(&root, &target)
-    ))
-}
-
-pub fn append_file(
-    workspace_root: &str,
-    path: &str,
-    content: &str,
-    create_dirs: bool,
-) -> Result<String, String> {
-    if content.len() > MAX_WRITE_BYTES {
-        return Err(format!(
-            "Content too large: {} bytes (max {})",
-            content.len(),
-            MAX_WRITE_BYTES
-        ));
-    }
-
-    let root = workspace_root_path(workspace_root)?;
-    let target = resolve_target_path(workspace_root, path)?;
-    if let Some(parent) = target.parent() {
-        if !parent.exists() {
-            if create_dirs {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            } else {
-                return Err(format!(
-                    "Parent directory does not exist: {} (set create_dirs=true)",
-                    parent.display()
-                ));
-            }
-        }
-    }
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&target)
-        .map_err(|e| e.to_string())?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| e.to_string())?;
-
-    Ok(format!(
-        "appended {} bytes to {}",
         content.len(),
         to_workspace_relative(&root, &target)
     ))
@@ -576,15 +532,18 @@ pub fn move_path(
     ))
 }
 
-pub fn replace_in_file(
+pub fn edit_file(
     workspace_root: &str,
     path: &str,
-    find: &str,
-    replace: &str,
+    old_string: &str,
+    new_string: &str,
     replace_all: bool,
 ) -> Result<String, String> {
-    if find.is_empty() {
-        return Err("find must not be empty".into());
+    if old_string.is_empty() {
+        return Err("old_string must not be empty".into());
+    }
+    if old_string == new_string {
+        return Err("old_string and new_string must be different".into());
     }
 
     let root = workspace_root_path(workspace_root)?;
@@ -597,34 +556,31 @@ pub fn replace_in_file(
     }
 
     let content = fs::read_to_string(&target).map_err(|e| e.to_string())?;
-    let replaced_content;
-    let replaced_count: usize;
-    if replace_all {
-        replaced_count = content.matches(find).count();
-        replaced_content = content.replace(find, replace);
-    } else if let Some(pos) = content.find(find) {
-        replaced_count = 1;
-        let mut out =
-            String::with_capacity(content.len() + replace.len().saturating_sub(find.len()));
-        out.push_str(&content[..pos]);
-        out.push_str(replace);
-        out.push_str(&content[pos + find.len()..]);
-        replaced_content = out;
-    } else {
-        replaced_count = 0;
-        replaced_content = content;
-    }
+    let replaced_count = content.matches(old_string).count();
 
     if replaced_count == 0 {
-        return Ok(format!(
-            "no match found in {}",
+        return Err(format!(
+            "old_string not found in {}",
+            to_workspace_relative(&root, &target)
+        ));
+    }
+    if replaced_count > 1 && !replace_all {
+        return Err(format!(
+            "old_string matched {} occurrences in {}. Set replace_all=true to replace every occurrence, or provide more context to make old_string unique.",
+            replaced_count,
             to_workspace_relative(&root, &target)
         ));
     }
 
+    let replaced_content = if replace_all {
+        content.replace(old_string, new_string)
+    } else {
+        content.replacen(old_string, new_string, 1)
+    };
+
     fs::write(&target, replaced_content).map_err(|e| e.to_string())?;
     Ok(format!(
-        "replaced {} occurrence(s) in {}",
+        "edited {} occurrence(s) in {}",
         replaced_count,
         to_workspace_relative(&root, &target)
     ))

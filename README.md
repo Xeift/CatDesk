@@ -28,7 +28,7 @@ Here's the solution: most people with a Plus subscription do not use even 10% of
 
 **_So why not use your 3,000 weekly messages for coding?_**
 
-That's the idea behind CatDesk! It gives ChatGPT Web tools like `write_file` and `run_commands` to edit files on your computer.
+That's the idea behind CatDesk! It gives ChatGPT Web tools like `write` and `run_command` to edit files on your computer.
 
 # How does this work?
 
@@ -59,7 +59,7 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 
 # Who needs this?
 
-- People who used up their Codex quota on the first day after it reset (me🥺)
+- People who used up their Codex quota on the first few day after it reset (me🥺)
 - People who are working on web development and crawlers. (CatDesk enables ChatGPT Web to read elements and control your browser tab through chrome-devtools-mcp integration.)
 
 # Quickstart
@@ -100,7 +100,7 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 
 8. Click `Create`.
 
-9. Add this to your ChatGPT system instruction:
+9. Add this to your ChatGPT `Custom instructions`:
 
 ```text
 CatDesk is a coding tool and a custom connector. Always use CatDesk if the user wants to do anything related to file operations. Always call `catdesk_instruction` after `list_resources`, and follow the instructions it contains.
@@ -127,18 +127,19 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 # Tools
 
-CatDesk's tools are:
+CatDesk has three local tool modes: `1-tool` exposes 1 tool, `read-only` exposes 3 tools, and `multi-tools` exposes 8 tools.
+
+CatDesk's local tools in `multi-tools` mode are:
 
 | Tool                  | Type  | What it does                                                            |
 | --------------------- | ----- | ----------------------------------------------------------------------- |
 | `catdesk_instruction` | Guide | Returns CatDesk usage instructions and reads your workspace `AGENTS.md` |
-| `read_file`           | Read  | Reads a text file from the workspace                                    |
-| `search_text`         | Read  | Searches text across files in the workspace                             |
-| `write_file`          | Write | Creates or overwrites a file                                            |
-| `append_file`         | Write | Appends text to a file, or creates it if missing                        |
+| `read`                | Read  | Reads a text file from the workspace                                    |
+| `search`              | Read  | Searches text across files in the workspace                             |
+| `write`               | Write | Creates or overwrites a file                                            |
+| `edit`                | Write | Replaces exact text inside a file                                       |
 | `move_path`           | Write | Moves or renames a file or directory                                    |
-| `delete_path`         | Write | Deletes a file or directory                                             |
-| `replace_in_file`     | Write | Replaces text inside a file                                             |
+| `delete`              | Write | Deletes a file or directory                                             |
 | `run_command`         | Shell | Runs a shell command inside the workspace.                              |
 
 If browser mode is enabled, CatDesk can also expose extra browser/devtools tools. Those are provided by the browser bridge, so the exact list depends on your environment.
@@ -180,13 +181,13 @@ Yes. Open [Advanced connector settings](https://chatgpt.com/#settings/Connectors
 
 No. This restriction comes from the ChatGPT Web side. There is not much CatDesk can do about it. ChatGPT Web probably uses an LLM or some internal policy layer to detect high-risk operations and require manual approval. Sensitive filenames and sensitive content can both trigger manual approval. It is not only about which tool is being used. For example:
 
-> write_file("api_key.txt", content: "")<br>
+> write("api_key.txt", content: "")<br>
 > ⚠️ Approval required
 
-> write_file("Xeift.txt", content: "api_key")<br>
+> write("Xeift.txt", content: "api_key")<br>
 > ⚠️ Approval required
 
-> write_file("i_luv_catgirl.txt", content: "")<br>
+> write("i_luv_catgirl.txt", content: "")<br>
 > ✅ No approval required
 
 Sometimes this is annoying, but there is no good workaround right now. This is one of the reasons I say CatDesk is _not as smooth as native Codex_.

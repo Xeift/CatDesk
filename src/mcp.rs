@@ -359,17 +359,18 @@ async fn handle_tools_list(
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
             tools.push(json!({
-                "name": "append_file",
-                "title": "Append file",
-                "description": "Append text to an existing file (or create file).",
+                "name": "edit",
+                "title": "Edit file",
+                "description": "Replace exact text in a workspace file. If replace_all is omitted or false, old_string must match exactly one occurrence. Use this for targeted edits and append-like changes by replacing the current file ending with a version that includes the new text.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string" },
-                        "content": { "type": "string" },
-                        "create_dirs": { "type": "boolean", "description": "Create parent directories if missing" }
+                        "old_string": { "type": "string", "description": "Exact literal text to replace" },
+                        "new_string": { "type": "string", "description": "Exact literal replacement text" },
+                        "replace_all": { "type": "boolean", "description": "Replace all occurrences of old_string (default false)" }
                     },
-                    "required": ["path", "content"]
+                    "required": ["path", "old_string", "new_string"]
                 },
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
@@ -400,22 +401,6 @@ async fn handle_tools_list(
                         "recursive": { "type": "boolean", "description": "Delete directories recursively" }
                     },
                     "required": ["path"]
-                },
-                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
-            }));
-            tools.push(json!({
-                "name": "replace_in_file",
-                "title": "Replace in file",
-                "description": "Replace text in a file.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "find": { "type": "string" },
-                        "replace": { "type": "string" },
-                        "all": { "type": "boolean", "description": "Replace all occurrences (default true)" }
-                    },
-                    "required": ["path", "find", "replace"]
                 },
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
@@ -489,10 +474,9 @@ async fn handle_tools_call(
                         if tool_mode.write_tools_enabled() {
                             match tool_name.as_str() {
                                 "write" => handle_write_file(req, workspace_root),
-                                "append_file" => handle_append_file(req, workspace_root),
+                                "edit" => handle_edit_file(req, workspace_root),
                                 "move_path" => handle_move_path(req, workspace_root),
                                 "delete" => handle_delete_path(req, workspace_root),
-                                "replace_in_file" => handle_replace_in_file(req, workspace_root),
                                 _ => {
                                     if mode.browser_enabled() {
                                         forward_to_devtools(req, &tool_name, tool_mode, devtools)
@@ -517,10 +501,9 @@ async fn handle_tools_call(
             } else if tool_mode.write_tools_enabled() {
                 match tool_name.as_str() {
                     "write" => handle_write_file(req, workspace_root),
-                    "append_file" => handle_append_file(req, workspace_root),
+                    "edit" => handle_edit_file(req, workspace_root),
                     "move_path" => handle_move_path(req, workspace_root),
                     "delete" => handle_delete_path(req, workspace_root),
-                    "replace_in_file" => handle_replace_in_file(req, workspace_root),
                     _ => {
                         if mode.browser_enabled() {
                             forward_to_devtools(req, &tool_name, tool_mode, devtools).await
@@ -993,7 +976,7 @@ Always specify the branch explicitly when using `git push`."#
         );
         if tool_mode.write_tools_enabled() {
             lines.push(
-                "Use write or append_file with create_dirs=true to create files in new directories. Use replace_in_file, move_path, and delete for other workspace edits and filesystem changes."
+                "Use write with create_dirs=true to create files in new directories. Use edit for targeted exact string replacements, including append-like changes by replacing the current file ending. Use move_path and delete for other filesystem changes."
                     .to_string(),
             );
         }
@@ -1268,10 +1251,9 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
             | "search"
             | "read"
             | "write"
-            | "append_file"
+            | "edit"
             | "move_path"
             | "delete"
-            | "replace_in_file"
     )
 }
 
@@ -1730,7 +1712,7 @@ fn collect_watch_targets(req: &JsonRpcRequest, workspace_root: &str) -> Vec<Watc
     };
 
     match tool_name.as_str() {
-        "write" | "append_file" | "replace_in_file" => {
+        "write" | "edit" => {
             add_target(arguments.get("path").and_then(Value::as_str), false);
         }
         "delete" => {
@@ -2203,7 +2185,7 @@ fn diff_changed_files(before: &WatchedSnapshot, after: &WatchedSnapshot) -> Vec<
 fn is_local_destructive_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "run_command" | "write" | "append_file" | "move_path" | "delete" | "replace_in_file"
+        "run_command" | "write" | "edit" | "move_path" | "delete"
     )
 }
 
@@ -2293,29 +2275,32 @@ fn handle_write_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
     }
 }
 
-fn handle_append_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+fn handle_edit_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let path = match arguments.get("path").and_then(|v| v.as_str()) {
         Some(v) => v,
         None => return tool_error_response(req, "Missing required parameter: path".into()),
     };
-    let content = match arguments.get("content").and_then(|v| v.as_str()) {
+    let old_string = match arguments.get("old_string").and_then(|v| v.as_str()) {
         Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: content".into()),
+        None => return tool_error_response(req, "Missing required parameter: old_string".into()),
     };
-    let create_dirs = arguments
-        .get("create_dirs")
+    let new_string = match arguments.get("new_string").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => return tool_error_response(req, "Missing required parameter: new_string".into()),
+    };
+    let replace_all = arguments
+        .get("replace_all")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    match workspace_tools::append_file(workspace_root, path, content, create_dirs) {
+    match workspace_tools::edit_file(workspace_root, path, old_string, new_string, replace_all) {
         Ok(text) => tool_success_response_with_structured(
             req,
             text,
             json!({
-                "toolName": "append_file",
+                "toolName": "edit",
                 "path": path,
-                "bytesAppended": content.len(),
-                "createDirs": create_dirs,
+                "replaceAll": replace_all,
             }),
         ),
         Err(e) => tool_error_response(req, e),
@@ -2414,38 +2399,6 @@ fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
     }
 }
 
-fn handle_replace_in_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
-    let arguments = tool_arguments(req);
-    let path = match arguments.get("path").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: path".into()),
-    };
-    let find = match arguments.get("find").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: find".into()),
-    };
-    let replace = match arguments.get("replace").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: replace".into()),
-    };
-    let replace_all = arguments
-        .get("all")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    match workspace_tools::replace_in_file(workspace_root, path, find, replace, replace_all) {
-        Ok(text) => tool_success_response_with_structured(
-            req,
-            text,
-            json!({
-                "toolName": "replace_in_file",
-                "path": path,
-                "replaceAll": replace_all,
-            }),
-        ),
-        Err(e) => tool_error_response(req, e),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2472,6 +2425,53 @@ mod tests {
                 "arguments": arguments,
             }),
         }
+    }
+
+    fn result_text(response: &JsonRpcResponse) -> &str {
+        response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|entry| entry.get("text"))
+            .and_then(Value::as_str)
+            .expect("missing result text")
+    }
+
+    #[tokio::test]
+    async fn multi_tools_list_exposes_edit_without_legacy_edit_tools() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+
+        let response = handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None).await;
+        let names = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "run_command",
+                "catdesk_instruction",
+                "read",
+                "search",
+                "write",
+                "edit",
+                "move_path",
+                "delete",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2525,6 +2525,124 @@ mod tests {
                 .and_then(|file| file.get("path"))
                 .and_then(Value::as_str),
             Some("notes.txt")
+        );
+
+        let _ = std::fs::remove_file(workspace_root.join("notes.txt"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn edit_file_replaces_unique_match_and_reports_changed_file() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-edit-file-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("notes.txt"), "alpha\nbeta\n").expect("write file");
+
+        let req = tool_call_request(
+            "edit",
+            json!({
+                "path": "notes.txt",
+                "old_string": "beta\n",
+                "new_string": "beta\ngamma\n",
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
+            "alpha\nbeta\ngamma\n"
+        );
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        assert_eq!(
+            structured.get("toolName").and_then(Value::as_str),
+            Some("edit")
+        );
+        assert_eq!(
+            structured.get("replaceAll").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let widget_payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        assert_eq!(
+            widget_payload.get("hasChanges").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            widget_payload
+                .get("changedFiles")
+                .and_then(Value::as_array)
+                .and_then(|files| files.first())
+                .and_then(|file| file.get("path"))
+                .and_then(Value::as_str),
+            Some("notes.txt")
+        );
+
+        let _ = std::fs::remove_file(workspace_root.join("notes.txt"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_multiple_matches_without_replace_all() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-edit-multi-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("notes.txt"), "same\nsame\n").expect("write file");
+
+        let req = tool_call_request(
+            "edit",
+            json!({
+                "path": "notes.txt",
+                "old_string": "same",
+                "new_string": "diff",
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            result_text(&response).contains("old_string matched 2 occurrences"),
+            "unexpected result text: {}",
+            result_text(&response)
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
+            "same\nsame\n"
         );
 
         let _ = std::fs::remove_file(workspace_root.join("notes.txt"));
