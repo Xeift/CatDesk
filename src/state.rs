@@ -26,9 +26,10 @@ pub struct FlowLane {
     pub flow_id: String,
     pub short_id: String,
     pub events: Vec<String>,
+    pub bootstrap_status_active: bool,
     pub bootstrap_completed_steps: usize,
     pub bootstrap_pending_steps: VecDeque<usize>,
-    pub bootstrap_modal_close_deadline_ms: Option<u128>,
+    pub bootstrap_status_close_deadline_ms: Option<u128>,
     pub anim_queue: VecDeque<FlowAnimSegment>,
     pub last_direction: FlowDirection,
     pub closing_started_ms: Option<u128>,
@@ -455,7 +456,7 @@ const FLOW_STEP_FIXED_MS: u64 =
     (FLOW_FORWARD_ANIMATION_DURATION_MS + FLOW_LINK_CELLS - 1) / FLOW_LINK_CELLS;
 const FLOW_TURN_TRANSITION_MS: u64 = 24;
 const FLOW_CLOSE_PRUNE_MULTIPLIER: u64 = 3;
-const FLOW_BOOTSTRAP_MODAL_CLOSE_DELAY_MS: u128 = 3_000;
+const FLOW_BOOTSTRAP_STATUS_CLOSE_DELAY_MS: u128 = 3_000;
 
 fn short_flow_id(flow_id: &str) -> String {
     flow_id[..flow_id.len().min(8)].to_string()
@@ -690,6 +691,21 @@ fn flow_bootstrap_steps_total() -> usize {
         .sum()
 }
 
+fn events_start_bootstrap_status(events: &[String]) -> bool {
+    events.iter().any(|event| event == "initialize")
+}
+
+fn is_bootstrap_status_event(event: &str) -> bool {
+    FLOW_BOOTSTRAP_PHASES
+        .iter()
+        .flat_map(|phase| phase.steps)
+        .any(|step| step.event == event)
+}
+
+fn events_are_bootstrap_status_events(events: &[String]) -> bool {
+    events.iter().all(|event| is_bootstrap_status_event(event))
+}
+
 fn advance_bootstrap_progress(
     completed_steps: &mut usize,
     pending_steps: &mut VecDeque<usize>,
@@ -887,9 +903,17 @@ impl AppState {
             .get(flow_id)
             .cloned()
             .unwrap_or_default();
+        let starts_bootstrap_status = events_start_bootstrap_status(events);
+        let only_bootstrap_status_events = events_are_bootstrap_status_events(events);
 
         if let Some(idx) = self.flows.iter().position(|flow| flow.flow_id == flow_id) {
             let mut flow = self.flows.remove(idx);
+            if starts_bootstrap_status {
+                flow.bootstrap_status_active = true;
+            } else if flow.bootstrap_status_active && !only_bootstrap_status_events {
+                flow.bootstrap_status_active = false;
+                flow.bootstrap_status_close_deadline_ms = None;
+            }
             flow.events.extend(events.iter().cloned());
             if flow.events.len() > 12 {
                 let drop_n = flow.events.len() - 12;
@@ -909,7 +933,7 @@ impl AppState {
                 .insert(flow_id.to_string(), bootstrap);
             flow.closing_started_ms = None;
             flow.closing_step_ms = 0;
-            flow.bootstrap_modal_close_deadline_ms = None;
+            flow.bootstrap_status_close_deadline_ms = None;
             flow.last_direction = direction;
             enqueue_flow_segment(&mut flow.anim_queue, direction, now_ms, step_ms);
             self.flows.insert(0, flow);
@@ -926,9 +950,10 @@ impl AppState {
                 flow_id: flow_id.to_string(),
                 short_id: short_flow_id(flow_id),
                 events: trimmed,
+                bootstrap_status_active: starts_bootstrap_status,
                 bootstrap_completed_steps: bootstrap.completed_steps,
                 bootstrap_pending_steps: bootstrap.pending_steps.clone(),
-                bootstrap_modal_close_deadline_ms: None,
+                bootstrap_status_close_deadline_ms: None,
                 anim_queue: VecDeque::new(),
                 last_direction: direction,
                 closing_started_ms: None,
@@ -962,7 +987,8 @@ impl AppState {
                     .map(|seg| seg.step_ms.max(1))
                     .unwrap_or_else(derive_flow_step_ms);
                 flow.anim_queue.clear();
-                flow.bootstrap_modal_close_deadline_ms = None;
+                flow.bootstrap_status_active = false;
+                flow.bootstrap_status_close_deadline_ms = None;
             }
         }
     }
@@ -973,19 +999,30 @@ impl AppState {
 
         for flow in &mut self.flows {
             prune_finished_segments(&mut flow.anim_queue, now_ms);
+            if !flow.bootstrap_status_active {
+                flow.bootstrap_status_close_deadline_ms = None;
+                continue;
+            }
             let bootstrap_complete = flow.bootstrap_completed_steps >= bootstrap_steps_total
                 && flow.bootstrap_pending_steps.is_empty();
             if flow.closing_started_ms.is_none() && bootstrap_complete {
                 if flow.anim_queue.is_empty() {
-                    if flow.bootstrap_modal_close_deadline_ms.is_none() {
-                        flow.bootstrap_modal_close_deadline_ms =
-                            Some(now_ms + FLOW_BOOTSTRAP_MODAL_CLOSE_DELAY_MS);
+                    match flow.bootstrap_status_close_deadline_ms {
+                        Some(deadline) if now_ms >= deadline => {
+                            flow.bootstrap_status_active = false;
+                            flow.bootstrap_status_close_deadline_ms = None;
+                        }
+                        Some(_) => {}
+                        None => {
+                            flow.bootstrap_status_close_deadline_ms =
+                                Some(now_ms + FLOW_BOOTSTRAP_STATUS_CLOSE_DELAY_MS);
+                        }
                     }
                 } else {
-                    flow.bootstrap_modal_close_deadline_ms = None;
+                    flow.bootstrap_status_close_deadline_ms = None;
                 }
             } else {
-                flow.bootstrap_modal_close_deadline_ms = None;
+                flow.bootstrap_status_close_deadline_ms = None;
             }
         }
         self.flows.retain(|flow| {
@@ -1007,6 +1044,23 @@ fn generate_mcp_slug() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app(name: &str) -> (AppState, PathBuf, PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("{name}-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+        let app = AppState::from_config_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        (app, workspace, config_path)
+    }
 
     #[test]
     fn app_state_loads_persisted_config_file() {
@@ -1236,5 +1290,111 @@ toolCallCount = 0
         assert!(queue[1].direction == FlowDirection::Backward);
         assert_eq!(queue[1].start_cells, 0);
         assert_eq!(queue[1].end_cells, FLOW_ANIM_CELLS);
+    }
+
+    #[test]
+    fn record_flow_tool_call_does_not_activate_bootstrap_status() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-tool-call");
+
+        app.record_flow(
+            "stateless",
+            &["tools/call:run_command".to_string()],
+            FlowDirection::Forward,
+        );
+
+        let flow = app.flows.first().expect("missing flow");
+        assert!(!flow.bootstrap_status_active);
+        assert_eq!(flow.bootstrap_completed_steps, 0);
+        assert!(flow.bootstrap_pending_steps.is_empty());
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn record_flow_initialize_activates_bootstrap_status() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-initialize");
+
+        app.record_flow(
+            "stateless",
+            &["initialize".to_string()],
+            FlowDirection::Forward,
+        );
+
+        let flow = app.flows.first().expect("missing flow");
+        assert!(flow.bootstrap_status_active);
+        assert_eq!(flow.bootstrap_completed_steps, 0);
+        assert_eq!(flow.bootstrap_pending_steps.front(), Some(&0));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn record_flow_bootstrap_event_keeps_bootstrap_status_active() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-event");
+
+        app.record_flow(
+            "stateless",
+            &["initialize".to_string()],
+            FlowDirection::Forward,
+        );
+        app.record_flow(
+            "stateless",
+            &["tools/list".to_string()],
+            FlowDirection::Forward,
+        );
+
+        let flow = app.flows.first().expect("missing flow");
+        assert!(flow.bootstrap_status_active);
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn record_flow_tool_call_after_initialize_deactivates_bootstrap_status() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-tool-after-initialize");
+
+        app.record_flow(
+            "stateless",
+            &["initialize".to_string()],
+            FlowDirection::Forward,
+        );
+        app.record_flow(
+            "stateless",
+            &["tools/call:catdesk_instruction".to_string()],
+            FlowDirection::Forward,
+        );
+
+        let flow = app.flows.first().expect("missing flow");
+        assert!(!flow.bootstrap_status_active);
+        assert!(flow.bootstrap_status_close_deadline_ms.is_none());
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn record_flow_tool_call_after_close_does_not_reactivate_bootstrap_status() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-after-close");
+
+        app.record_flow(
+            "stateless",
+            &["initialize".to_string()],
+            FlowDirection::Forward,
+        );
+        app.begin_flow_close("stateless");
+        app.record_flow(
+            "stateless",
+            &["tools/call:run_command".to_string()],
+            FlowDirection::Forward,
+        );
+
+        let flow = app.flows.first().expect("missing flow");
+        assert!(!flow.bootstrap_status_active);
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }

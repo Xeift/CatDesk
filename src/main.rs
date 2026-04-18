@@ -39,11 +39,10 @@ use tokio::sync::{
 };
 
 const FLOW_ROW_CELLS: usize = FLOW_ANIM_CELLS;
+const FLOW_LANE_LEFT_LABEL: &str = "Your computer ";
 const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
 const UI_POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const STATUS_PANEL_HEIGHT: u16 = TUI_MASCOT_BLOCK_HEIGHT + 6;
-const TUI_MODAL_BG: Color = Color::Rgb(34, 38, 47);
-const TUI_MODAL_FG: Color = Color::Rgb(232, 236, 242);
 
 // ── Selection ───────────────────────────────────────────────
 
@@ -161,6 +160,60 @@ fn debug_lane(direction: Option<FlowDirection>, lit_count: usize, cells: usize) 
         out.push(if lit_here { '#' } else { '-' });
     }
     out
+}
+
+fn flow_lane_spans(
+    active: bool,
+    flow: Option<&FlowLane>,
+    palette: &theme::Palette,
+    now_millis: u128,
+) -> Vec<Span<'static>> {
+    const CELLS: usize = FLOW_ROW_CELLS;
+    let unlit = Style::default().fg(palette.muted_fg);
+    let lit = Style::default()
+        .fg(palette.info_fg)
+        .add_modifier(Modifier::BOLD);
+
+    let direction = flow.map(|flow| flow_direction(Some(flow), now_millis));
+    let lit_count = if active {
+        flow_lit_count(flow, now_millis, CELLS)
+    } else {
+        0
+    };
+
+    if lit_count == 0 || direction.is_none() {
+        return vec![Span::styled("-".repeat(CELLS), unlit), Span::raw(" ")];
+    }
+
+    let direction = direction.unwrap_or(FlowDirection::Forward);
+    let mut spans = Vec::with_capacity(CELLS + 1);
+    for i in 0..CELLS {
+        let lit_here = match direction {
+            FlowDirection::Forward => i < lit_count,
+            FlowDirection::Backward => i >= CELLS.saturating_sub(lit_count),
+        };
+        let style = if lit_here { lit } else { unlit };
+        spans.push(Span::styled("-".to_string(), style));
+    }
+    spans.push(Span::raw(" "));
+    spans
+}
+
+fn trim_line(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    let kept = chars[..max_chars.saturating_sub(3)]
+        .iter()
+        .collect::<String>();
+    format!("{kept}...")
+}
+
+fn flow_call_offset(text: &str) -> String {
+    let text_width = text.chars().count();
+    let centered_in_lane = FLOW_ROW_CELLS.saturating_sub(text_width) / 2;
+    " ".repeat(FLOW_LANE_LEFT_LABEL.len() + centered_in_lane)
 }
 
 fn flow_phase(flow: &FlowLane, now_millis: u128) -> &'static str {
@@ -340,30 +393,31 @@ fn flow_bootstrap_complete(flow: &FlowLane) -> bool {
         && flow.bootstrap_pending_steps.is_empty()
 }
 
-fn flow_bootstrap_modal_visible(flow: &FlowLane, now_millis: u128) -> bool {
+fn flow_bootstrap_status_visible(flow: &FlowLane, now_millis: u128) -> bool {
     if !flow_bootstrap_complete(flow) {
         return true;
     }
     if current_anim_segment(flow, now_millis).is_some() {
         return true;
     }
-    flow.bootstrap_modal_close_deadline_ms
+    flow.bootstrap_status_close_deadline_ms
         .is_some_and(|deadline| now_millis < deadline)
 }
 
 fn flow_bootstrap_countdown_remaining_seconds(flow: &FlowLane, now_millis: u128) -> Option<u128> {
-    let deadline = flow.bootstrap_modal_close_deadline_ms?;
+    let deadline = flow.bootstrap_status_close_deadline_ms?;
     if now_millis >= deadline {
         return Some(0);
     }
     Some((deadline.saturating_sub(now_millis) + 999) / 1000)
 }
 
-fn active_bootstrap_modal_flow<'a>(app: &'a AppState, now_millis: u128) -> Option<&'a FlowLane> {
+fn active_bootstrap_status_flow<'a>(app: &'a AppState, now_millis: u128) -> Option<&'a FlowLane> {
     app.flows.iter().find(|flow| {
         should_display_flow_row(flow, app.remote_connected)
+            && flow.bootstrap_status_active
             && flow.closing_started_ms.is_none()
-            && flow_bootstrap_modal_visible(flow, now_millis)
+            && flow_bootstrap_status_visible(flow, now_millis)
     })
 }
 
@@ -386,35 +440,12 @@ fn should_show_connect_guide(app: &AppState, now_millis: u128) -> bool {
         && !within_connect_grace
 }
 
-fn draw_flow_bootstrap_modal(
-    f: &mut Frame,
-    area: Rect,
-    palette: &theme::Palette,
+fn flow_bootstrap_status_lines(
+    app: &AppState,
     flow: &FlowLane,
+    palette: &theme::Palette,
     now_millis: u128,
-) {
-    let modal_area = centered_rect(78, 12, area);
-    f.render_widget(Clear, modal_area);
-
-    let modal_block = Block::default()
-        .title(" MCP bootstrap ")
-        .borders(Borders::ALL)
-        .border_type(palette.border_type)
-        .border_style(Style::default().fg(palette.border_fg))
-        .style(Style::default().bg(TUI_MODAL_BG));
-    let modal_inner = modal_block.inner(modal_area);
-    f.render_widget(modal_block, modal_area);
-
-    let modal_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(FLOW_BOOTSTRAP_PHASES.len() as u16),
-            Constraint::Length(1),
-        ])
-        .split(modal_inner);
-
-    let phase_label = flow_phase(flow, now_millis);
+) -> Vec<Line<'static>> {
     let action_label = latest_flow_action(flow);
     let bootstrap_complete = flow_bootstrap_complete(flow);
     let header_title = if bootstrap_complete {
@@ -422,32 +453,60 @@ fn draw_flow_bootstrap_modal(
     } else {
         "Initialize connector in progress"
     };
-    let header = Paragraph::new(vec![
+    let call_text = trim_line(&format!("call {action_label}"), FLOW_ROW_CELLS);
+    let call_offset = flow_call_offset(&call_text);
+
+    let mut lines = vec![
         Line::from(Span::styled(
-            header_title,
+            format!("  {header_title}"),
             Style::default()
                 .fg(palette.title_fg)
-                .bg(TUI_MODAL_BG)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            format!("phase: {phase_label}  latest: {action_label}"),
-            Style::default().fg(TUI_MODAL_FG).bg(TUI_MODAL_BG),
-        )),
-    ])
-    .style(Style::default().bg(TUI_MODAL_BG));
-    f.render_widget(header, modal_chunks[0]);
-
-    let phase_lines = flow_phase_lines(
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ", Style::default().fg(palette.muted_fg)),
+            Span::styled(call_offset, Style::default().fg(palette.muted_fg)),
+            Span::styled(
+                call_text,
+                Style::default()
+                    .fg(palette.info_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from({
+            let computer_role_style = Style::default()
+                .fg(if app.server_running {
+                    palette.success_fg
+                } else {
+                    palette.muted_fg
+                })
+                .add_modifier(Modifier::BOLD);
+            let chatgpt_role_style = Style::default()
+                .fg(if app.remote_connected {
+                    palette.success_fg
+                } else {
+                    palette.muted_fg
+                })
+                .add_modifier(Modifier::BOLD);
+            let mut row = vec![Span::styled(
+                format!("  {FLOW_LANE_LEFT_LABEL}"),
+                computer_role_style,
+            )];
+            row.extend(flow_lane_spans(true, Some(flow), palette, now_millis));
+            row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
+            row
+        }),
+        Line::from(""),
+    ];
+    lines.extend(flow_phase_lines(
         Some(flow),
         palette,
         Style::default()
             .fg(palette.info_fg)
-            .bg(TUI_MODAL_BG)
             .add_modifier(Modifier::BOLD),
-    );
-    let phase_widget = Paragraph::new(phase_lines).style(Style::default().bg(TUI_MODAL_BG));
-    f.render_widget(phase_widget, modal_chunks[1]);
+    ));
+    lines.push(Line::from(""));
 
     let footer_text = if bootstrap_complete && current_anim_segment(flow, now_millis).is_none() {
         match flow_bootstrap_countdown_remaining_seconds(flow, now_millis) {
@@ -458,11 +517,11 @@ fn draw_flow_bootstrap_modal(
     } else {
         "Auto closes after initialize is completed.".to_string()
     };
-    let footer = Paragraph::new(Span::styled(
-        footer_text,
-        Style::default().fg(palette.muted_fg).bg(TUI_MODAL_BG),
-    ));
-    f.render_widget(footer, modal_chunks[2]);
+    lines.push(Line::from(Span::styled(
+        format!("  {footer_text}"),
+        Style::default().fg(palette.muted_fg),
+    )));
+    lines
 }
 
 fn build_animation_snapshot(app: &AppState) -> Vec<String> {
@@ -2446,7 +2505,7 @@ fn draw_ui(
         .count() as u16;
     let show_guide = should_show_connect_guide(app, now_millis);
     let show_flow_panel = !show_guide;
-    let bootstrap_modal_flow = active_bootstrap_modal_flow(app, now_millis);
+    let bootstrap_status_flow = active_bootstrap_status_flow(app, now_millis);
     let logs_min_height = if show_guide { 3 } else { 5 };
     let max_status_height = area.height.saturating_sub(6 + logs_min_height).max(17);
     // Keep the main panel deterministic: mascot size must not drive layout.
@@ -2517,16 +2576,6 @@ fn draw_ui(
                 .unwrap_or_else(|| "launch new browser instance".into())
         })
         .unwrap_or_else(|| "--".into());
-    let trim_line = |text: &str, max_chars: usize| -> String {
-        let chars: Vec<char> = text.chars().collect();
-        if chars.len() <= max_chars {
-            return text.to_string();
-        }
-        let kept = chars[..max_chars.saturating_sub(3)]
-            .iter()
-            .collect::<String>();
-        format!("{kept}...")
-    };
     let computer_role_style = Style::default()
         .fg(if app.server_running {
             palette.success_fg
@@ -2544,43 +2593,8 @@ fn draw_ui(
     let flow_meta_style = Style::default()
         .fg(palette.info_fg)
         .add_modifier(Modifier::BOLD);
-    let lane_left_padding = "Your computer ".len();
-    let call_offset_for = |text: &str| -> String {
-        let text_width = text.chars().count();
-        let centered_in_lane = FLOW_ROW_CELLS.saturating_sub(text_width) / 2;
-        " ".repeat(lane_left_padding + centered_in_lane)
-    };
     let lane_for = |active: bool, flow: Option<&FlowLane>| -> Vec<Span<'static>> {
-        const CELLS: usize = FLOW_ROW_CELLS;
-        let unlit = Style::default().fg(palette.muted_fg);
-        let lit = Style::default()
-            .fg(palette.info_fg)
-            .add_modifier(Modifier::BOLD);
-
-        let direction = flow.map(|flow| flow_direction(Some(flow), now_millis));
-        let lit_count = if active {
-            flow_lit_count(flow, now_millis, CELLS)
-        } else {
-            0
-        };
-
-        if lit_count == 0 || direction.is_none() {
-            return vec![Span::styled("-".repeat(CELLS), unlit), Span::raw(" ")];
-        }
-
-        let direction = direction.unwrap_or(FlowDirection::Forward);
-
-        let mut spans = Vec::with_capacity(CELLS + 1);
-        for i in 0..CELLS {
-            let lit_here = match direction {
-                FlowDirection::Forward => i < lit_count,
-                FlowDirection::Backward => i >= CELLS.saturating_sub(lit_count),
-            };
-            let style = if lit_here { lit } else { unlit };
-            spans.push(Span::styled("-".to_string(), style));
-        }
-        spans.push(Span::raw(" "));
-        spans
+        flow_lane_spans(active, flow, &palette, now_millis)
     };
     let request_stats_for = |app: &AppState| -> Vec<Span<'static>> {
         vec![
@@ -2795,7 +2809,7 @@ fn draw_ui(
             } else {
                 "flow closed"
             };
-            let call_offset = call_offset_for(call_text);
+            let call_offset = flow_call_offset(call_text);
             status_lines.push(Line::from(vec![
                 Span::styled("    ", Style::default().fg(palette.muted_fg)),
                 Span::styled(call_offset, Style::default().fg(palette.muted_fg)),
@@ -2804,7 +2818,7 @@ fn draw_ui(
             let lane = lane_for(false, None);
             let mut row = vec![
                 Span::styled("    ", Style::default().fg(palette.muted_fg)),
-                Span::styled("Your computer ", computer_role_style),
+                Span::styled(FLOW_LANE_LEFT_LABEL, computer_role_style),
             ];
             row.extend(lane);
             row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
@@ -2820,7 +2834,7 @@ fn draw_ui(
             {
                 let latest_action = latest_flow_action(flow);
                 let call_text = trim_line(&format!("call {latest_action}"), FLOW_ROW_CELLS);
-                let call_offset = call_offset_for(&call_text);
+                let call_offset = flow_call_offset(&call_text);
                 status_lines.push(Line::from(vec![
                     Span::styled("    ", Style::default().fg(palette.muted_fg)),
                     Span::styled(call_offset, Style::default().fg(palette.muted_fg)),
@@ -2833,7 +2847,7 @@ fn draw_ui(
                 let lane = lane_for(lane_active, Some(flow));
                 let mut row = vec![
                     Span::styled("    ", Style::default().fg(palette.muted_fg)),
-                    Span::styled("Your computer ", computer_role_style),
+                    Span::styled(FLOW_LANE_LEFT_LABEL, computer_role_style),
                 ];
                 row.extend(lane);
                 row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
@@ -2844,92 +2858,81 @@ fn draw_ui(
         }
     }
 
+    if let Some(flow) = bootstrap_status_flow {
+        status_lines = flow_bootstrap_status_lines(app, flow, &palette, now_millis);
+    }
+
+    let guide_step_style = Style::default()
+        .fg(palette.title_fg)
+        .add_modifier(Modifier::BOLD);
+    let guide_text_style = Style::default().fg(palette.primary_fg);
+    let guide_detail_style = Style::default().fg(palette.secondary_fg);
+    let guide_strong_style = Style::default()
+        .fg(palette.primary_fg)
+        .add_modifier(Modifier::BOLD);
+    let guide_separator_style = Style::default().fg(palette.muted_fg);
+    let guide_link_style = Style::default()
+        .fg(palette.primary_fg)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     let guide_lines = if show_guide {
         vec![
             Line::from(vec![
-                Span::styled(
-                    "1. ",
-                    Style::default()
-                        .fg(palette.title_fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Open connector settings:",
-                    Style::default().fg(palette.primary_fg),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("   ", Style::default().fg(palette.primary_fg)),
+                Span::styled("  1. ", guide_step_style),
+                Span::styled("Open connector settings:", guide_text_style),
+                Span::styled(" ", guide_text_style),
                 Span::styled(
                     "https://chatgpt.com/apps#settings/Connectors",
-                    Style::default()
-                        .fg(palette.primary_fg)
-                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    guide_link_style,
                 ),
             ]),
+            Line::from(""),
             Line::from(vec![
-                Span::styled(
-                    "2. ",
-                    Style::default()
-                        .fg(palette.title_fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("Click ", Style::default().fg(palette.primary_fg)),
-                Span::styled(
-                    "Create app",
-                    Style::default()
-                        .fg(palette.primary_fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("  2. ", guide_step_style),
+                Span::styled("Click ", guide_text_style),
+                Span::styled("Create app", guide_strong_style),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  3. ", guide_step_style),
+                Span::styled("Fill in the form:", guide_text_style),
             ]),
             Line::from(vec![
-                Span::styled(
-                    "3. ",
-                    Style::default()
-                        .fg(palette.title_fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("Fill in the form:", Style::default().fg(palette.primary_fg)),
-            ]),
-            Line::from(vec![Span::styled(
-                "   Name: CatDesk (or any name you like)",
-                Style::default().fg(palette.secondary_fg),
-            )]),
-            Line::from(vec![Span::styled(
-                format!("   MCP Server URL: {mcp_url}"),
-                Style::default()
-                    .fg(palette.info_fg)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(vec![Span::styled(
-                "   Authentication: None",
-                Style::default().fg(palette.secondary_fg),
-            )]),
-            Line::from(vec![
-                Span::styled(
-                    "4. ",
-                    Style::default()
-                        .fg(palette.title_fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Click \"I understand and want to continue\"",
-                    Style::default().fg(palette.primary_fg),
-                ),
+                Span::styled("     Name          ", guide_detail_style),
+                Span::styled("│", guide_separator_style),
+                Span::styled(" ", guide_text_style),
+                Span::styled("CatDesk", guide_strong_style),
             ]),
             Line::from(vec![
-                Span::styled(
-                    "5. ",
-                    Style::default()
-                        .fg(palette.title_fg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("Click Create", Style::default().fg(palette.primary_fg)),
+                Span::styled("     MCP Server URL", guide_detail_style),
+                Span::styled("│", guide_separator_style),
+                Span::styled(" ", guide_text_style),
+                Span::styled(mcp_url.clone(), guide_strong_style),
+            ]),
+            Line::from(vec![
+                Span::styled("     Authentication", guide_detail_style),
+                Span::styled("│", guide_separator_style),
+                Span::styled(" ", guide_text_style),
+                Span::styled("None", guide_strong_style),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  4. ", guide_step_style),
+                Span::styled("Click ", guide_text_style),
+                Span::styled("I understand and want to continue", guide_strong_style),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  5. ", guide_step_style),
+                Span::styled("Click ", guide_text_style),
+                Span::styled("Create", guide_strong_style),
             ]),
         ]
     } else {
         Vec::new()
     };
+    if show_guide {
+        status_lines = guide_lines;
+    }
 
     let status_columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -2938,8 +2941,15 @@ fn draw_ui(
             Constraint::Length(TUI_MASCOT_BLOCK_WIDTH),
         ])
         .split(chunks[1]);
+    let status_title = if show_guide {
+        " What to do next? "
+    } else if bootstrap_status_flow.is_some() {
+        " MCP bootstrap "
+    } else {
+        " Status "
+    };
     let status_block = Block::default()
-        .title(" Status ")
+        .title(status_title)
         .borders(Borders::ALL)
         .border_type(palette.border_type)
         .border_style(Style::default().fg(palette.border_fg));
@@ -2959,8 +2969,12 @@ fn draw_ui(
     .alignment(Alignment::Center);
     f.render_widget(mascot, mascot_inner);
 
+    let status_content = status_inner.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
     let status = Paragraph::new(status_lines);
-    f.render_widget(status, status_inner);
+    f.render_widget(status, status_content);
 
     // ── Keys ──
     let key_spans = vec![
@@ -3025,28 +3039,6 @@ fn draw_ui(
             .border_style(Style::default().fg(palette.border_fg)),
     );
     f.render_widget(logs, chunks[3]);
-
-    if show_guide {
-        let modal_height = (guide_lines.len() as u16 + 2).max(10);
-        let modal_area = centered_rect(82, modal_height, area);
-        f.render_widget(Clear, modal_area);
-        let guide_panel = Paragraph::new(guide_lines)
-            .style(Style::default().fg(TUI_MODAL_FG).bg(TUI_MODAL_BG))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(" What to do next? ")
-                    .borders(Borders::ALL)
-                    .border_type(palette.border_type)
-                    .border_style(Style::default().fg(palette.border_fg))
-                    .style(Style::default().bg(TUI_MODAL_BG)),
-            );
-        f.render_widget(guide_panel, modal_area);
-    }
-
-    if let Some(flow) = bootstrap_modal_flow {
-        draw_flow_bootstrap_modal(f, area, &palette, flow, now_millis);
-    }
 
     // ── Floating toast (top-most layer) ──
     if let Some((msg, (col, row))) = toast {
