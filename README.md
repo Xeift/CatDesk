@@ -127,7 +127,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 # Tools
 
-CatDesk has two local tool modes: `multi-tools` exposes 8 tools, and `read-only` exposes 3 tools.
+CatDesk has two local tool modes: `multi-tools` exposes 7 tools, and `read-only` exposes 3 tools.
 
 CatDesk's local tools in `multi-tools` mode are:
 
@@ -138,7 +138,6 @@ CatDesk's local tools in `multi-tools` mode are:
 | `search`              | Read  | Searches text across files in the workspace                             |
 | `write`               | Write | Creates or overwrites a file                                            |
 | `edit`                | Write | Replaces exact text inside a file                                       |
-| `move_path`           | Write | Moves or renames a file or directory                                    |
 | `delete`              | Write | Deletes a file or directory                                             |
 | `run_command`         | Shell | Runs a shell command inside the workspace.                              |
 

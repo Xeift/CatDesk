@@ -30,6 +30,13 @@ pub struct InterceptedListFilesRequest {
     pub filter: FileListingFilter,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterceptedMovePathRequest {
+    pub from: String,
+    pub to: String,
+    pub overwrite: bool,
+}
+
 /// Clamp timeout to [1, MAX_TIMEOUT_MS].
 pub fn clamp_timeout(t: Option<u64>) -> u64 {
     match t {
@@ -94,6 +101,11 @@ pub fn resolve_command_path(
 pub fn detect_list_files_intercept(command: &str) -> Option<InterceptedListFilesRequest> {
     let words = parse_word_only_shell_command(command)?;
     detect_list_files_intercept_from_words(&words)
+}
+
+pub fn detect_move_path_intercept(command: &str) -> Option<InterceptedMovePathRequest> {
+    let words = parse_word_only_shell_command(command)?;
+    detect_move_path_intercept_from_words(&words)
 }
 
 /// Execute a shell command via `/bin/bash`.
@@ -237,6 +249,21 @@ fn detect_list_files_intercept_from_words(words: &[String]) -> Option<Intercepte
         "tree" => parse_tree_list_files_args(&words[command_idx + 1..]),
         "ls" => parse_ls_list_files_args(&words[command_idx + 1..]),
         "rg" => parse_rg_list_files_args(&words[command_idx + 1..]),
+        _ => None,
+    }
+}
+
+fn detect_move_path_intercept_from_words(words: &[String]) -> Option<InterceptedMovePathRequest> {
+    let command_idx = command_start_word_index(words)?;
+    let command = words.get(command_idx)?;
+    if is_shell_command(command) {
+        let nested_idx = shell_command_arg_word_index(words, command_idx)?;
+        let nested_command = words.get(nested_idx)?;
+        return detect_move_path_intercept(nested_command);
+    }
+
+    match command_basename(command).as_str() {
+        "mv" => parse_mv_move_path_args(&words[command_idx + 1..]),
         _ => None,
     }
 }
@@ -420,6 +447,50 @@ fn parse_rg_list_files_args(args: &[String]) -> Option<InterceptedListFilesReque
         include_hidden,
         filter: FileListingFilter::FilesOnly,
     })
+}
+
+fn parse_mv_move_path_args(args: &[String]) -> Option<InterceptedMovePathRequest> {
+    let mut operands: Vec<String> = Vec::new();
+    let mut overwrite = true;
+    let mut parse_options = true;
+
+    for arg in args {
+        if parse_options && arg == "--" {
+            parse_options = false;
+            continue;
+        }
+
+        if parse_options && arg.starts_with("--") {
+            match arg.as_str() {
+                "--force" => overwrite = true,
+                "--no-clobber" => overwrite = false,
+                _ => return None,
+            }
+            continue;
+        }
+
+        if parse_options && arg.starts_with('-') && arg != "-" {
+            for ch in arg[1..].chars() {
+                match ch {
+                    'f' => overwrite = true,
+                    'n' => overwrite = false,
+                    _ => return None,
+                }
+            }
+            continue;
+        }
+
+        operands.push(arg.clone());
+    }
+
+    match operands.as_slice() {
+        [from, to] => Some(InterceptedMovePathRequest {
+            from: from.clone(),
+            to: to.clone(),
+            overwrite,
+        }),
+        _ => None,
+    }
 }
 
 fn is_find_expression_token(word: &str) -> bool {
@@ -908,5 +979,35 @@ mod tests {
     #[test]
     fn detect_list_files_intercept_rejects_complex_find_expression() {
         assert_eq!(detect_list_files_intercept("find . -name '*.rs'"), None);
+    }
+
+    #[test]
+    fn detect_move_path_intercept_for_plain_mv_command() {
+        assert_eq!(
+            detect_move_path_intercept("mv src/old.txt src/new.txt"),
+            Some(InterceptedMovePathRequest {
+                from: "src/old.txt".into(),
+                to: "src/new.txt".into(),
+                overwrite: true,
+            })
+        );
+    }
+
+    #[test]
+    fn detect_move_path_intercept_for_nested_no_clobber_mv_command() {
+        assert_eq!(
+            detect_move_path_intercept("bash -lc 'mv -n src/old.txt src/new.txt'"),
+            Some(InterceptedMovePathRequest {
+                from: "src/old.txt".into(),
+                to: "src/new.txt".into(),
+                overwrite: false,
+            })
+        );
+    }
+
+    #[test]
+    fn detect_move_path_intercept_rejects_multi_source_or_unsupported_flags() {
+        assert_eq!(detect_move_path_intercept("mv a b c"), None);
+        assert_eq!(detect_move_path_intercept("mv -r a b"), None);
     }
 }

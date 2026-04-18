@@ -373,22 +373,6 @@ async fn handle_tools_list(
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
             tools.push(json!({
-                "name": "move_path",
-                "title": "Move path",
-                "description": "Move or rename file/directory inside workspace.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "from": { "type": "string" },
-                        "to": { "type": "string" },
-                        "overwrite": { "type": "boolean", "description": "Overwrite destination if it exists" },
-                        "create_dirs": { "type": "boolean", "description": "Create destination parent directories if missing" }
-                    },
-                    "required": ["from", "to"]
-                },
-                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
-            }));
-            tools.push(json!({
                 "name": "delete",
                 "title": "Delete path",
                 "description": "Delete file or directory in workspace.",
@@ -473,7 +457,6 @@ async fn handle_tools_call(
                             match tool_name.as_str() {
                                 "write" => handle_write_file(req, workspace_root),
                                 "edit" => handle_edit_file(req, workspace_root),
-                                "move_path" => handle_move_path(req, workspace_root),
                                 "delete" => handle_delete_path(req, workspace_root),
                                 _ => {
                                     if mode.browser_enabled() {
@@ -666,6 +649,16 @@ async fn handle_run_command(
         }
     }
 
+    if let Some(intercept) = command::detect_move_path_intercept(&effective_command) {
+        return handle_run_command_move_path_intercept(
+            req,
+            workspace_root,
+            &effective_command,
+            &cwd,
+            &intercept,
+        );
+    }
+
     let result = command::run_command(&effective_command, &cwd, effective_timeout).await;
     let output = command::format_result(&result);
     let structured = json!({
@@ -682,6 +675,155 @@ async fn handle_run_command(
     } else {
         tool_error_response_with_structured(req, output, structured)
     }
+}
+
+struct ResolvedMovePathIntercept {
+    from: PathBuf,
+    to: PathBuf,
+    destination_operand: PathBuf,
+    destination_operand_was_dir: bool,
+}
+
+fn resolve_intercepted_move_path(
+    workspace_root: &str,
+    cwd: &Path,
+    intercept: &command::InterceptedMovePathRequest,
+) -> Result<ResolvedMovePathIntercept, String> {
+    let from = command::resolve_command_path(workspace_root, cwd, Some(&intercept.from))
+        .map_err(|e| format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {e}"))?;
+    let destination_operand =
+        command::resolve_command_path(workspace_root, cwd, Some(&intercept.to))
+            .map_err(|e| format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {e}"))?;
+
+    let source_meta = std::fs::symlink_metadata(&from)
+        .map_err(|_| format!("Source path not found: {}", from.display()))?;
+    let destination_operand_was_dir = std::fs::symlink_metadata(&destination_operand)
+        .map(|meta| meta.file_type().is_dir())
+        .unwrap_or(false);
+    let to = if destination_operand_was_dir {
+        let file_name = from
+            .file_name()
+            .ok_or_else(|| format!("Source path has no file name: {}", from.display()))?;
+        destination_operand.join(file_name)
+    } else {
+        destination_operand.clone()
+    };
+
+    if intercept.overwrite && from != to {
+        if let Ok(destination_meta) = std::fs::symlink_metadata(&to) {
+            if source_meta.file_type().is_dir() || destination_meta.file_type().is_dir() {
+                return Err(format!(
+                    "mv intercept refuses to overwrite existing directories: {}",
+                    to.display()
+                ));
+            }
+        }
+    }
+
+    Ok(ResolvedMovePathIntercept {
+        from,
+        to,
+        destination_operand,
+        destination_operand_was_dir,
+    })
+}
+
+fn handle_run_command_move_path_intercept(
+    req: &JsonRpcRequest,
+    workspace_root: &str,
+    command_text: &str,
+    cwd: &Path,
+    intercept: &command::InterceptedMovePathRequest,
+) -> JsonRpcResponse {
+    let resolved = match resolve_intercepted_move_path(workspace_root, cwd, intercept) {
+        Ok(resolved) => resolved,
+        Err(error) => return tool_error_response(req, error),
+    };
+
+    if !intercept.overwrite && resolved.to.exists() {
+        let output = format!(
+            "skipped move because destination exists: {}",
+            resolved.to.display()
+        );
+        let structured = build_run_command_move_path_structured(
+            workspace_root,
+            command_text,
+            cwd,
+            intercept,
+            &resolved,
+            &output,
+            "",
+            true,
+            true,
+        );
+        return tool_success_response_with_structured(req, output, structured);
+    }
+
+    let from = resolved.from.to_string_lossy().to_string();
+    let to = resolved.to.to_string_lossy().to_string();
+    match workspace_tools::move_path(workspace_root, &from, &to, intercept.overwrite, false) {
+        Ok(output) => {
+            let structured = build_run_command_move_path_structured(
+                workspace_root,
+                command_text,
+                cwd,
+                intercept,
+                &resolved,
+                &output,
+                "",
+                true,
+                false,
+            );
+            tool_success_response_with_structured(req, output, structured)
+        }
+        Err(error) => {
+            let structured = build_run_command_move_path_structured(
+                workspace_root,
+                command_text,
+                cwd,
+                intercept,
+                &resolved,
+                "",
+                &error,
+                false,
+                false,
+            );
+            tool_error_response_with_structured(req, error, structured)
+        }
+    }
+}
+
+fn build_run_command_move_path_structured(
+    workspace_root: &str,
+    command_text: &str,
+    cwd: &Path,
+    intercept: &command::InterceptedMovePathRequest,
+    resolved: &ResolvedMovePathIntercept,
+    stdout: &str,
+    stderr: &str,
+    success: bool,
+    skipped: bool,
+) -> Value {
+    let root = Path::new(workspace_root)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(workspace_root));
+    json!({
+        "toolName": "run_command",
+        "interceptedToolName": "move_path",
+        "command": command_text,
+        "cwd": cwd.to_string_lossy().to_string(),
+        "stdout": stdout,
+        "stderr": stderr,
+        "success": success,
+        "from": intercept.from.as_str(),
+        "to": intercept.to.as_str(),
+        "resolvedFrom": to_relative(&root, &resolved.from),
+        "resolvedTo": to_relative(&root, &resolved.to),
+        "destinationOperand": to_relative(&root, &resolved.destination_operand),
+        "destinationOperandWasDirectory": resolved.destination_operand_was_dir,
+        "overwrite": intercept.overwrite,
+        "skipped": skipped,
+    })
 }
 
 fn build_run_command_listing_structured(
@@ -957,7 +1099,7 @@ Always specify the branch explicitly when using `git push`."#
         }
         if tool_mode.write_tools_enabled() {
             lines.push(
-                "Use write with create_dirs=true to create files in new directories. Use edit for targeted exact string replacements, including append-like changes by replacing the current file ending. Use move_path and delete for other filesystem changes."
+                "Use write with create_dirs=true to create files in new directories. Use edit for targeted exact string replacements, including append-like changes by replacing the current file ending. Use plain mv commands for moves and renames. Use delete for other filesystem changes."
                     .to_string(),
             );
         }
@@ -1227,14 +1369,7 @@ fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
 fn tool_descriptor_should_attach_widget(name: &str) -> bool {
     matches!(
         name,
-        "run_command"
-            | "catdesk_instruction"
-            | "search"
-            | "read"
-            | "write"
-            | "edit"
-            | "move_path"
-            | "delete"
+        "run_command" | "catdesk_instruction" | "search" | "read" | "write" | "edit" | "delete"
     )
 }
 
@@ -1699,25 +1834,32 @@ fn collect_watch_targets(req: &JsonRpcRequest, workspace_root: &str) -> Vec<Watc
         "delete" => {
             add_target(arguments.get("path").and_then(Value::as_str), true);
         }
-        "move_path" => {
-            add_target(arguments.get("from").and_then(Value::as_str), true);
-            add_target(arguments.get("to").and_then(Value::as_str), true);
-        }
         "run_command" => {
-            if command::detect_list_files_intercept(
-                arguments
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-            )
-            .is_none()
-            {
-                if let Ok(cwd) = command::resolve_workspace_path(
+            let command_text = arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if command::detect_list_files_intercept(command_text).is_none() {
+                if let Some(intercept) = command::detect_move_path_intercept(command_text) {
+                    if let Ok(cwd) = command::resolve_workspace_path(
+                        workspace_root,
+                        arguments.get("cwd").and_then(Value::as_str),
+                    ) {
+                        if let Ok(resolved) =
+                            resolve_intercepted_move_path(workspace_root, &cwd, &intercept)
+                        {
+                            let from = resolved.from.to_string_lossy().to_string();
+                            let to = resolved.to.to_string_lossy().to_string();
+                            add_target(Some(&from), true);
+                            add_target(Some(&to), true);
+                        }
+                    }
+                } else if let Ok(cwd) = command::resolve_workspace_path(
                     workspace_root,
                     arguments.get("cwd").and_then(Value::as_str),
                 ) {
-                    let entry = dedup.entry(cwd).or_insert(false);
-                    *entry = true;
+                    let cwd = cwd.to_string_lossy().to_string();
+                    add_target(Some(&cwd), true);
                 }
             }
         }
@@ -2164,10 +2306,7 @@ fn diff_changed_files(before: &WatchedSnapshot, after: &WatchedSnapshot) -> Vec<
 }
 
 fn is_local_destructive_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "run_command" | "write" | "edit" | "move_path" | "delete"
-    )
+    matches!(tool_name, "run_command" | "write" | "edit" | "delete")
 }
 
 fn tool_is_read_only(tool: &Value) -> bool {
@@ -2322,40 +2461,6 @@ fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
     }
 }
 
-fn handle_move_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
-    let arguments = tool_arguments(req);
-    let from = match arguments.get("from").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: from".into()),
-    };
-    let to = match arguments.get("to").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: to".into()),
-    };
-    let overwrite = arguments
-        .get("overwrite")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let create_dirs = arguments
-        .get("create_dirs")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    match workspace_tools::move_path(workspace_root, from, to, overwrite, create_dirs) {
-        Ok(text) => tool_success_response_with_structured(
-            req,
-            text,
-            json!({
-                "toolName": "move_path",
-                "from": from,
-                "to": to,
-                "overwrite": overwrite,
-                "createDirs": create_dirs,
-            }),
-        ),
-        Err(e) => tool_error_response(req, e),
-    }
-}
-
 fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let path = match arguments.get("path").and_then(|v| v.as_str()) {
@@ -2421,7 +2526,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_tools_list_exposes_edit_without_legacy_edit_tools() {
+    async fn multi_tools_list_exposes_run_command_mv_without_move_path_tool() {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: Some(json!("req-tools-list")),
@@ -2449,7 +2554,6 @@ mod tests {
                 "search",
                 "write",
                 "edit",
-                "move_path",
                 "delete",
             ]
         );
@@ -2718,6 +2822,155 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(workspace_root.join("src/lib.rs"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_command_mv_intercept_moves_into_directory_and_reports_changed_files() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-run-command-mv-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(workspace_root.join("dest")).expect("create workspace");
+        std::fs::write(workspace_root.join("old.txt"), "hello\n").expect("write file");
+
+        let req = tool_call_request(
+            "run_command",
+            json!({
+                "command": "mv old.txt dest",
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert!(!workspace_root.join("old.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("dest/old.txt")).expect("read moved file"),
+            "hello\n"
+        );
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        assert_eq!(
+            structured
+                .get("interceptedToolName")
+                .and_then(Value::as_str),
+            Some("move_path")
+        );
+        assert_eq!(
+            structured.get("success").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            structured
+                .get("destinationOperandWasDirectory")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            structured.get("resolvedTo").and_then(Value::as_str),
+            Some("dest/old.txt")
+        );
+
+        let widget_payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        assert_eq!(
+            widget_payload.get("hasChanges").and_then(Value::as_bool),
+            Some(true)
+        );
+        let changed_paths = widget_payload
+            .get("changedFiles")
+            .and_then(Value::as_array)
+            .expect("missing changed files")
+            .iter()
+            .filter_map(|file| file.get("path").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(changed_paths.contains(&"old.txt"));
+        assert!(changed_paths.contains(&"dest/old.txt"));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_command_mv_intercept_no_clobber_skips_existing_destination() {
+        let workspace_root = std::env::temp_dir().join(format!(
+            "catdesk-mcp-run-command-mv-no-clobber-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("old.txt"), "old\n").expect("write source");
+        std::fs::write(workspace_root.join("new.txt"), "new\n").expect("write destination");
+
+        let req = tool_call_request(
+            "run_command",
+            json!({
+                "command": "mv -n old.txt new.txt",
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("old.txt")).expect("read source"),
+            "old\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("new.txt")).expect("read destination"),
+            "new\n"
+        );
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        assert_eq!(
+            structured
+                .get("interceptedToolName")
+                .and_then(Value::as_str),
+            Some("move_path")
+        );
+        assert_eq!(
+            structured.get("overwrite").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            structured.get("skipped").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let widget_payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        assert_eq!(
+            widget_payload.get("hasChanges").and_then(Value::as_bool),
+            Some(false)
+        );
+
         let _ = std::fs::remove_dir_all(workspace_root);
     }
 
