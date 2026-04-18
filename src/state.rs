@@ -20,10 +20,10 @@ pub struct LogEntry {
     pub message: String,
 }
 
-/// Per-session MCP request flow rendered as a single timeline line.
+/// MCP request flow rendered as a single timeline line.
 #[derive(Clone)]
-pub struct SessionFlow {
-    pub session_id: String,
+pub struct FlowLane {
+    pub flow_id: String,
     pub short_id: String,
     pub events: Vec<String>,
     pub bootstrap_completed_steps: usize,
@@ -35,7 +35,7 @@ pub struct SessionFlow {
 }
 
 #[derive(Clone, Default)]
-pub struct SessionBootstrapProgress {
+pub struct FlowBootstrapProgress {
     pub completed_steps: usize,
     pub pending_steps: VecDeque<usize>,
 }
@@ -169,7 +169,7 @@ impl AppConfig {
     }
 }
 
-/// Direction for session flow animation.
+/// Direction for flow animation.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FlowDirection {
     Forward,  // request: Your computer -> ChatGPT Web
@@ -179,14 +179,13 @@ pub enum FlowDirection {
 pub enum ServerUiEvent {
     IncrementRequestCount,
     SetRemoteConnected(bool),
-    SetSessionCount(usize),
-    RecordSessionFlow {
-        sid: String,
+    RecordFlow {
+        flow_id: String,
         events: Vec<String>,
         direction: FlowDirection,
     },
-    BeginSessionFlowClose {
-        sid: String,
+    BeginFlowClose {
+        flow_id: String,
     },
     Log {
         level: &'static str,
@@ -194,7 +193,7 @@ pub enum ServerUiEvent {
     },
 }
 
-/// Per-session queued animation segment.
+/// Per-flow queued animation segment.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FlowAnimKind {
     Move,
@@ -441,9 +440,8 @@ pub struct AppState {
     pub detected_browsers: Vec<DetectedBrowser>,
     pub selected_browser: Option<DetectedBrowser>,
     pub logs: Vec<LogEntry>,
-    pub session_flows: Vec<SessionFlow>,
-    pub session_bootstrap_progress: HashMap<String, SessionBootstrapProgress>,
-    pub session_count: usize,
+    pub flows: Vec<FlowLane>,
+    pub flow_bootstrap_progress: HashMap<String, FlowBootstrapProgress>,
     pub request_count: u64,
     pub usage_totals: UsageTotals,
     config_path: PathBuf,
@@ -465,8 +463,8 @@ const FLOW_STEP_FIXED_MS: u64 =
 const FLOW_TURN_TRANSITION_MS: u64 = 24;
 const FLOW_CLOSE_PRUNE_MULTIPLIER: u64 = 3;
 
-fn short_session_id(sid: &str) -> String {
-    sid[..sid.len().min(8)].to_string()
+fn short_flow_id(flow_id: &str) -> String {
+    flow_id[..flow_id.len().min(8)].to_string()
 }
 
 pub fn user_home_dir() -> std::io::Result<PathBuf> {
@@ -784,9 +782,8 @@ impl AppState {
             detected_browsers: Vec::new(),
             selected_browser: config.selected_browser,
             logs: Vec::new(),
-            session_flows: Vec::new(),
-            session_bootstrap_progress: HashMap::new(),
-            session_count: 0,
+            flows: Vec::new(),
+            flow_bootstrap_progress: HashMap::new(),
             request_count: 0,
             usage_totals: config.usage_totals,
             config_path,
@@ -852,22 +849,21 @@ impl AppState {
             }
             ServerUiEvent::SetRemoteConnected(connected) => {
                 self.remote_connected = connected;
-                if !connected {
+                if connected {
+                    self.last_remote_activity_ms = Some(now_unix_millis());
+                } else {
                     self.last_remote_activity_ms = None;
                 }
             }
-            ServerUiEvent::SetSessionCount(count) => {
-                self.session_count = count;
-            }
-            ServerUiEvent::RecordSessionFlow {
-                sid,
+            ServerUiEvent::RecordFlow {
+                flow_id,
                 events,
                 direction,
             } => {
-                self.record_session_flow(&sid, &events, direction);
+                self.record_flow(&flow_id, &events, direction);
             }
-            ServerUiEvent::BeginSessionFlowClose { sid } => {
-                self.begin_session_flow_close(&sid);
+            ServerUiEvent::BeginFlowClose { flow_id } => {
+                self.begin_flow_close(&flow_id);
             }
             ServerUiEvent::Log { level, message } => {
                 self.log(level, message);
@@ -877,25 +873,22 @@ impl AppState {
 }
 
 impl AppState {
-    pub fn record_session_flow(&mut self, sid: &str, events: &[String], direction: FlowDirection) {
+    pub fn record_flow(&mut self, flow_id: &str, events: &[String], direction: FlowDirection) {
         if events.is_empty() {
             return;
         }
         let now_ms = now_unix_millis();
         self.last_remote_activity_ms = Some(now_ms);
+        self.remote_connected = true;
         let step_ms = derive_flow_step_ms();
         let mut bootstrap = self
-            .session_bootstrap_progress
-            .get(sid)
+            .flow_bootstrap_progress
+            .get(flow_id)
             .cloned()
             .unwrap_or_default();
 
-        if let Some(idx) = self
-            .session_flows
-            .iter()
-            .position(|flow| flow.session_id == sid)
-        {
-            let mut flow = self.session_flows.remove(idx);
+        if let Some(idx) = self.flows.iter().position(|flow| flow.flow_id == flow_id) {
+            let mut flow = self.flows.remove(idx);
             flow.events.extend(events.iter().cloned());
             if flow.events.len() > 12 {
                 let drop_n = flow.events.len() - 12;
@@ -911,13 +904,13 @@ impl AppState {
             );
             bootstrap.completed_steps = flow.bootstrap_completed_steps;
             bootstrap.pending_steps = flow.bootstrap_pending_steps.clone();
-            self.session_bootstrap_progress
-                .insert(sid.to_string(), bootstrap);
+            self.flow_bootstrap_progress
+                .insert(flow_id.to_string(), bootstrap);
             flow.closing_started_ms = None;
             flow.closing_step_ms = 0;
             flow.last_direction = direction;
             enqueue_flow_segment(&mut flow.anim_queue, direction, now_ms, step_ms);
-            self.session_flows.insert(0, flow);
+            self.flows.insert(0, flow);
             return;
         }
 
@@ -925,11 +918,11 @@ impl AppState {
         if trimmed.len() > 12 {
             trimmed = trimmed[trimmed.len() - 12..].to_vec();
         }
-        self.session_flows.insert(
+        self.flows.insert(
             0,
-            SessionFlow {
-                session_id: sid.to_string(),
-                short_id: short_session_id(sid),
+            FlowLane {
+                flow_id: flow_id.to_string(),
+                short_id: short_flow_id(flow_id),
                 events: trimmed,
                 bootstrap_completed_steps: bootstrap.completed_steps,
                 bootstrap_pending_steps: bootstrap.pending_steps.clone(),
@@ -939,7 +932,7 @@ impl AppState {
                 closing_step_ms: 0,
             },
         );
-        if let Some(flow) = self.session_flows.first_mut() {
+        if let Some(flow) = self.flows.first_mut() {
             advance_bootstrap_progress(
                 &mut flow.bootstrap_completed_steps,
                 &mut flow.bootstrap_pending_steps,
@@ -948,19 +941,16 @@ impl AppState {
             );
             bootstrap.completed_steps = flow.bootstrap_completed_steps;
             bootstrap.pending_steps = flow.bootstrap_pending_steps.clone();
-            self.session_bootstrap_progress
-                .insert(sid.to_string(), bootstrap);
+            self.flow_bootstrap_progress
+                .insert(flow_id.to_string(), bootstrap);
             enqueue_flow_segment(&mut flow.anim_queue, direction, now_ms, step_ms);
         }
     }
 
-    pub fn begin_session_flow_close(&mut self, sid: &str) {
+    pub fn begin_flow_close(&mut self, flow_id: &str) {
         let now_ms = now_unix_millis();
-        if let Some(flow) = self
-            .session_flows
-            .iter_mut()
-            .find(|flow| flow.session_id == sid)
-        {
+        self.flow_bootstrap_progress.remove(flow_id);
+        if let Some(flow) = self.flows.iter_mut().find(|flow| flow.flow_id == flow_id) {
             if flow.closing_started_ms.is_none() {
                 flow.closing_started_ms = Some(now_ms);
                 flow.closing_step_ms = flow
@@ -973,12 +963,13 @@ impl AppState {
         }
     }
 
-    pub fn prune_closed_session_flows(&mut self) {
+    pub fn prune_closed_flows(&mut self) {
         let now_ms = now_unix_millis();
-        for flow in &mut self.session_flows {
+
+        for flow in &mut self.flows {
             prune_finished_segments(&mut flow.anim_queue, now_ms);
         }
-        self.session_flows.retain(|flow| {
+        self.flows.retain(|flow| {
             let Some(closing_started_ms) = flow.closing_started_ms else {
                 return true;
             };

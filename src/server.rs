@@ -784,7 +784,6 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
 
     let _ = s.ui_events.send(ServerUiEvent::IncrementRequestCount);
     let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(true));
-    let _ = s.ui_events.send(ServerUiEvent::SetSessionCount(0));
 
     let has_method = body.get("method").and_then(Value::as_str).is_some();
     if !has_method {
@@ -795,7 +794,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "INFO",
             message: format!(
-                "POST {mcp_path} sid={STATELESS_FLOW_LABEL} accepted non-request JSON-RPC message"
+                "POST {mcp_path} flow={STATELESS_FLOW_LABEL} accepted non-request JSON-RPC message"
             ),
         });
         return Response::builder()
@@ -812,8 +811,8 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
     let request_summary = summarize_request(&body);
     let request_flow_event = request_flow_label(&body);
 
-    let _ = s.ui_events.send(ServerUiEvent::RecordSessionFlow {
-        sid: STATELESS_FLOW_ID.to_string(),
+    let _ = s.ui_events.send(ServerUiEvent::RecordFlow {
+        flow_id: STATELESS_FLOW_ID.to_string(),
         events: vec![request_flow_event.clone()],
         direction: FlowDirection::Forward,
     });
@@ -890,8 +889,8 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
         let mcp_path = app.mcp_path();
         drop(app);
         if req.id.is_some() {
-            let _ = s.ui_events.send(ServerUiEvent::RecordSessionFlow {
-                sid: STATELESS_FLOW_ID.to_string(),
+            let _ = s.ui_events.send(ServerUiEvent::RecordFlow {
+                flow_id: STATELESS_FLOW_ID.to_string(),
                 events: vec![request_flow_event.clone()],
                 direction: FlowDirection::Backward,
             });
@@ -899,7 +898,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "INFO",
             message: format!(
-                "POST {mcp_path} sid={STATELESS_FLOW_LABEL} [{}]",
+                "POST {mcp_path} flow={STATELESS_FLOW_LABEL} [{}]",
                 request_summary,
             ),
         });
@@ -908,7 +907,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
             let _ = s.ui_events.send(ServerUiEvent::Log {
                 level: "INFO",
                 message: format!(
-                    "POST {mcp_path} sid={STATELESS_FLOW_LABEL} response [{response_summary}]"
+                    "POST {mcp_path} flow={STATELESS_FLOW_LABEL} response [{response_summary}]"
                 ),
             });
         }
@@ -953,9 +952,8 @@ async fn get_mcp() -> Response<Body> {
 
 async fn delete_mcp(State(s): State<ServerState>) -> Response<Body> {
     let _ = s.ui_events.send(ServerUiEvent::SetRemoteConnected(false));
-    let _ = s.ui_events.send(ServerUiEvent::SetSessionCount(0));
-    let _ = s.ui_events.send(ServerUiEvent::BeginSessionFlowClose {
-        sid: STATELESS_FLOW_ID.to_string(),
+    let _ = s.ui_events.send(ServerUiEvent::BeginFlowClose {
+        flow_id: STATELESS_FLOW_ID.to_string(),
     });
     let _ = s.ui_events.send(ServerUiEvent::Log {
         level: "INFO",

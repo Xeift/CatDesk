@@ -27,7 +27,7 @@ use ratatui::{
 };
 use state::{
     AppState, FLOW_ANIM_CELLS, FLOW_BOOTSTRAP_PHASES, FlowAnimKind, FlowAnimSegment, FlowDirection,
-    Mode, ServerUiEvent, SessionFlow, SharedState, ToolMode, UsageTotals, app_config_path,
+    FlowLane, Mode, ServerUiEvent, SharedState, ToolMode, UsageTotals, app_config_path,
     flow_anim_lit_count, load_ngrok_authtoken, save_ngrok_authtoken,
 };
 use std::io::{Write, stdout};
@@ -111,7 +111,7 @@ fn extract_from_screen(lines: &[String], start: (u16, u16), end: (u16, u16)) -> 
         .join("\n")
 }
 
-fn current_anim_segment(flow: &SessionFlow, now_millis: u128) -> Option<FlowAnimSegment> {
+fn current_anim_segment(flow: &FlowLane, now_millis: u128) -> Option<FlowAnimSegment> {
     if let Some(seg) = flow
         .anim_queue
         .iter()
@@ -122,11 +122,11 @@ fn current_anim_segment(flow: &SessionFlow, now_millis: u128) -> Option<FlowAnim
     flow.anim_queue.front().copied()
 }
 
-fn should_display_flow_row(flow: &SessionFlow, remote_connected: bool) -> bool {
+fn should_display_flow_row(flow: &FlowLane, remote_connected: bool) -> bool {
     remote_connected || flow.closing_started_ms.is_some() || !flow.anim_queue.is_empty()
 }
 
-fn flow_direction(flow: Option<&SessionFlow>, now_millis: u128) -> FlowDirection {
+fn flow_direction(flow: Option<&FlowLane>, now_millis: u128) -> FlowDirection {
     if let Some(flow) = flow {
         if let Some(seg) = current_anim_segment(flow, now_millis) {
             return seg.direction;
@@ -136,7 +136,7 @@ fn flow_direction(flow: Option<&SessionFlow>, now_millis: u128) -> FlowDirection
     FlowDirection::Forward
 }
 
-fn flow_lit_count(flow: Option<&SessionFlow>, now_millis: u128, cells: usize) -> usize {
+fn flow_lit_count(flow: Option<&FlowLane>, now_millis: u128, cells: usize) -> usize {
     let Some(flow) = flow else {
         return 0;
     };
@@ -161,7 +161,7 @@ fn debug_lane(direction: Option<FlowDirection>, lit_count: usize, cells: usize) 
     out
 }
 
-fn flow_phase(flow: &SessionFlow, now_millis: u128) -> &'static str {
+fn flow_phase(flow: &FlowLane, now_millis: u128) -> &'static str {
     if flow.closing_started_ms.is_some() {
         return "close";
     }
@@ -177,7 +177,7 @@ fn flow_phase(flow: &SessionFlow, now_millis: u128) -> &'static str {
     "idle"
 }
 
-fn latest_flow_action(flow: &SessionFlow) -> String {
+fn latest_flow_action(flow: &FlowLane) -> String {
     flow.events
         .iter()
         .rev()
@@ -214,7 +214,7 @@ fn flow_phase_bounds(phase_index: usize) -> (usize, usize) {
     (start, end)
 }
 
-fn flow_phase_step_state(flow: Option<&SessionFlow>, step_index: usize) -> FlowPhaseStepState {
+fn flow_phase_step_state(flow: Option<&FlowLane>, step_index: usize) -> FlowPhaseStepState {
     let Some(flow) = flow else {
         return FlowPhaseStepState::Future;
     };
@@ -227,7 +227,7 @@ fn flow_phase_step_state(flow: Option<&SessionFlow>, step_index: usize) -> FlowP
     }
 }
 
-fn flow_phase_status_label(flow: Option<&SessionFlow>, phase_index: usize) -> Option<String> {
+fn flow_phase_status_label(flow: Option<&FlowLane>, phase_index: usize) -> Option<String> {
     let Some(flow) = flow else {
         return None;
     };
@@ -255,7 +255,7 @@ fn flow_phase_status_label(flow: Option<&SessionFlow>, phase_index: usize) -> Op
 }
 
 fn flow_phase_lines(
-    flow: Option<&SessionFlow>,
+    flow: Option<&FlowLane>,
     palette: &theme::Palette,
     status_style: Style,
 ) -> Vec<Line<'static>> {
@@ -327,7 +327,7 @@ fn flow_phase_lines(
 }
 
 fn build_animation_snapshot(app: &AppState) -> Vec<String> {
-    if app.session_flows.is_empty() {
+    if app.flows.is_empty() {
         return Vec::new();
     }
     let now_millis = SystemTime::now()
@@ -336,7 +336,7 @@ fn build_animation_snapshot(app: &AppState) -> Vec<String> {
         .as_millis();
     let mut rows = Vec::new();
     for flow in app
-        .session_flows
+        .flows
         .iter()
         .filter(|flow| should_display_flow_row(flow, app.remote_connected))
     {
@@ -350,7 +350,7 @@ fn build_animation_snapshot(app: &AppState) -> Vec<String> {
         let lit = flow_lit_count(Some(flow), now_millis, FLOW_ROW_CELLS);
         let lane = debug_lane(direction, lit, FLOW_ROW_CELLS);
         rows.push(format!(
-            "sid {} phase={:<8} tool={:<16} Your computer {} ChatGPT Web (via Ngrok)",
+            "flow {} phase={:<8} tool={:<16} Your computer {} ChatGPT Web (via Ngrok)",
             flow.short_id, phase, latest_action, lane
         ));
     }
@@ -2106,7 +2106,7 @@ async fn run_tui(
         {
             let mut app = state.lock().await;
             drain_server_ui_events(&mut app, &mut ui_events);
-            app.prune_closed_session_flows();
+            app.prune_closed_flows();
         }
         {
             let app = state.lock().await;
@@ -2303,7 +2303,7 @@ fn draw_ui(
     let both_running = app.server_running && app.ngrok_running;
     let has_url = app.ngrok_url.is_some();
     let visible_flow_count = app
-        .session_flows
+        .flows
         .iter()
         .filter(|flow| should_display_flow_row(flow, app.remote_connected))
         .count() as u16;
@@ -2316,7 +2316,7 @@ fn draw_ui(
         && !app.remote_connected
         && visible_flow_count == 0
         && !within_connect_grace;
-    let show_session_flow = !show_guide;
+    let show_flow_panel = !show_guide;
     let logs_min_height = if show_guide { 3 } else { 5 };
     let max_status_height = area.height.saturating_sub(6 + logs_min_height).max(17);
     // Keep the main panel deterministic: mascot size must not drive layout.
@@ -2421,7 +2421,7 @@ fn draw_ui(
         let centered_in_lane = FLOW_ROW_CELLS.saturating_sub(text_width) / 2;
         " ".repeat(lane_left_padding + centered_in_lane)
     };
-    let lane_for = |active: bool, flow: Option<&SessionFlow>| -> Vec<Span<'static>> {
+    let lane_for = |active: bool, flow: Option<&FlowLane>| -> Vec<Span<'static>> {
         const CELLS: usize = FLOW_ROW_CELLS;
         let unlit = Style::default().fg(palette.muted_fg);
         let lit = Style::default()
@@ -2453,31 +2453,18 @@ fn draw_ui(
         spans.push(Span::raw(" "));
         spans
     };
-    let session_stats_for = |app: &AppState| -> Vec<Span<'static>> {
+    let request_stats_for = |app: &AppState| -> Vec<Span<'static>> {
         vec![
-            Span::styled("  Sessions: ", Style::default().fg(palette.muted_fg)),
-            Span::styled(
-                app.session_count.to_string(),
-                Style::default().fg(palette.title_fg),
-            ),
-            Span::styled("    Requests: ", Style::default().fg(palette.muted_fg)),
+            Span::styled("  Requests: ", Style::default().fg(palette.muted_fg)),
             Span::styled(
                 app.request_count.to_string(),
                 Style::default().fg(palette.title_fg),
             ),
         ]
     };
-    let session_meta_gap_for = |sid_text: &str| -> String {
-        const SID_COLUMN_WIDTH: usize = 16;
-        " ".repeat(
-            SID_COLUMN_WIDTH
-                .saturating_sub(sid_text.chars().count())
-                .max(2),
-        )
-    };
     let status_inner_height = status_height.saturating_sub(2) as usize;
     let flow_block_lines = 2 + FLOW_BOOTSTRAP_PHASES.len();
-    let visible_flow_slots = if show_session_flow {
+    let visible_flow_slots = if show_flow_panel {
         status_inner_height.saturating_sub(12 + 1 + 2) / flow_block_lines.max(1)
     } else {
         0
@@ -2659,13 +2646,13 @@ fn draw_ui(
         ]));
     }
 
-    if show_session_flow && visible_flow_slots > 0 {
+    if show_flow_panel && visible_flow_slots > 0 {
         status_lines.push(Line::from(""));
         if visible_flow_count == 0 {
             let call_text = if app.remote_connected {
                 "awaiting request"
             } else {
-                "session closed"
+                "flow closed"
             };
             let call_offset = call_offset_for(call_text);
             status_lines.push(Line::from(vec![
@@ -2674,11 +2661,6 @@ fn draw_ui(
                 Span::styled(call_text, flow_meta_style),
             ]));
             let lane = lane_for(false, None);
-            let sid_text = if app.remote_connected {
-                "[sid=idle]"
-            } else {
-                "[sid=closed]"
-            };
             let mut row = vec![
                 Span::styled("    ", Style::default().fg(palette.muted_fg)),
                 Span::styled("Your computer ", computer_role_style),
@@ -2686,17 +2668,12 @@ fn draw_ui(
             row.extend(lane);
             row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
             row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
-            row.push(Span::styled(sid_text, flow_meta_style));
-            row.push(Span::styled(
-                session_meta_gap_for(sid_text),
-                Style::default().fg(palette.muted_fg),
-            ));
-            row.extend(session_stats_for(app));
+            row.extend(request_stats_for(app));
             status_lines.push(Line::from(row));
             status_lines.extend(flow_phase_lines(None, &palette, flow_meta_style));
         } else {
             for flow in app
-                .session_flows
+                .flows
                 .iter()
                 .filter(|flow| should_display_flow_row(flow, app.remote_connected))
                 .take(visible_flow_slots)
@@ -2714,8 +2691,6 @@ fn draw_ui(
                     || !flow.anim_queue.is_empty()
                     || (app.server_running && app.ngrok_running && app.remote_connected);
                 let lane = lane_for(lane_active, Some(flow));
-                let sid_text = format!("[sid={}]", flow.short_id);
-                let sid_gap = session_meta_gap_for(&sid_text);
                 let mut row = vec![
                     Span::styled("    ", Style::default().fg(palette.muted_fg)),
                     Span::styled("Your computer ", computer_role_style),
@@ -2723,9 +2698,7 @@ fn draw_ui(
                 row.extend(lane);
                 row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
                 row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
-                row.push(Span::styled(sid_text, flow_meta_style));
-                row.push(Span::styled(sid_gap, Style::default().fg(palette.muted_fg)));
-                row.extend(session_stats_for(app));
+                row.extend(request_stats_for(app));
                 status_lines.push(Line::from(row));
                 status_lines.extend(flow_phase_lines(Some(flow), &palette, flow_meta_style));
             }
