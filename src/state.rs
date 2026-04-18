@@ -28,6 +28,7 @@ pub struct FlowLane {
     pub events: Vec<String>,
     pub bootstrap_completed_steps: usize,
     pub bootstrap_pending_steps: VecDeque<usize>,
+    pub bootstrap_modal_close_deadline_ms: Option<u128>,
     pub anim_queue: VecDeque<FlowAnimSegment>,
     pub last_direction: FlowDirection,
     pub closing_started_ms: Option<u128>,
@@ -462,6 +463,7 @@ const FLOW_STEP_FIXED_MS: u64 =
     (FLOW_FORWARD_ANIMATION_DURATION_MS + FLOW_LINK_CELLS - 1) / FLOW_LINK_CELLS;
 const FLOW_TURN_TRANSITION_MS: u64 = 24;
 const FLOW_CLOSE_PRUNE_MULTIPLIER: u64 = 3;
+const FLOW_BOOTSTRAP_MODAL_CLOSE_DELAY_MS: u128 = 3_000;
 
 fn short_flow_id(flow_id: &str) -> String {
     flow_id[..flow_id.len().min(8)].to_string()
@@ -689,6 +691,13 @@ fn flow_bootstrap_step(index: usize) -> Option<&'static FlowBootstrapStep> {
     None
 }
 
+fn flow_bootstrap_steps_total() -> usize {
+    FLOW_BOOTSTRAP_PHASES
+        .iter()
+        .map(|phase| phase.steps.len())
+        .sum()
+}
+
 fn advance_bootstrap_progress(
     completed_steps: &mut usize,
     pending_steps: &mut VecDeque<usize>,
@@ -908,6 +917,7 @@ impl AppState {
                 .insert(flow_id.to_string(), bootstrap);
             flow.closing_started_ms = None;
             flow.closing_step_ms = 0;
+            flow.bootstrap_modal_close_deadline_ms = None;
             flow.last_direction = direction;
             enqueue_flow_segment(&mut flow.anim_queue, direction, now_ms, step_ms);
             self.flows.insert(0, flow);
@@ -926,6 +936,7 @@ impl AppState {
                 events: trimmed,
                 bootstrap_completed_steps: bootstrap.completed_steps,
                 bootstrap_pending_steps: bootstrap.pending_steps.clone(),
+                bootstrap_modal_close_deadline_ms: None,
                 anim_queue: VecDeque::new(),
                 last_direction: direction,
                 closing_started_ms: None,
@@ -959,15 +970,31 @@ impl AppState {
                     .map(|seg| seg.step_ms.max(1))
                     .unwrap_or_else(derive_flow_step_ms);
                 flow.anim_queue.clear();
+                flow.bootstrap_modal_close_deadline_ms = None;
             }
         }
     }
 
     pub fn prune_closed_flows(&mut self) {
         let now_ms = now_unix_millis();
+        let bootstrap_steps_total = flow_bootstrap_steps_total();
 
         for flow in &mut self.flows {
             prune_finished_segments(&mut flow.anim_queue, now_ms);
+            let bootstrap_complete = flow.bootstrap_completed_steps >= bootstrap_steps_total
+                && flow.bootstrap_pending_steps.is_empty();
+            if flow.closing_started_ms.is_none() && bootstrap_complete {
+                if flow.anim_queue.is_empty() {
+                    if flow.bootstrap_modal_close_deadline_ms.is_none() {
+                        flow.bootstrap_modal_close_deadline_ms =
+                            Some(now_ms + FLOW_BOOTSTRAP_MODAL_CLOSE_DELAY_MS);
+                    }
+                } else {
+                    flow.bootstrap_modal_close_deadline_ms = None;
+                }
+            } else {
+                flow.bootstrap_modal_close_deadline_ms = None;
+            }
         }
         self.flows.retain(|flow| {
             let Some(closing_started_ms) = flow.closing_started_ms else {

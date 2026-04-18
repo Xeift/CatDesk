@@ -42,6 +42,8 @@ const FLOW_ROW_CELLS: usize = FLOW_ANIM_CELLS;
 const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
 const UI_POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const STATUS_PANEL_HEIGHT: u16 = TUI_MASCOT_BLOCK_HEIGHT + 6;
+const TUI_MODAL_BG: Color = Color::Rgb(34, 38, 47);
+const TUI_MODAL_FG: Color = Color::Rgb(232, 236, 242);
 
 // ── Selection ───────────────────────────────────────────────
 
@@ -324,6 +326,143 @@ fn flow_phase_lines(
             Line::from(spans)
         })
         .collect()
+}
+
+fn flow_bootstrap_steps_total() -> usize {
+    FLOW_BOOTSTRAP_PHASES
+        .iter()
+        .map(|phase| phase.steps.len())
+        .sum()
+}
+
+fn flow_bootstrap_complete(flow: &FlowLane) -> bool {
+    flow.bootstrap_completed_steps >= flow_bootstrap_steps_total()
+        && flow.bootstrap_pending_steps.is_empty()
+}
+
+fn flow_bootstrap_modal_visible(flow: &FlowLane, now_millis: u128) -> bool {
+    if !flow_bootstrap_complete(flow) {
+        return true;
+    }
+    if current_anim_segment(flow, now_millis).is_some() {
+        return true;
+    }
+    flow.bootstrap_modal_close_deadline_ms
+        .is_some_and(|deadline| now_millis < deadline)
+}
+
+fn flow_bootstrap_countdown_remaining_seconds(flow: &FlowLane, now_millis: u128) -> Option<u128> {
+    let deadline = flow.bootstrap_modal_close_deadline_ms?;
+    if now_millis >= deadline {
+        return Some(0);
+    }
+    Some((deadline.saturating_sub(now_millis) + 999) / 1000)
+}
+
+fn active_bootstrap_modal_flow<'a>(app: &'a AppState, now_millis: u128) -> Option<&'a FlowLane> {
+    app.flows.iter().find(|flow| {
+        should_display_flow_row(flow, app.remote_connected)
+            && flow.closing_started_ms.is_none()
+            && flow_bootstrap_modal_visible(flow, now_millis)
+    })
+}
+
+fn should_show_connect_guide(app: &AppState, now_millis: u128) -> bool {
+    let both_running = app.server_running && app.ngrok_running;
+    let has_url = app.ngrok_url.is_some();
+    let visible_flow_count = app
+        .flows
+        .iter()
+        .filter(|flow| should_display_flow_row(flow, app.remote_connected))
+        .count() as u16;
+    let within_connect_grace = app
+        .last_remote_activity_ms
+        .map(|t| now_millis.saturating_sub(t) < REMOTE_CONNECT_UI_GRACE_MS)
+        .unwrap_or(false);
+    both_running
+        && has_url
+        && !app.remote_connected
+        && visible_flow_count == 0
+        && !within_connect_grace
+}
+
+fn draw_flow_bootstrap_modal(
+    f: &mut Frame,
+    area: Rect,
+    palette: &theme::Palette,
+    flow: &FlowLane,
+    now_millis: u128,
+) {
+    let modal_area = centered_rect(78, 12, area);
+    f.render_widget(Clear, modal_area);
+
+    let modal_block = Block::default()
+        .title(" MCP bootstrap ")
+        .borders(Borders::ALL)
+        .border_type(palette.border_type)
+        .border_style(Style::default().fg(palette.border_fg))
+        .style(Style::default().bg(TUI_MODAL_BG));
+    let modal_inner = modal_block.inner(modal_area);
+    f.render_widget(modal_block, modal_area);
+
+    let modal_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(FLOW_BOOTSTRAP_PHASES.len() as u16),
+            Constraint::Length(1),
+        ])
+        .split(modal_inner);
+
+    let phase_label = flow_phase(flow, now_millis);
+    let action_label = latest_flow_action(flow);
+    let bootstrap_complete = flow_bootstrap_complete(flow);
+    let header_title = if bootstrap_complete {
+        "Initialize completed"
+    } else {
+        "Initialize connector in progress"
+    };
+    let header = Paragraph::new(vec![
+        Line::from(Span::styled(
+            header_title,
+            Style::default()
+                .fg(palette.title_fg)
+                .bg(TUI_MODAL_BG)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("phase: {phase_label}  latest: {action_label}"),
+            Style::default().fg(TUI_MODAL_FG).bg(TUI_MODAL_BG),
+        )),
+    ])
+    .style(Style::default().bg(TUI_MODAL_BG));
+    f.render_widget(header, modal_chunks[0]);
+
+    let phase_lines = flow_phase_lines(
+        Some(flow),
+        palette,
+        Style::default()
+            .fg(palette.info_fg)
+            .bg(TUI_MODAL_BG)
+            .add_modifier(Modifier::BOLD),
+    );
+    let phase_widget = Paragraph::new(phase_lines).style(Style::default().bg(TUI_MODAL_BG));
+    f.render_widget(phase_widget, modal_chunks[1]);
+
+    let footer_text = if bootstrap_complete && current_anim_segment(flow, now_millis).is_none() {
+        match flow_bootstrap_countdown_remaining_seconds(flow, now_millis) {
+            Some(0) => "Completed.".to_string(),
+            Some(seconds) => format!("Completed. Closing in {seconds}s..."),
+            None => "Completed.".to_string(),
+        }
+    } else {
+        "Auto closes after initialize is completed.".to_string()
+    };
+    let footer = Paragraph::new(Span::styled(
+        footer_text,
+        Style::default().fg(palette.muted_fg).bg(TUI_MODAL_BG),
+    ));
+    f.render_widget(footer, modal_chunks[2]);
 }
 
 fn build_animation_snapshot(app: &AppState) -> Vec<String> {
@@ -2300,23 +2439,15 @@ fn draw_ui(
         .unwrap_or_default()
         .as_millis();
 
-    let both_running = app.server_running && app.ngrok_running;
     let has_url = app.ngrok_url.is_some();
     let visible_flow_count = app
         .flows
         .iter()
         .filter(|flow| should_display_flow_row(flow, app.remote_connected))
         .count() as u16;
-    let within_connect_grace = app
-        .last_remote_activity_ms
-        .map(|t| now_millis.saturating_sub(t) < REMOTE_CONNECT_UI_GRACE_MS)
-        .unwrap_or(false);
-    let show_guide = both_running
-        && has_url
-        && !app.remote_connected
-        && visible_flow_count == 0
-        && !within_connect_grace;
+    let show_guide = should_show_connect_guide(app, now_millis);
     let show_flow_panel = !show_guide;
+    let bootstrap_modal_flow = active_bootstrap_modal_flow(app, now_millis);
     let logs_min_height = if show_guide { 3 } else { 5 };
     let max_status_height = area.height.saturating_sub(6 + logs_min_height).max(17);
     // Keep the main panel deterministic: mascot size must not drive layout.
@@ -2463,7 +2594,7 @@ fn draw_ui(
         ]
     };
     let status_inner_height = status_height.saturating_sub(2) as usize;
-    let flow_block_lines = 2 + FLOW_BOOTSTRAP_PHASES.len();
+    let flow_block_lines = 2;
     let visible_flow_slots = if show_flow_panel {
         status_inner_height.saturating_sub(12 + 1 + 2) / flow_block_lines.max(1)
     } else {
@@ -2561,6 +2692,18 @@ fn draw_ui(
                 } else {
                     palette.muted_fg
                 }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Workspace:        ",
+                Style::default()
+                    .fg(palette.primary_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &*app.workspace_root,
+                Style::default().fg(palette.secondary_fg),
             ),
         ]),
         {
@@ -2670,7 +2813,6 @@ fn draw_ui(
             row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
             row.extend(request_stats_for(app));
             status_lines.push(Line::from(row));
-            status_lines.extend(flow_phase_lines(None, &palette, flow_meta_style));
         } else {
             for flow in app
                 .flows
@@ -2700,7 +2842,6 @@ fn draw_ui(
                 row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
                 row.extend(request_stats_for(app));
                 status_lines.push(Line::from(row));
-                status_lines.extend(flow_phase_lines(Some(flow), &palette, flow_meta_style));
             }
         }
     }
@@ -2792,17 +2933,6 @@ fn draw_ui(
         Vec::new()
     };
 
-    if !show_guide {
-        status_lines.push(Line::from(""));
-        status_lines.push(Line::from(vec![
-            Span::styled("  Workspace: ", Style::default().fg(palette.muted_fg)),
-            Span::styled(
-                &*app.workspace_root,
-                Style::default().fg(palette.primary_fg),
-            ),
-        ]));
-    }
-
     let status_columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -2831,46 +2961,8 @@ fn draw_ui(
     .alignment(Alignment::Center);
     f.render_widget(mascot, mascot_inner);
 
-    if show_guide {
-        let top_height = (status_lines.len() as u16).min(status_inner.height.saturating_sub(1));
-        let guide_height =
-            (guide_lines.len() as u16 + 2).min(status_inner.height.saturating_sub(top_height));
-        let status_parts = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(top_height),
-                Constraint::Length(guide_height),
-                Constraint::Min(0),
-            ])
-            .split(status_inner);
-        let status_summary = Paragraph::new(status_lines);
-        f.render_widget(status_summary, status_parts[0]);
-
-        let guide_bg = if app.theme == "neon" {
-            Color::Rgb(48, 16, 54)
-        } else {
-            Color::Rgb(58, 72, 98)
-        };
-        let guide_panel = Paragraph::new(guide_lines)
-            .style(Style::default().bg(guide_bg))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(" What to do next? ")
-                    .borders(Borders::ALL)
-                    .border_type(palette.border_type)
-                    .border_style(
-                        Style::default()
-                            .fg(palette.info_fg)
-                            .bg(guide_bg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-            );
-        f.render_widget(guide_panel, status_parts[1]);
-    } else {
-        let status = Paragraph::new(status_lines);
-        f.render_widget(status, status_inner);
-    }
+    let status = Paragraph::new(status_lines);
+    f.render_widget(status, status_inner);
 
     // ── Keys ──
     let key_spans = vec![
@@ -2936,7 +3028,29 @@ fn draw_ui(
     );
     f.render_widget(logs, chunks[3]);
 
-    // ── Floating toast ──
+    if show_guide {
+        let modal_height = (guide_lines.len() as u16 + 2).max(10);
+        let modal_area = centered_rect(82, modal_height, area);
+        f.render_widget(Clear, modal_area);
+        let guide_panel = Paragraph::new(guide_lines)
+            .style(Style::default().fg(TUI_MODAL_FG).bg(TUI_MODAL_BG))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(" What to do next? ")
+                    .borders(Borders::ALL)
+                    .border_type(palette.border_type)
+                    .border_style(Style::default().fg(palette.border_fg))
+                    .style(Style::default().bg(TUI_MODAL_BG)),
+            );
+        f.render_widget(guide_panel, modal_area);
+    }
+
+    if let Some(flow) = bootstrap_modal_flow {
+        draw_flow_bootstrap_modal(f, area, &palette, flow, now_millis);
+    }
+
+    // ── Floating toast (top-most layer) ──
     if let Some((msg, (col, row))) = toast {
         let label = format!(" {msg} ");
         let w = label.len() as u16;
