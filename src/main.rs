@@ -802,19 +802,18 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
         ])
         .split(area);
 
-    let header =
-        Paragraph::new("  CatDesk - MCP Tools for ChatGPT to control your computer and browser")
-            .style(
-                Style::default()
-                    .fg(palette.header_fg)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(palette.border_type)
-                    .border_style(Style::default().fg(palette.border_fg)),
-            );
+    let header = Paragraph::new("  CatDesk - Turns ChatGPT Web into a coding agent =w=")
+        .style(
+            Style::default()
+                .fg(palette.header_fg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(palette.border_type)
+                .border_style(Style::default().fg(palette.border_fg)),
+        );
     f.render_widget(header, chunks[0]);
 
     let lines = vec![
@@ -2464,19 +2463,18 @@ fn draw_ui(
         .split(area);
 
     // ── Header ──
-    let header =
-        Paragraph::new("  CatDesk - MCP Tools for ChatGPT to control your computer and browser")
-            .style(
-                Style::default()
-                    .fg(palette.header_fg)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(palette.border_type)
-                    .border_style(Style::default().fg(palette.border_fg)),
-            );
+    let header = Paragraph::new("  CatDesk - Turns ChatGPT Web into a coding agent =w=")
+        .style(
+            Style::default()
+                .fg(palette.header_fg)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(palette.border_type)
+                .border_style(Style::default().fg(palette.border_fg)),
+        );
     f.render_widget(header, chunks[0]);
 
     // ── Status ──
