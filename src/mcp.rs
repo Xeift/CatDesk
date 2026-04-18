@@ -326,16 +326,24 @@ async fn handle_tools_list(
         tools.push(json!({
             "name": "search",
             "title": "Search text",
-            "description": "Search text across files in workspace.",
+            "description": "Search text across files in workspace. Uses rg when available, then grep, then built-in search.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Search string" },
-                    "path": { "type": "string", "description": "Directory path (default: workspace root)" },
+                    "pattern": { "type": "string", "description": "Ripgrep regex pattern" },
+                    "path": { "type": "string", "description": "File or directory path (default: workspace root)" },
+                    "glob": { "type": "string", "description": "Ripgrep glob filter, for example '*.rs' or 'src/**/*.ts'" },
+                    "fixed_strings": { "type": "boolean", "description": "Treat pattern as a literal string" },
+                    "case_insensitive": { "type": "boolean", "description": "Use case-insensitive matching" },
+                    "context": { "type": "integer", "description": "Context lines before and after each match (0..20). When set, before/after are ignored." },
+                    "before": { "type": "integer", "description": "Context lines before each match (0..20)" },
+                    "after": { "type": "integer", "description": "Context lines after each match (0..20)" },
+                    "max_matches": { "type": "integer", "description": "Max returned matches (1..500, default 100)" },
+                    "max_matches_per_file": { "type": "integer", "description": "Max matches per file (1..500)" },
                     "include_hidden": { "type": "boolean", "description": "Include dotfiles and dot-directories" },
-                    "limit": { "type": "number", "description": "Max matches (1..500)" }
+                    "no_ignore": { "type": "boolean", "description": "Do not respect ignore files" }
                 },
-                "required": ["query"]
+                "required": ["pattern"]
             },
             "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
         }));
@@ -1597,10 +1605,15 @@ fn build_search_text_widget_payload(result: &Value, is_error: bool) -> Option<Va
                 .and_then(Value::as_str)
                 .map(|value| truncate_for_widget(value, MAX_SEARCH_LINE_CHARS))
                 .unwrap_or_default();
+            let is_context = entry_obj
+                .get("isContext")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             search_results.push(json!({
                 "path": path,
                 "line": line,
                 "text": text,
+                "isContext": is_context,
             }));
         }
         if results.len() > MAX_SEARCH_RESULTS_WIDGET {
@@ -1608,16 +1621,20 @@ fn build_search_text_widget_payload(result: &Value, is_error: bool) -> Option<Va
         }
     }
     payload.insert(
-        "searchQuery".to_string(),
-        structured.get("searchQuery")?.clone(),
+        "searchPattern".to_string(),
+        structured.get("searchPattern")?.clone(),
     );
     payload.insert(
         "searchPath".to_string(),
         structured.get("searchPath")?.clone(),
     );
     payload.insert(
-        "filesScanned".to_string(),
-        structured.get("filesScanned")?.clone(),
+        "searchBackend".to_string(),
+        structured.get("searchBackend")?.clone(),
+    );
+    payload.insert(
+        "searchBackendNote".to_string(),
+        structured.get("searchBackendNote")?.clone(),
     );
     payload.insert(
         "matchCount".to_string(),
@@ -2429,28 +2446,80 @@ fn handle_edit_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespon
 
 fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
-    let query = match arguments.get("query").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: query".into()),
+    let pattern = match required_string_argument(&arguments, "pattern") {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
     };
-    let path = arguments.get("path").and_then(|v| v.as_str());
-    let include_hidden = arguments
-        .get("include_hidden")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let limit = arguments
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
-    match workspace_tools::search_text(workspace_root, query, path, include_hidden, limit) {
+    let path = match optional_string_argument(&arguments, "path") {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let glob = match optional_string_argument(&arguments, "glob") {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let fixed_strings = match optional_bool_argument(&arguments, "fixed_strings", false) {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let case_insensitive = match optional_bool_argument(&arguments, "case_insensitive", false) {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let context = match optional_usize_argument(&arguments, "context") {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let before = match optional_usize_argument(&arguments, "before") {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let after = match optional_usize_argument(&arguments, "after") {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let max_matches = match optional_usize_argument(&arguments, "max_matches") {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let max_matches_per_file = match optional_usize_argument(&arguments, "max_matches_per_file") {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let include_hidden = match optional_bool_argument(&arguments, "include_hidden", false) {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    let no_ignore = match optional_bool_argument(&arguments, "no_ignore", false) {
+        Ok(value) => value,
+        Err(e) => return tool_error_response(req, e),
+    };
+    match workspace_tools::search_text(
+        workspace_root,
+        workspace_tools::SearchTextOptions {
+            pattern,
+            path,
+            glob,
+            fixed_strings,
+            case_insensitive,
+            context,
+            before,
+            after,
+            max_matches,
+            max_matches_per_file,
+            include_hidden,
+            no_ignore,
+        },
+    ) {
         Ok(output) => tool_success_response_with_structured(
             req,
             output.render_text(),
             json!({
                 "toolName": "search",
-                "searchQuery": output.query,
+                "searchPattern": output.pattern,
                 "searchPath": output.path,
-                "filesScanned": output.files_scanned,
+                "searchBackend": output.backend,
+                "searchBackendNote": output.backend_note,
                 "matchCount": output.match_count,
                 "searchTruncated": output.truncated,
                 "searchLimit": output.limit,
@@ -2458,6 +2527,52 @@ fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
             }),
         ),
         Err(e) => tool_error_response(req, e),
+    }
+}
+
+fn required_string_argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
+    match arguments.get(name) {
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| format!("Parameter {name} must be a string")),
+        None => Err(format!("Missing required parameter: {name}")),
+    }
+}
+
+fn optional_string_argument<'a>(
+    arguments: &'a Value,
+    name: &str,
+) -> Result<Option<&'a str>, String> {
+    match arguments.get(name) {
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| format!("Parameter {name} must be a string")),
+        None => Ok(None),
+    }
+}
+
+fn optional_bool_argument(
+    arguments: &Value,
+    name: &str,
+    default_value: bool,
+) -> Result<bool, String> {
+    match arguments.get(name) {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| format!("Parameter {name} must be a boolean")),
+        None => Ok(default_value),
+    }
+}
+
+fn optional_usize_argument(arguments: &Value, name: &str) -> Result<Option<usize>, String> {
+    match arguments.get(name) {
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("Parameter {name} must be a non-negative integer")),
+        None => Ok(None),
     }
 }
 
@@ -2580,6 +2695,253 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["catdesk_instruction", "read", "search"]);
+    }
+
+    #[tokio::test]
+    async fn search_tool_schema_uses_pattern_and_ripgrep_options() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+
+        let response = handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None).await;
+        let search_tool = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("search"))
+            .expect("missing search tool");
+        let schema = search_tool
+            .get("inputSchema")
+            .and_then(Value::as_object)
+            .expect("missing search schema");
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("missing search properties");
+
+        assert!(properties.contains_key("pattern"));
+        assert!(properties.contains_key("glob"));
+        assert!(properties.contains_key("fixed_strings"));
+        assert!(properties.contains_key("case_insensitive"));
+        assert!(properties.contains_key("max_matches"));
+        assert!(!properties.contains_key("query"));
+        assert!(!properties.contains_key("limit"));
+        assert_eq!(
+            schema
+                .get("required")
+                .and_then(Value::as_array)
+                .and_then(|required| required.first())
+                .and_then(Value::as_str),
+            Some("pattern")
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tool_rejects_legacy_query_parameter() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-search-query-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+
+        let req = tool_call_request(
+            "search",
+            json!({
+                "query": "needle",
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result_text(&response),
+            "Missing required parameter: pattern"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn search_tool_rejects_invalid_optional_parameter_types() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-search-args-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+
+        let req = tool_call_request(
+            "search",
+            json!({
+                "pattern": "needle",
+                "max_matches": "10",
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result_text(&response),
+            "Parameter max_matches must be a non-negative integer"
+        );
+
+        let req = tool_call_request(
+            "search",
+            json!({
+                "pattern": "needle",
+                "max_matches": 0,
+            }),
+        );
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result_text(&response),
+            "max_matches must be between 1 and 500"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn search_tool_returns_matches_in_structured_and_widget_payloads() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-search-rg-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(workspace_root.join("src")).expect("create workspace");
+        std::fs::write(workspace_root.join("notes.txt"), "alpha1\n").expect("write notes");
+        std::fs::write(
+            workspace_root.join("src").join("main.rs"),
+            "alpha1\nbeta\nalpha2\n",
+        )
+        .expect("write source");
+
+        let req = tool_call_request(
+            "search",
+            json!({
+                "pattern": "alpha[0-9]",
+                "path": ".",
+                "glob": "*.rs",
+                "max_matches": 1,
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        assert_eq!(
+            structured.get("searchPattern").and_then(Value::as_str),
+            Some("alpha[0-9]")
+        );
+        assert_eq!(
+            structured.get("matchCount").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(
+            structured
+                .get("searchBackend")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        assert!(
+            structured
+                .get("searchBackendNote")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        assert_eq!(
+            structured
+                .get("searchResults")
+                .and_then(Value::as_array)
+                .and_then(|entries| entries.first())
+                .and_then(|entry| entry.get("path"))
+                .and_then(Value::as_str),
+            Some("src/main.rs")
+        );
+
+        let widget_payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        assert_eq!(
+            widget_payload.get("searchPattern").and_then(Value::as_str),
+            Some("alpha[0-9]")
+        );
+        assert!(
+            widget_payload
+                .get("searchBackend")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        assert!(widget_payload.get("searchQuery").is_none());
+        assert!(widget_payload.get("filesScanned").is_none());
+
+        let _ = std::fs::remove_dir_all(workspace_root);
     }
 
     #[tokio::test]

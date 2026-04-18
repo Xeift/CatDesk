@@ -135,13 +135,15 @@ CatDesk's local tools in `multi-tools` mode are:
 | --------------------- | ----- | ----------------------------------------------------------------------- |
 | `catdesk_instruction` | Guide | Returns CatDesk usage instructions and reads your workspace `AGENTS.md` |
 | `read`                | Read  | Reads a text file from the workspace                                    |
-| `search`              | Read  | Searches text across files in the workspace                             |
+| `search`              | Read  | Searches workspace text with `rg`, `grep`, or built-in search           |
 | `write`               | Write | Creates or overwrites a file                                            |
 | `edit`                | Write | Replaces exact text inside a file                                       |
 | `delete`              | Write | Deletes a file or directory                                             |
 | `run_command`         | Shell | Runs a shell command inside the workspace.                              |
 
 If browser mode is enabled, CatDesk can also expose extra browser/devtools tools. Those are provided by the browser bridge, so the exact list depends on your environment.
+
+`search` uses `rg` when it is available, falls back to `grep`, then falls back to CatDesk's built-in scanner. Installing ripgrep is optional, but gives the best search performance and behavior.
 
 # Context window
 

@@ -24,6 +24,9 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
+regex = "1"
+globset = "0.4"
+ignore = "0.4"
 
 [profile.release]
 lto = true

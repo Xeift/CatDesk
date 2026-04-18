@@ -471,6 +471,10 @@
         word-break: break-word;
       }
 
+      .search-row.is-context .search-line {
+        color: var(--text-3);
+      }
+
       .search-note {
         color: var(--text-3);
         font-size: 11px;
@@ -2316,11 +2320,13 @@
           var path = readNonEmptyString(entry.path);
           var line = readPositiveInteger(entry.line);
           var text = readString(entry.text);
+          var isContext = entry.isContext === true;
           if (path === null || line === null || text === null) return null;
           return {
             path: path,
             line: line,
             text: text,
+            isContext: isContext,
           };
         }
 
@@ -2483,9 +2489,10 @@
             readFileBytes: 0,
             readFileText: "",
             readFileTruncated: false,
-            searchQuery: "",
+            searchPattern: "",
             searchPath: "",
-            filesScanned: 0,
+            searchBackend: "",
+            searchBackendNote: "",
             matchCount: 0,
             searchResults: [],
             searchTruncated: false,
@@ -2724,9 +2731,10 @@
           }
 
           if (toolName === "search") {
-            var searchQuery = readString(data.searchQuery);
+            var searchPattern = readString(data.searchPattern);
             var searchPath = readNonEmptyString(data.searchPath);
-            var filesScanned = readNonNegativeInteger(data.filesScanned);
+            var searchBackend = readNonEmptyString(data.searchBackend);
+            var searchBackendNote = readString(data.searchBackendNote);
             var matchCount = readNonNegativeInteger(data.matchCount);
             var searchResults = validateArrayEntries(
               data.searchResults,
@@ -2734,9 +2742,10 @@
             );
             var searchTruncated = readBoolean(data.searchTruncated);
             if (
-              searchQuery === null ||
+              searchPattern === null ||
               searchPath === null ||
-              filesScanned === null ||
+              searchBackend === null ||
+              searchBackendNote === null ||
               matchCount === null ||
               searchResults === null ||
               searchTruncated === null
@@ -2745,9 +2754,10 @@
                 "search widget payload is missing required fields.",
               );
             }
-            next.searchQuery = searchQuery;
+            next.searchPattern = searchPattern;
             next.searchPath = searchPath;
-            next.filesScanned = filesScanned;
+            next.searchBackend = searchBackend;
+            next.searchBackendNote = searchBackendNote;
             next.matchCount = matchCount;
             next.searchResults = searchResults;
             next.searchTruncated = searchTruncated;
@@ -3212,9 +3222,9 @@
           var summaryHtml =
             '<div class="search-summary">' +
             '<div class="summary-row metrics with-kicker">' +
-            renderSummaryStat("query", "query", current.searchQuery, "query") +
+            renderSummaryStat("query", "pattern", current.searchPattern, "query") +
             renderSummaryStat("path", "path", current.searchPath, "path") +
-            renderSummaryStat("files", "files", current.filesScanned, "") +
+            renderSummaryStat("backend", "backend", current.searchBackend, "other") +
             renderSummaryStat(
               "matches",
               "matches",
@@ -3232,7 +3242,9 @@
                 .map(function (entry) {
                   var lineLabel = entry.line > 0 ? ":" + entry.line : "";
                   return (
-                    '<div class="search-row">' +
+                    '<div class="search-row' +
+                    (entry.isContext ? " is-context" : "") +
+                    '">' +
                     '<div class="search-loc">' +
                     esc(entry.path + lineLabel) +
                     "</div>" +
@@ -3250,10 +3262,14 @@
           var truncatedHtml = current.searchTruncated
             ? '<div class="search-note">Results truncated by limit.</div>'
             : "";
+          var backendNoteHtml = current.searchBackendNote
+            ? '<div class="search-note">' + esc(current.searchBackendNote) + "</div>"
+            : "";
           return (
             '<div class="search-panel">' +
             summaryHtml +
             resultsHtml +
+            backendNoteHtml +
             truncatedHtml +
             "</div>"
           );
@@ -4855,8 +4871,9 @@
             current.title,
             current.state,
             current.command,
-            current.searchQuery,
+            current.searchPattern,
             current.searchPath,
+            current.searchBackend,
             current.listPath,
             usage.inputTokens,
             usage.outputTokens,
