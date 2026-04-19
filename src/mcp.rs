@@ -30,8 +30,6 @@ const INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER: &str =
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
-const MAX_SEARCH_RESULTS_WIDGET: usize = 200;
-const MAX_SEARCH_LINE_CHARS: usize = 320;
 const MAX_WATCHED_FILES: usize = 512;
 const MAX_FILE_CAPTURE_BYTES: usize = 128 * 1024;
 const MAX_TEXT_CAPTURE_LINES: usize = 420;
@@ -1675,46 +1673,10 @@ fn build_search_text_widget_payload(result: &Value, is_error: bool) -> Option<Va
     let structured = result_structured_content(result)?;
     let mut payload = base_widget_payload(
         "tool_call",
-        "Search Results",
+        "Search",
         widget_state(is_error, None),
         Some("search"),
     );
-    let mut search_results = Vec::new();
-    let mut widget_truncated = structured
-        .get("searchTruncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if let Some(results) = structured.get("searchResults").and_then(Value::as_array) {
-        for entry in results.iter().take(MAX_SEARCH_RESULTS_WIDGET) {
-            let Some(entry_obj) = entry.as_object() else {
-                continue;
-            };
-            let Some(path) = entry_obj.get("path").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(line) = entry_obj.get("line").and_then(Value::as_u64) else {
-                continue;
-            };
-            let text = entry_obj
-                .get("text")
-                .and_then(Value::as_str)
-                .map(|value| truncate_for_widget(value, MAX_SEARCH_LINE_CHARS))
-                .unwrap_or_default();
-            let is_context = entry_obj
-                .get("isContext")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            search_results.push(json!({
-                "path": path,
-                "line": line,
-                "text": text,
-                "isContext": is_context,
-            }));
-        }
-        if results.len() > MAX_SEARCH_RESULTS_WIDGET {
-            widget_truncated = true;
-        }
-    }
     payload.insert(
         "searchPattern".to_string(),
         structured.get("searchPattern")?.clone(),
@@ -1728,15 +1690,13 @@ fn build_search_text_widget_payload(result: &Value, is_error: bool) -> Option<Va
         structured.get("searchBackend")?.clone(),
     );
     payload.insert(
-        "searchBackendNote".to_string(),
-        structured.get("searchBackendNote")?.clone(),
-    );
-    payload.insert(
         "matchCount".to_string(),
         structured.get("matchCount")?.clone(),
     );
-    payload.insert("searchTruncated".to_string(), json!(widget_truncated));
-    payload.insert("searchResults".to_string(), Value::Array(search_results));
+    payload.insert(
+        "searchTruncated".to_string(),
+        structured.get("searchTruncated")?.clone(),
+    );
     payload.insert("changedFiles".to_string(), json!([]));
     payload.insert("hasChanges".to_string(), json!(false));
     Some(Value::Object(payload))
@@ -3074,6 +3034,22 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some()
         );
+        assert_eq!(
+            widget_payload.get("searchPath").and_then(Value::as_str),
+            Some(".")
+        );
+        assert_eq!(
+            widget_payload
+                .get("searchTruncated")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            widget_payload.get("matchCount").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(widget_payload.get("searchBackendNote").is_none());
+        assert!(widget_payload.get("searchResults").is_none());
         assert!(widget_payload.get("searchQuery").is_none());
         assert!(widget_payload.get("filesScanned").is_none());
 

@@ -421,16 +421,11 @@
       }
 
       .search-panel {
-        display: grid;
-        gap: 8px;
-        padding: 8px 12px 10px;
-      }
-
-      .search-summary {
-        display: grid;
-        gap: 6px;
-        color: var(--text-2);
-        font-size: 12px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+        padding: 10px 12px;
       }
 
       .panel-head {
@@ -521,48 +516,65 @@
         white-space: nowrap;
       }
 
-      .search-results {
-        border: 0;
-        border-radius: 0;
-        background: var(--bg);
-        max-height: 260px;
-        overflow: auto;
+      .search-target {
+        display: inline-flex;
+        align-items: center;
+        flex: 1 1 auto;
+        max-width: 100%;
+        min-width: 0;
+        gap: 7px;
+        color: var(--text-2);
+        font-size: 12px;
+        white-space: nowrap;
       }
 
-      .search-row {
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 2px;
-        padding: 6px 8px;
-        border-top: 1px solid var(--line);
+      .search-icon {
+        width: 15px;
+        height: 15px;
+        flex: 0 0 auto;
+        color: var(--text-3);
       }
 
-      .search-row:first-child {
-        border-top: 0;
+      .search-icon svg {
+        width: 15px;
+        height: 15px;
+        display: block;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
       }
 
-      .search-loc {
+      .search-label,
+      .search-backend {
+        color: var(--text-3);
+        flex: 0 0 auto;
+      }
+
+      .search-value {
+        display: inline-block;
+        min-width: 0;
+        max-width: 24ch;
+        flex: 0 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text);
+        font-weight: 650;
+      }
+
+      .search-path {
+        max-width: 32ch;
+      }
+
+      .search-meta {
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 auto;
         color: var(--text-3);
         font-size: 11px;
         white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .search-line {
-        color: var(--text-2);
-        font:
-          12px/1.45 "SFMono-Regular",
-          Menlo,
-          Consolas,
-          "Liberation Mono",
-          monospace;
-        white-space: pre-wrap;
-        word-break: break-word;
-      }
-
-      .search-row.is-context .search-line {
-        color: var(--text-3);
       }
 
       .search-note {
@@ -2556,21 +2568,6 @@
           };
         }
 
-        function validateSearchResult(entry) {
-          if (!isPlainObject(entry)) return null;
-          var path = readNonEmptyString(entry.path);
-          var line = readPositiveInteger(entry.line);
-          var text = readString(entry.text);
-          var isContext = entry.isContext === true;
-          if (path === null || line === null || text === null) return null;
-          return {
-            path: path,
-            line: line,
-            text: text,
-            isContext: isContext,
-          };
-        }
-
         function validateListEntry(entry) {
           if (!isPlainObject(entry)) return null;
           var path = readNonEmptyString(entry.path);
@@ -2734,9 +2731,7 @@
             searchPattern: "",
             searchPath: "",
             searchBackend: "",
-            searchBackendNote: "",
             matchCount: 0,
-            searchResults: [],
             searchTruncated: false,
             listPath: "",
             listItemCount: 0,
@@ -2982,20 +2977,13 @@
             var searchPattern = readString(data.searchPattern);
             var searchPath = readNonEmptyString(data.searchPath);
             var searchBackend = readNonEmptyString(data.searchBackend);
-            var searchBackendNote = readString(data.searchBackendNote);
             var matchCount = readNonNegativeInteger(data.matchCount);
-            var searchResults = validateArrayEntries(
-              data.searchResults,
-              validateSearchResult,
-            );
             var searchTruncated = readBoolean(data.searchTruncated);
             if (
               searchPattern === null ||
               searchPath === null ||
               searchBackend === null ||
-              searchBackendNote === null ||
               matchCount === null ||
-              searchResults === null ||
               searchTruncated === null
             ) {
               return invalidPayload(
@@ -3005,9 +2993,7 @@
             next.searchPattern = searchPattern;
             next.searchPath = searchPath;
             next.searchBackend = searchBackend;
-            next.searchBackendNote = searchBackendNote;
             next.matchCount = matchCount;
-            next.searchResults = searchResults;
             next.searchTruncated = searchTruncated;
             return validPayload(next);
           }
@@ -3498,59 +3484,40 @@
           );
         }
 
+        function formatSearchBackend(backend) {
+          return backend === "rust" ? "built-in" : backend;
+        }
+
+        function formatSearchMatchCount(count) {
+          var value = Number(count);
+          if (!Number.isFinite(value) || value < 0) value = 0;
+          return formatTokenCompact(value);
+        }
+
         function renderSearchPanel(current) {
-          var summaryHtml =
-            '<div class="search-summary">' +
-            '<div class="summary-row metrics with-kicker">' +
-            renderSummaryStat("query", "pattern", current.searchPattern, "query") +
-            renderSummaryStat("path", "path", current.searchPath, "path") +
-            renderSummaryStat("backend", "backend", current.searchBackend, "other") +
-            renderSummaryStat(
-              "matches",
-              "matches",
-              current.matchCount,
-              "other",
-            ) +
-            '<span class="panel-kicker summary-kicker">keywords found</span>' +
-            "</div>" +
-            "</div>";
-          var resultsHtml = "";
-          if (current.searchResults.length > 0) {
-            resultsHtml =
-              '<div class="search-results">' +
-              current.searchResults
-                .map(function (entry) {
-                  var lineLabel = entry.line > 0 ? ":" + entry.line : "";
-                  return (
-                    '<div class="search-row' +
-                    (entry.isContext ? " is-context" : "") +
-                    '">' +
-                    '<div class="search-loc">' +
-                    esc(entry.path + lineLabel) +
-                    "</div>" +
-                    '<div class="search-line">' +
-                    esc(entry.text) +
-                    "</div>" +
-                    "</div>"
-                  );
-                })
-                .join("") +
-              "</div>";
-          } else {
-            resultsHtml = '<div class="empty">No matches found.</div>';
-          }
-          var truncatedHtml = current.searchTruncated
-            ? '<div class="search-note">Results truncated by limit.</div>'
-            : "";
-          var backendNoteHtml = current.searchBackendNote
-            ? '<div class="search-note">' + esc(current.searchBackendNote) + "</div>"
-            : "";
+          var matchesText = formatSearchMatchCount(current.matchCount);
           return (
             '<div class="search-panel">' +
-            summaryHtml +
-            resultsHtml +
-            backendNoteHtml +
-            truncatedHtml +
+            '<div class="search-target">' +
+            '<span class="search-icon">' +
+            summaryIconSvg("query") +
+            "</span>" +
+            '<span class="search-label">search</span>' +
+            '<span class="search-value search-pattern">' +
+            esc(current.searchPattern) +
+            "</span>" +
+            '<span class="search-label">in</span>' +
+            '<span class="search-value search-path">' +
+            esc(current.searchPath) +
+            "</span>" +
+            '<span class="search-label">via</span>' +
+            '<span class="search-backend">' +
+            esc(formatSearchBackend(current.searchBackend)) +
+            "</span>" +
+            "</div>" +
+            '<div class="search-meta" aria-label="search metadata">matches: ' +
+            esc(matchesText) +
+            "</div>" +
             "</div>"
           );
         }
