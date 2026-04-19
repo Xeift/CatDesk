@@ -1724,6 +1724,28 @@ fn build_read_file_widget_payload(result: &Value, is_error: bool) -> Option<Valu
     Some(Value::Object(payload))
 }
 
+fn build_file_change_widget_payload(
+    result: &Value,
+    widget_context: Option<&AutoWidgetContext>,
+    is_error: bool,
+    tool_name: &str,
+    title: &str,
+) -> Option<Value> {
+    let structured = result_structured_content(result)?;
+    let mut payload = base_widget_payload(
+        "tool_call",
+        title,
+        widget_state(is_error, widget_context),
+        Some(tool_name),
+    );
+    payload.insert("path".to_string(), structured.get("path")?.clone());
+    if let Some(bytes_written) = structured.get("bytesWritten") {
+        payload.insert("bytesWritten".to_string(), bytes_written.clone());
+    }
+    attach_widget_changed_files(&mut payload, widget_context);
+    Some(Value::Object(payload))
+}
+
 fn build_run_command_widget_payload(
     result: &Value,
     widget_context: Option<&AutoWidgetContext>,
@@ -1835,6 +1857,51 @@ fn build_auto_widget_payload(
                 req,
                 widget_context,
                 "Failed to build read widget payload from structuredContent.".into(),
+            ),
+        },
+        "write" => match build_file_change_widget_payload(
+            result,
+            widget_context,
+            is_error,
+            "write",
+            "Write File",
+        ) {
+            Some(payload) => payload,
+            None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
+            None => build_widget_payload_error(
+                req,
+                widget_context,
+                "Failed to build write widget payload from structuredContent.".into(),
+            ),
+        },
+        "edit" => match build_file_change_widget_payload(
+            result,
+            widget_context,
+            is_error,
+            "edit",
+            "Edit File",
+        ) {
+            Some(payload) => payload,
+            None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
+            None => build_widget_payload_error(
+                req,
+                widget_context,
+                "Failed to build edit widget payload from structuredContent.".into(),
+            ),
+        },
+        "delete" => match build_file_change_widget_payload(
+            result,
+            widget_context,
+            is_error,
+            "delete",
+            "Delete Path",
+        ) {
+            Some(payload) => payload,
+            None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
+            None => build_widget_payload_error(
+                req,
+                widget_context,
+                "Failed to build delete widget payload from structuredContent.".into(),
             ),
         },
         "run_command" => match build_run_command_widget_payload(result, widget_context, is_error) {
@@ -3090,6 +3157,18 @@ mod tests {
             .expect("missing widget payload");
 
         assert_eq!(
+            widget_payload.get("toolName").and_then(Value::as_str),
+            Some("write")
+        );
+        assert_eq!(
+            widget_payload.get("path").and_then(Value::as_str),
+            Some("notes.txt")
+        );
+        assert_eq!(
+            widget_payload.get("bytesWritten").and_then(Value::as_u64),
+            Some(12)
+        );
+        assert_eq!(
             widget_payload.get("hasChanges").and_then(Value::as_bool),
             Some(true)
         );
@@ -3166,6 +3245,15 @@ mod tests {
             .and_then(|result| result.get("_meta"))
             .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
             .expect("missing widget payload");
+        assert_eq!(
+            widget_payload.get("toolName").and_then(Value::as_str),
+            Some("edit")
+        );
+        assert_eq!(
+            widget_payload.get("path").and_then(Value::as_str),
+            Some("notes.txt")
+        );
+        assert!(widget_payload.get("bytesWritten").is_none());
         assert_eq!(
             widget_payload.get("hasChanges").and_then(Value::as_bool),
             Some(true)
@@ -3553,6 +3641,33 @@ mod tests {
         assert_eq!(
             structured.get("message").and_then(Value::as_str),
             Some("deleted file: notes.txt")
+        );
+        let widget_payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        assert_eq!(
+            widget_payload.get("toolName").and_then(Value::as_str),
+            Some("delete")
+        );
+        assert_eq!(
+            widget_payload.get("path").and_then(Value::as_str),
+            Some("notes.txt")
+        );
+        assert_eq!(
+            widget_payload.get("hasChanges").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            widget_payload
+                .get("changedFiles")
+                .and_then(Value::as_array)
+                .and_then(|files| files.first())
+                .and_then(|file| file.get("status"))
+                .and_then(Value::as_str),
+            Some("deleted")
         );
 
         let _ = std::fs::remove_dir_all(workspace_root);

@@ -312,7 +312,34 @@
         padding: 10px 12px;
       }
 
-      .read-target {
+      .change-card {
+        border: 0;
+        background: transparent;
+      }
+
+      .change-card > summary {
+        list-style: none;
+        cursor: pointer;
+      }
+
+      .change-card > summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .change-card[open] > summary {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .change-panel {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+        padding: 10px 12px;
+      }
+
+      .read-target,
+      .change-target {
         display: inline-flex;
         align-items: center;
         flex: 1 1 auto;
@@ -323,14 +350,16 @@
         font-size: 12px;
       }
 
-      .read-icon {
+      .read-icon,
+      .change-icon {
         width: 15px;
         height: 15px;
         flex: 0 0 auto;
         color: var(--text-3);
       }
 
-      .read-icon svg {
+      .read-icon svg,
+      .change-icon svg {
         width: 15px;
         height: 15px;
         display: block;
@@ -341,18 +370,21 @@
         stroke-linejoin: round;
       }
 
-      .read-label {
+      .read-label,
+      .change-label {
         color: var(--text-3);
       }
 
-      .read-name-wrap {
+      .read-name-wrap,
+      .change-name-wrap {
         position: relative;
         display: inline-flex;
         min-width: 0;
         max-width: 100%;
       }
 
-      .read-name {
+      .read-name,
+      .change-name {
         display: inline-block;
         min-width: 0;
         max-width: 100%;
@@ -364,21 +396,27 @@
         outline: none;
       }
 
-      .read-name-full {
+      .read-name-full,
+      .change-name-full {
         display: none;
       }
 
       .read-name-wrap:hover .read-name-short,
-      .read-name-wrap:focus-within .read-name-short {
+      .read-name-wrap:focus-within .read-name-short,
+      .change-name-wrap:hover .change-name-short,
+      .change-name-wrap:focus-within .change-name-short {
         display: none;
       }
 
       .read-name-wrap:hover .read-name-full,
-      .read-name-wrap:focus-within .read-name-full {
+      .read-name-wrap:focus-within .read-name-full,
+      .change-name-wrap:hover .change-name-full,
+      .change-name-wrap:focus-within .change-name-full {
         display: inline-block;
       }
 
-      .read-meta {
+      .read-meta,
+      .change-meta {
         display: inline-flex;
         align-items: center;
         flex: 0 0 auto;
@@ -388,7 +426,8 @@
         white-space: nowrap;
       }
 
-      .read-meta-item {
+      .read-meta-item,
+      .change-meta-item {
         display: inline-flex;
         align-items: center;
         gap: 4px;
@@ -2728,6 +2767,8 @@
             readFilePath: "",
             readFileSizeBytes: 0,
             readFileLineCount: 0,
+            changeFilePath: "",
+            changeBytesWritten: 0,
             searchPattern: "",
             searchPath: "",
             searchBackend: "",
@@ -2774,9 +2815,9 @@
           }
 
           var panelMode = readNonEmptyString(data.panelMode);
-          if (panelMode !== "tool_call" && panelMode !== "final_review") {
+          if (panelMode !== "tool_call") {
             return invalidPayload(
-              "Widget payload panelMode must be tool_call or final_review.",
+              "Widget payload panelMode must be tool_call.",
             );
           }
 
@@ -2837,10 +2878,6 @@
           }
           next.call = call;
           next.detail = detail;
-
-          if (panelMode === "final_review") {
-            return validPayload(next);
-          }
 
           if (data.payloadKind === "widget_payload_error") {
             if (!next.call || !next.detail) {
@@ -3014,6 +3051,26 @@
             next.readFilePath = readFilePath;
             next.readFileSizeBytes = readFileSizeBytes;
             next.readFileLineCount = readFileLineCount;
+            return validPayload(next);
+          }
+
+          if (
+            toolName === "write" ||
+            toolName === "edit" ||
+            toolName === "delete"
+          ) {
+            var changeFilePath = readNonEmptyString(data.path);
+            var changeBytesWritten =
+              toolName === "write"
+                ? readNonNegativeInteger(data.bytesWritten)
+                : 0;
+            if (changeFilePath === null || changeBytesWritten === null) {
+              return invalidPayload(
+                toolName + " widget payload is missing required fields.",
+              );
+            }
+            next.changeFilePath = changeFilePath;
+            next.changeBytesWritten = changeBytesWritten;
             return validPayload(next);
           }
 
@@ -3415,6 +3472,69 @@
             "</span>" +
             "</div>" +
             "</div>"
+          );
+        }
+
+        function renderChangeMeta(file) {
+          if (!file) {
+            return '<span class="change-meta-item">+0 / -0</span>';
+          }
+          if (isDirectoryFile(file)) {
+            return (
+              '<span class="change-meta-item status-label">' +
+              esc(directoryMetaLabel(file)) +
+              "</span>"
+            );
+          }
+          return (
+            '<span class="change-meta-item counts"><span class="plus">+' +
+            esc(file.added) +
+            '</span><span class="minus">-' +
+            esc(file.removed) +
+            "</span></span>"
+          );
+        }
+
+        function renderFileChangePanel(current) {
+          var file =
+            current.changedFiles.length > 0 ? current.changedFiles[0] : null;
+          var filePath = file && file.path ? file.path : current.changeFilePath;
+          var fileName = fileNameFromPath(filePath);
+          var bodyHtml = file
+            ? '<div class="diff-wrap">' + renderFileBody(file) + "</div>"
+            : "";
+          var summaryHtml =
+            '<div class="change-panel">' +
+            '<div class="change-target">' +
+            '<span class="change-icon">' +
+            summaryIconSvg("file") +
+            "</span>" +
+            '<span class="change-label">' +
+            esc(current.toolName) +
+            "</span>" +
+            '<span class="change-name-wrap">' +
+            '<span class="change-name change-name-short" tabindex="0">' +
+            esc(fileName) +
+            "</span>" +
+            '<span class="change-name change-name-full" tabindex="0">' +
+            esc(filePath) +
+            "</span>" +
+            "</span>" +
+            "</div>" +
+            '<div class="change-meta" aria-label="file change metadata">' +
+            renderChangeMeta(file) +
+            "</div>" +
+            "</div>";
+          if (!file) {
+            return summaryHtml;
+          }
+          return (
+            '<details class="change-card">' +
+            "<summary>" +
+            summaryHtml +
+            "</summary>" +
+            bodyHtml +
+            "</details>"
           );
         }
 
@@ -5389,10 +5509,7 @@
             totalTokens: 0,
           };
           var historyCallCount = Number(current.historyToolCallCount);
-          var currentLabel =
-            current.panelMode === "final_review"
-              ? "This turn"
-              : "This tool call";
+          var currentLabel = "This tool call";
           if (!Number.isFinite(callCount) || callCount < 0) callCount = 0;
           if (!Number.isFinite(historyCallCount) || historyCallCount < 0)
             historyCallCount = 0;
@@ -5825,7 +5942,6 @@
           if (!root) return;
           var fromLoading = tokenRollState.mode === "loading";
 
-          var isFinal = view.panelMode === "final_review";
           var isCatDeskInstruction =
             view.panelMode === "tool_call" &&
             view.toolName === "catdesk_instruction";
@@ -5835,11 +5951,14 @@
             view.panelMode === "tool_call" && view.toolName === "search";
           var isReadFile =
             view.panelMode === "tool_call" && view.toolName === "read";
+          var isFileChange =
+            view.panelMode === "tool_call" &&
+            (view.toolName === "write" ||
+              view.toolName === "edit" ||
+              view.toolName === "delete");
           var isListFiles =
             view.panelMode === "tool_call" && view.toolName === "list_files";
-          var filesEmpty = isFinal
-            ? "No pending changed files."
-            : "No file changes in this tool call.";
+          var filesEmpty = "No file changes in this tool call.";
           var filesOpenCount = view.changedFiles.length > 0 ? 1 : 0;
           var instructionSectionHtml = "";
           if (isCatDeskInstruction) {
@@ -5877,6 +5996,15 @@
               "</div>" +
               "</section>";
           }
+          var fileChangeSectionHtml = "";
+          if (isFileChange) {
+            fileChangeSectionHtml =
+              '<section class="section">' +
+              '<div class="section-body">' +
+              renderFileChangePanel(view) +
+              "</div>" +
+              "</section>";
+          }
           var listSectionHtml = "";
           if (isListFiles) {
             listSectionHtml =
@@ -5901,8 +6029,9 @@
               !isRunCommand &&
               !isSearchText &&
               !isReadFile &&
+              !isFileChange &&
               !isListFiles) ||
-            view.hasChanges
+            (view.hasChanges && !isFileChange)
           ) {
             filesSectionHtml =
               '<section class="section">' +
@@ -5920,6 +6049,7 @@
             commandSectionHtml +
             searchSectionHtml +
             readFileSectionHtml +
+            fileChangeSectionHtml +
             listSectionHtml +
             detailSectionHtml +
             filesSectionHtml;
