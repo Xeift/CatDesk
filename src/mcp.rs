@@ -228,12 +228,13 @@ fn widget_resource_ui_meta(public_base_url: Option<&str>) -> Value {
 
 fn handle_resources_list(req: &JsonRpcRequest, public_base_url: Option<&str>) -> JsonRpcResponse {
     let ui_meta = widget_resource_ui_meta(public_base_url);
+    let resource_uri = current_widget_resource_uri();
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
             "resources": [
                 {
-                    "uri": UI_TEMPLATE_URI,
+                    "uri": resource_uri,
                     "name": "CatDesk dashboard widget",
                     "description": "Embedded ChatGPT widget for CatDesk status and timeline data.",
                     "mimeType": UI_TEMPLATE_MIME_TYPE,
@@ -242,6 +243,13 @@ fn handle_resources_list(req: &JsonRpcRequest, public_base_url: Option<&str>) ->
             ],
             "nextCursor": null
         }),
+    )
+}
+
+fn current_widget_resource_uri() -> String {
+    format!(
+        "{UI_TEMPLATE_URI}?tokenStatsLayout={}",
+        current_token_stats_layout().as_str()
     )
 }
 
@@ -260,8 +268,8 @@ fn handle_resources_read(req: &JsonRpcRequest, public_base_url: Option<&str>) ->
         .get("uri")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let text = if uri == UI_TEMPLATE_URI {
-        render_widget_html(UI_TEMPLATE_URI)
+    let text = if uri == UI_TEMPLATE_URI || uri.starts_with(&format!("{UI_TEMPLATE_URI}?")) {
+        render_widget_html(uri)
     } else {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
     };
@@ -1306,7 +1314,8 @@ fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
 }
 
 fn ensure_output_template_meta(meta_value: &mut Value) {
-    ensure_output_template_meta_with_uri(meta_value, UI_TEMPLATE_URI);
+    let resource_uri = current_widget_resource_uri();
+    ensure_output_template_meta_with_uri(meta_value, &resource_uri);
 }
 
 fn ensure_output_template_meta_with_uri(meta_value: &mut Value, resource_uri: &str) {
@@ -1403,7 +1412,8 @@ fn ensure_tool_descriptor_widget_template(tool: &mut Value) {
     let meta_value = tool_obj
         .entry("_meta".to_string())
         .or_insert_with(|| json!({}));
-    ensure_output_template_meta_with_uri(meta_value, UI_TEMPLATE_URI);
+    let resource_uri = current_widget_resource_uri();
+    ensure_output_template_meta_with_uri(meta_value, &resource_uri);
 }
 
 fn extract_tool_result_text(result: &Value) -> String {

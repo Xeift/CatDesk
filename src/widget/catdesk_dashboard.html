@@ -2272,6 +2272,8 @@
         var INITIAL_TOKEN_STATS_LAYOUT =
           "__catdeskInitialTokenStatsLayoutPlaceholder__";
         var WIDGET_PAYLOAD_META_KEY = "catdesk/widgetPayload";
+        var TOKEN_STATS_LAYOUT_STORAGE_KEY = "catdesk.tokenStatsLayout";
+        var tokenStatsLayoutSetting = initialTokenStatsLayout();
 
         function esc(value) {
           return String(value)
@@ -2380,14 +2382,42 @@
             : null;
         }
 
-        function currentTokenStatsLayout() {
-          var viewLayout =
-            view && validateTokenStatsLayout(view.tokenStatsLayout);
-          if (viewLayout !== null) return viewLayout;
+        function readStoredTokenStatsLayout() {
+          try {
+            return validateTokenStatsLayout(
+              window.localStorage.getItem(TOKEN_STATS_LAYOUT_STORAGE_KEY),
+            );
+          } catch (_error) {
+            return null;
+          }
+        }
+
+        function writeStoredTokenStatsLayout(layout) {
+          try {
+            window.localStorage.setItem(TOKEN_STATS_LAYOUT_STORAGE_KEY, layout);
+          } catch (_error) {}
+        }
+
+        function initialTokenStatsLayout() {
+          var storedLayout = readStoredTokenStatsLayout();
+          if (storedLayout !== null) return storedLayout;
           var initialLayout = validateTokenStatsLayout(
             INITIAL_TOKEN_STATS_LAYOUT,
           );
           return initialLayout === null ? "right" : initialLayout;
+        }
+
+        function setTokenStatsLayoutSetting(layout) {
+          var nextLayout = validateTokenStatsLayout(layout);
+          if (nextLayout === null) return false;
+          tokenStatsLayoutSetting = nextLayout;
+          writeStoredTokenStatsLayout(nextLayout);
+          return true;
+        }
+
+        function currentLoadingTokenStatsLayout() {
+          var storedLayout = readStoredTokenStatsLayout();
+          return storedLayout === null ? tokenStatsLayoutSetting : storedLayout;
         }
 
         function tokenStatsLayoutClassName(layout) {
@@ -4787,7 +4817,8 @@
                   if (nextLayout === null) {
                     throw new Error("Failed to update token stats layout");
                   }
-                  view.tokenStatsLayout = nextLayout;
+                  setTokenStatsLayoutSetting(nextLayout);
+                  if (view) view.tokenStatsLayout = nextLayout;
                   render();
                 });
             })
@@ -5868,7 +5899,7 @@
           stopTokenRollAnimation();
           stopInstructionMascotAnimation();
           tokenRollState.signature = "";
-          var tokenStatsLayout = currentTokenStatsLayout();
+          var tokenStatsLayout = currentLoadingTokenStatsLayout();
           var tokenPanelHtml = renderLoadingTokenPanel(tokenStatsLayout);
           var mainContentHtml =
             '<div class="main-stack">' +
@@ -5981,6 +6012,7 @@
             root.innerHTML = "";
             return true;
           }
+          setTokenStatsLayoutSetting(nextView.tokenStatsLayout);
           view = nextView;
           render();
           return true;
