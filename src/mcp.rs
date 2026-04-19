@@ -12,7 +12,8 @@ use crate::command;
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
 use crate::state::{
-    AgentsPathMode, Mode, ToolMode, app_config_path, load_app_config, user_home_dir,
+    AgentsPathMode, Mode, TokenStatsLayout, ToolMode, app_config_path, load_app_config,
+    user_home_dir,
 };
 use crate::workspace_tools;
 
@@ -24,6 +25,8 @@ const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
 const WIDGET_RESOURCE_URI_PLACEHOLDER: &str = "__catdeskWidgetResourceUriPlaceholder__";
+const INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER: &str =
+    "__catdeskInitialTokenStatsLayoutPlaceholder__";
 const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
@@ -243,7 +246,12 @@ fn handle_resources_list(req: &JsonRpcRequest, public_base_url: Option<&str>) ->
 }
 
 fn render_widget_html(resource_uri: &str) -> String {
-    CATDESK_WIDGET_HTML.replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
+    CATDESK_WIDGET_HTML
+        .replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
+        .replace(
+            INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER,
+            current_token_stats_layout().as_str(),
+        )
 }
 
 fn handle_resources_read(req: &JsonRpcRequest, public_base_url: Option<&str>) -> JsonRpcResponse {
@@ -1183,6 +1191,7 @@ fn catdesk_instruction_widget_payload_with_cards(
             payload_obj.insert(key.clone(), value.clone());
         }
     }
+    payload_obj.insert("tokenStatsLayoutUrl".to_string(), json!(""));
     payload_obj.insert("configPath".to_string(), json!(config_path));
     payload_obj.insert("configPathDisplay".to_string(), json!(config_path_display));
     payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
@@ -1513,14 +1522,25 @@ fn base_widget_payload(
     tool_name: Option<&str>,
 ) -> Map<String, Value> {
     let mut payload = Map::new();
+    let token_stats_layout = current_token_stats_layout();
     payload.insert("schema".to_string(), json!("catdesk.review.v1"));
     payload.insert("panelMode".to_string(), json!(panel_mode));
     payload.insert("title".to_string(), json!(title));
     payload.insert("state".to_string(), json!(state));
+    payload.insert(
+        "tokenStatsLayout".to_string(),
+        json!(token_stats_layout.as_str()),
+    );
     if let Some(tool_name) = tool_name {
         payload.insert("toolName".to_string(), json!(tool_name));
     }
     payload
+}
+
+fn current_token_stats_layout() -> TokenStatsLayout {
+    load_app_config()
+        .map(|config| config.token_stats_layout)
+        .unwrap_or_default()
 }
 
 fn attach_widget_changed_files(
@@ -3471,11 +3491,22 @@ hello world"
             .and_then(|entry| entry.get("_meta"))
             .and_then(|meta| meta.get("ui"))
             .expect("missing widget ui meta");
+        let text = resource_resp
+            .result
+            .as_ref()
+            .and_then(|result| result.get("contents"))
+            .and_then(Value::as_array)
+            .and_then(|contents| contents.first())
+            .and_then(|entry| entry.get("text"))
+            .and_then(Value::as_str)
+            .expect("missing widget html");
 
         assert_eq!(
             ui_meta.get("prefersBorder").and_then(Value::as_bool),
             Some(true)
         );
+        assert!(text.contains("var INITIAL_TOKEN_STATS_LAYOUT ="));
+        assert!(!text.contains(INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER));
         assert_eq!(
             ui_meta
                 .get("csp")
@@ -3585,6 +3616,13 @@ hello world"
             Some("/tmp/workspace")
         );
         assert!(widget_payload.get("agentsPathMode").is_some());
+        assert!(widget_payload.get("tokenStatsLayout").is_some());
+        assert_eq!(
+            widget_payload
+                .get("tokenStatsLayoutUrl")
+                .and_then(Value::as_str),
+            Some("")
+        );
         assert!(widget_payload.get("agentsWorkspacePath").is_some());
         assert!(widget_payload.get("agentsCatdeskPath").is_some());
         assert!(widget_payload.get("agentsCodexPath").is_some());

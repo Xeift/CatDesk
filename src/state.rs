@@ -79,12 +79,33 @@ pub enum AgentsPathMode {
     Disabled,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenStatsLayout {
+    Disabled,
+    #[default]
+    Right,
+    Below,
+}
+
+impl TokenStatsLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Right => "right",
+            Self::Below => "below",
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     pub ngrok_authtoken: Option<String>,
     #[serde(default)]
     pub agents_path_mode: AgentsPathMode,
+    #[serde(default)]
+    pub token_stats_layout: TokenStatsLayout,
     #[serde(default)]
     pub partner_binagotchy_seed: Option<String>,
     #[serde(default)]
@@ -101,6 +122,7 @@ impl Default for AppConfig {
         Self {
             ngrok_authtoken: None,
             agents_path_mode: AgentsPathMode::Default,
+            token_stats_layout: TokenStatsLayout::Right,
             partner_binagotchy_seed: None,
             set_catdesk_as_co_author: false,
             theme: theme::DEFAULT_THEME_ID.to_string(),
@@ -515,6 +537,14 @@ pub fn save_agents_path_mode(mode: AgentsPathMode) -> std::io::Result<PathBuf> {
     let path = app_config_path()?;
     let mut config = AppConfig::load_from_path(&path)?;
     config.agents_path_mode = mode;
+    config.save_to_path(&path)?;
+    Ok(path)
+}
+
+pub fn save_token_stats_layout(layout: TokenStatsLayout) -> std::io::Result<PathBuf> {
+    let path = app_config_path()?;
+    let mut config = AppConfig::load_from_path(&path)?;
+    config.token_stats_layout = layout;
     config.save_to_path(&path)?;
     Ok(path)
 }
@@ -1181,6 +1211,29 @@ toolCallCount = 7
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
         assert!(matches!(saved.agents_path_mode, AgentsPathMode::Codex));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_config_round_trips_token_stats_layout() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-token-layout-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp config dir");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let config = AppConfig {
+            token_stats_layout: TokenStatsLayout::Below,
+            ..AppConfig::default()
+        };
+        config.save_to_path(&config_path).expect("save config");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("load config");
+        assert!(matches!(saved.token_stats_layout, TokenStatsLayout::Below));
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);

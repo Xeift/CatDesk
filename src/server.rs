@@ -14,8 +14,8 @@ use tokio::sync::{Mutex, mpsc::UnboundedSender};
 use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, WIDGET_PAYLOAD_META_KEY};
 use crate::state::{
-    AgentsPathMode, FlowDirection, ServerUiEvent, SharedState, UsageTotals, parse_seed_hex,
-    save_agents_path_mode,
+    AgentsPathMode, FlowDirection, ServerUiEvent, SharedState, TokenStatsLayout, UsageTotals,
+    parse_seed_hex, save_agents_path_mode, save_token_stats_layout,
 };
 
 const STATELESS_FLOW_ID: &str = "stateless";
@@ -57,6 +57,10 @@ pub fn router(
         .route(
             "/agents/path-state",
             get(get_agents_path_state).options(options_agents_path_state),
+        )
+        .route(
+            "/layout/token-stats",
+            post(post_token_stats_layout).options(options_token_stats_layout),
         )
         .route(&mcp_path, post(post_mcp))
         .route(&mcp_path, get(get_mcp))
@@ -248,6 +252,14 @@ fn attach_catdesk_instruction_actions(
         ),
     );
     widget_payload.insert(
+        "tokenStatsLayoutUrl".to_string(),
+        json!(
+            public_base_url
+                .map(|base| format!("{base}/layout/token-stats"))
+                .unwrap_or_default()
+        ),
+    );
+    widget_payload.insert(
         "partnerBinagotchySeed".to_string(),
         json!(partner_binagotchy_seed.unwrap_or("")),
     );
@@ -344,6 +356,15 @@ fn parse_agents_path_mode(value: &str) -> Option<AgentsPathMode> {
     }
 }
 
+fn parse_token_stats_layout(value: &str) -> Option<TokenStatsLayout> {
+    match value.trim() {
+        "disabled" => Some(TokenStatsLayout::Disabled),
+        "right" => Some(TokenStatsLayout::Right),
+        "below" => Some(TokenStatsLayout::Below),
+        _ => None,
+    }
+}
+
 async fn post_agents_path_mode(
     State(s): State<ServerState>,
     Form(form): Form<HashMap<String, String>>,
@@ -385,7 +406,60 @@ async fn post_agents_path_mode(
     agents_state_response(&workspace_root)
 }
 
+async fn post_token_stats_layout(
+    State(_s): State<ServerState>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response<Body> {
+    let Some(layout_raw) = form.get("layout").map(String::as_str) else {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": "missing layout" }).to_string(),
+            ))
+            .unwrap();
+    };
+    let Some(layout) = parse_token_stats_layout(layout_raw) else {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": "invalid layout" }).to_string(),
+            ))
+            .unwrap();
+    };
+
+    if let Err(error) = save_token_stats_layout(layout) {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": error.to_string() }).to_string(),
+            ))
+            .unwrap();
+    }
+
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "ok": true,
+                "tokenStatsLayout": layout.as_str(),
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
 async fn options_agents_path_mode(State(_s): State<ServerState>) -> Response<Body> {
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn options_token_stats_layout(State(_s): State<ServerState>) -> Response<Body> {
     with_widget_action_cors(Response::builder())
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
@@ -676,6 +750,12 @@ mod tests {
                 .get("agentsPathStateUrl")
                 .and_then(Value::as_str),
             Some("https://example.ngrok.app/agents/path-state")
+        );
+        assert_eq!(
+            widget_payload
+                .get("tokenStatsLayoutUrl")
+                .and_then(Value::as_str),
+            Some("https://example.ngrok.app/layout/token-stats")
         );
         assert!(widget_payload.get("widgetMascot").is_some());
         assert_eq!(card.get("isPartner").and_then(Value::as_bool), Some(true));

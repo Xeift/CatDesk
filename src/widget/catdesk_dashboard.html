@@ -845,12 +845,18 @@
       .agents-fan-sector-group .agents-fan-icon path,
       .agents-fan-sector-group .agents-fan-icon polyline,
       .agents-fan-sector-group .agents-fan-icon line,
+      .agents-fan-sector-group .agents-fan-icon rect,
       .agents-fan-sector-group .agents-fan-icon circle {
         stroke: currentColor;
         fill: none;
         stroke-width: 1.8;
         stroke-linecap: round;
         stroke-linejoin: round;
+      }
+
+      .agents-fan-sector-group .agents-fan-icon .agents-fan-fill {
+        stroke: none;
+        fill: currentColor;
       }
 
       .agents-fan-sector-group .agents-fan-icon.is-folder-icon path,
@@ -942,6 +948,36 @@
 
       .agents-fan-sector-group[data-agents-option="catdesk"] {
         --fan-delay: 66ms;
+        --start-x: -31.3px;
+        --start-y: -24.9px;
+        --end-x: 3.9px;
+        --end-y: 3.1px;
+        --hover-x: 9.4px;
+        --hover-y: 7.4px;
+      }
+
+      .agents-fan-sector-group[data-token-layout-option="disabled"] {
+        --fan-delay: 0ms;
+        --start-x: -31.3px;
+        --start-y: 24.9px;
+        --end-x: 3.9px;
+        --end-y: -3.1px;
+        --hover-x: 9.4px;
+        --hover-y: -7.4px;
+      }
+
+      .agents-fan-sector-group[data-token-layout-option="right"] {
+        --fan-delay: 24ms;
+        --start-x: -40px;
+        --start-y: 0px;
+        --end-x: 5px;
+        --end-y: 0px;
+        --hover-x: 12px;
+        --hover-y: 0px;
+      }
+
+      .agents-fan-sector-group[data-token-layout-option="below"] {
+        --fan-delay: 48ms;
         --start-x: -31.3px;
         --start-y: -24.9px;
         --end-x: 3.9px;
@@ -1746,6 +1782,10 @@
         align-self: start;
       }
 
+      .files-token-row.token-layout-below {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
       .completion-shell {
         position: relative;
         border-radius: 10px;
@@ -1893,6 +1933,58 @@
         letter-spacing: 0.08em;
         text-transform: uppercase;
         margin-bottom: 1px;
+      }
+
+      .token-side-footer {
+        align-content: center;
+        min-width: 0;
+      }
+
+      .token-side-footer.token-side-hover {
+        min-height: 30px;
+      }
+
+      .token-side-footer .token-face {
+        grid-template-columns: repeat(5, minmax(72px, 1fr));
+        align-items: stretch;
+        gap: 8px;
+      }
+
+      .token-side-footer .token-face-label {
+        display: none;
+      }
+
+      .token-side-footer .token-face-history {
+        inset: 6px 8px;
+      }
+
+      .token-side-footer .token-line {
+        min-width: 0;
+        flex-direction: row;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding-left: 0;
+        border-left: 0;
+        white-space: nowrap;
+      }
+
+      .token-side-footer .token-line + .token-line {
+        padding-left: 8px;
+        border-left: 1px solid var(--line);
+      }
+
+      .token-side-footer .token-key {
+        font-size: 10px;
+      }
+
+      .token-side-footer .token-value-wrap {
+        justify-items: start;
+      }
+
+      .token-side-footer .token-value-text,
+      .token-side-footer .token-value-ghost {
+        text-align: left;
       }
 
       .token-line {
@@ -2144,6 +2236,10 @@
         .files-token-row {
           grid-template-columns: 1fr;
         }
+
+        .token-side-footer .token-face {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
       }
     </style>
   </head>
@@ -2166,12 +2262,15 @@
 
         var binagotchyBrowserBindingsBound = false;
         var agentsFanBindingsBound = false;
+        var tokenLayoutFanBindingsBound = false;
 
         var MASCOT_ALPHABET =
           ".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
         var FINAL_SUMMARY_TEMPLATE_URI =
           "ui://widget/catdesk-dashboard-final-summary.html";
         var WIDGET_RESOURCE_URI = "__catdeskWidgetResourceUriPlaceholder__";
+        var INITIAL_TOKEN_STATS_LAYOUT =
+          "__catdeskInitialTokenStatsLayoutPlaceholder__";
         var WIDGET_PAYLOAD_META_KEY = "catdesk/widgetPayload";
 
         function esc(value) {
@@ -2273,6 +2372,28 @@
             value === "disabled"
             ? value
             : null;
+        }
+
+        function validateTokenStatsLayout(value) {
+          return value === "disabled" || value === "right" || value === "below"
+            ? value
+            : null;
+        }
+
+        function currentTokenStatsLayout() {
+          var viewLayout =
+            view && validateTokenStatsLayout(view.tokenStatsLayout);
+          if (viewLayout !== null) return viewLayout;
+          var initialLayout = validateTokenStatsLayout(
+            INITIAL_TOKEN_STATS_LAYOUT,
+          );
+          return initialLayout === null ? "right" : initialLayout;
+        }
+
+        function tokenStatsLayoutClassName(layout) {
+          return layout === "below"
+            ? " token-layout-below"
+            : " token-layout-right";
         }
 
         function validateMascotFrame(value) {
@@ -2451,6 +2572,8 @@
             changedFiles: common.changedFiles,
             hasChanges: common.hasChanges,
             toolName: common.toolName,
+            tokenStatsLayout: common.tokenStatsLayout,
+            tokenStatsLayoutUrl: "",
             call: "",
             detail: "",
             workspacePath: "",
@@ -2546,6 +2669,7 @@
           var title = readString(data.title);
           var state = readNonEmptyString(data.state);
           var toolName = readNonEmptyString(data.toolName);
+          var tokenStatsLayout = validateTokenStatsLayout(data.tokenStatsLayout);
           var changedFiles = validateArrayEntries(data.changedFiles, validateFile);
           var hasChanges = readBoolean(data.hasChanges);
           var turnTokenUsage = validateTurnTokenUsage(data.turnTokenUsage);
@@ -2560,6 +2684,7 @@
             title === null ||
             state === null ||
             toolName === null ||
+            tokenStatsLayout === null ||
             changedFiles === null ||
             hasChanges === null ||
             turnTokenUsage === null ||
@@ -2585,6 +2710,7 @@
             changedFiles: changedFiles,
             hasChanges: hasChanges,
             toolName: toolName,
+            tokenStatsLayout: tokenStatsLayout,
             turnTokenUsage: turnTokenUsage,
             toolCallCount: toolCallCount,
             historyTurnTokenUsage: historyTurnTokenUsage,
@@ -2619,6 +2745,7 @@
             var agentsPathMode = validateAgentsPathMode(data.agentsPathMode);
             var agentsPathModeUrl = readString(data.agentsPathModeUrl);
             var agentsPathStateUrl = readString(data.agentsPathStateUrl);
+            var tokenStatsLayoutUrl = readString(data.tokenStatsLayoutUrl);
             var agentsPath = readNonEmptyString(data.agentsPath);
             var agentsPathDisplay = readNonEmptyString(data.agentsPathDisplay);
             var agentsWorkspacePath = readNonEmptyString(data.agentsWorkspacePath);
@@ -2659,6 +2786,7 @@
               agentsPathMode === null ||
               agentsPathModeUrl === null ||
               agentsPathStateUrl === null ||
+              tokenStatsLayoutUrl === null ||
               agentsPath === null ||
               agentsPathDisplay === null ||
               agentsWorkspacePath === null ||
@@ -2688,6 +2816,7 @@
             next.agentsPathMode = agentsPathMode;
             next.agentsPathModeUrl = agentsPathModeUrl;
             next.agentsPathStateUrl = agentsPathStateUrl;
+            next.tokenStatsLayoutUrl = tokenStatsLayoutUrl;
             next.agentsPath = agentsPath;
             next.agentsPathDisplay = agentsPathDisplay;
             next.agentsWorkspacePath = agentsWorkspacePath;
@@ -3318,6 +3447,15 @@
               "</svg>"
             );
           }
+          if (kind === "layout") {
+            return (
+              '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" stroke-linecap="round" stroke-linejoin="round">' +
+              '<rect x="2.8" y="3.4" width="10.4" height="9.2" rx="1.2"></rect>' +
+              '<path d="M9.4 3.6v8.8"></path>' +
+              '<path d="M3.1 9.2h6.1"></path>' +
+              "</svg>"
+            );
+          }
           return (
             '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
             '<circle cx="8" cy="8" r="5.25"></circle>' +
@@ -3695,6 +3833,48 @@
               );
             }
 
+            function tokenStatsLayoutLabel(layout) {
+              if (layout === "disabled") return "disabled";
+              if (layout === "below") return "below";
+              return "right";
+            }
+
+            function renderTokenLayoutFanSector(
+              optionKey,
+              ariaLabel,
+              hintText,
+              sectorPath,
+              iconTransform,
+              iconHtml,
+            ) {
+              var isSelected = current.tokenStatsLayout === optionKey;
+              var classes =
+                "agents-fan-sector-group" + (isSelected ? " is-selected" : "");
+              return (
+                '<g class="' +
+                classes +
+                '" data-token-layout-option="' +
+                esc(optionKey) +
+                '" data-token-layout-hint="' +
+                esc(hintText) +
+                '" tabindex="0" role="button" aria-label="' +
+                esc(ariaLabel) +
+                '">' +
+                '<path class="agents-fan-sector-shadow" d="' +
+                sectorPath +
+                '" transform="translate(1 1)"></path>' +
+                '<path class="agents-fan-sector" d="' +
+                sectorPath +
+                '"></path>' +
+                '<g class="agents-fan-icon" transform="' +
+                iconTransform +
+                '">' +
+                iconHtml +
+                "</g>" +
+                "</g>"
+              );
+            }
+
             function renderAgentsPathActionButton() {
               if (!current.agentsPathModeUrl) return "";
               return (
@@ -3789,6 +3969,56 @@
               );
             }
 
+            function renderTokenStatsLayoutActionButton() {
+              if (!current.tokenStatsLayoutUrl) return "";
+              return (
+                '<span class="agents-fan-root" data-token-layout-fan-root data-token-layout-selected="' +
+                esc(current.tokenStatsLayout) +
+                '" data-token-layout-url="' +
+                esc(current.tokenStatsLayoutUrl) +
+                '">' +
+                '<button type="button" class="instruction-path-action agents-fan-trigger" data-token-layout-fan-trigger aria-label="Choose token stats layout">' +
+                materialEditIconSvg() +
+                "</button>" +
+                '<span class="agents-fan-menu" data-token-layout-fan-menu aria-hidden="true" hidden>' +
+                '<svg class="agents-fan-svg" viewBox="0 0 124 176" aria-hidden="true" focusable="false">' +
+                renderTokenLayoutFanSector(
+                  "disabled",
+                  "Disable token stats",
+                  "disabled",
+                  "M37.93 66.05L55.08 39.03A58 58 0 0 1 78.77 68.93L48.55 79.45A26 26 0 0 0 37.93 66.05Z",
+                  "translate(56.13 62.53)",
+                  '<circle cx="0" cy="0" r="6.5"></circle>' +
+                    '<line x1="3" y1="-3" x2="-3" y2="3"></line>' +
+                    '<line x1="-3" y1="-3" x2="3" y2="3"></line>',
+                ) +
+                renderTokenLayoutFanSector(
+                  "right",
+                  "Show token stats on the right",
+                  "right",
+                  "M48.55 79.45L78.77 68.93A58 58 0 0 1 78.77 107.07L48.55 96.55A26 26 0 0 0 48.55 79.45Z",
+                  "translate(65 88)",
+                  '<path class="agents-fan-fill" d="M3 -6.8h2.2a1.6 1.6 0 0 1 1.6 1.6V5.2a1.6 1.6 0 0 1-1.6 1.6H3Z"></path>' +
+                    '<rect x="-6.8" y="-6.8" width="13.6" height="13.6" rx="1.5" ry="1.5"></rect>' +
+                    '<path d="M3 -6.8v13.6"></path>',
+                ) +
+                renderTokenLayoutFanSector(
+                  "below",
+                  "Show token stats below",
+                  "below",
+                  "M48.55 96.55L78.77 107.07A58 58 0 0 1 55.08 136.97L37.93 109.95A26 26 0 0 0 48.55 96.55Z",
+                  "translate(56.13 113.47)",
+                  '<path class="agents-fan-fill" d="M-6.8 3H6.8v2.2a1.6 1.6 0 0 1-1.6 1.6H-5.2a1.6 1.6 0 0 1-1.6-1.6Z"></path>' +
+                    '<rect x="-6.8" y="-6.8" width="13.6" height="13.6" rx="1.5" ry="1.5"></rect>' +
+                    '<path d="M-6.8 3H6.8"></path>',
+                ) +
+                "</svg>" +
+                "</span>" +
+                '<span class="agents-fan-hint" data-token-layout-fan-hint aria-hidden="true" hidden></span>' +
+                "</span>"
+              );
+            }
+
             function renderInstructionPathActionButton() {
               return (
                 '<button type="button" class="instruction-path-action" data-open-binagotchy-browser aria-label="Open binagotchy browser">' +
@@ -3873,6 +4103,14 @@
                 "config.toml",
                 current.configPath,
                 current.configPathDisplay,
+              ) +
+              renderInstructionPathRow(
+                "layout",
+                "token stats",
+                current.tokenStatsLayout,
+                tokenStatsLayoutLabel(current.tokenStatsLayout),
+                renderTokenStatsLayoutActionButton(),
+                current.tokenStatsLayoutUrl ? "has-popout" : "",
               ) +
               renderInstructionPathRow(
                 "binagotchy",
@@ -4082,6 +4320,7 @@
           var menu = fanRoot.querySelector("[data-agents-fan-menu]");
           if (!trigger || !menu) return;
           closeAgentsFans(fanRoot);
+          closeTokenLayoutFans(null);
           clearAgentsFanTimers(fanRoot);
           positionAgentsFanOverlay(fanRoot);
           menu.hidden = false;
@@ -4382,6 +4621,255 @@
               if (event.key === "Escape") closeAgentsFans(null);
             });
             agentsFanBindingsBound = true;
+          }
+        }
+
+        function hideTokenLayoutHint(fanRoot) {
+          var hintNode =
+            fanRoot && fanRoot.querySelector("[data-token-layout-fan-hint]");
+          if (!hintNode) return;
+          hintNode.classList.remove("is-visible");
+          hintNode.setAttribute("aria-hidden", "true");
+          hintNode.hidden = true;
+        }
+
+        function clearTokenLayoutFanTimers(fanRoot) {
+          if (!fanRoot) return;
+          if (fanRoot._tokenLayoutFanHideTimer) {
+            window.clearTimeout(fanRoot._tokenLayoutFanHideTimer);
+            fanRoot._tokenLayoutFanHideTimer = null;
+          }
+          if (fanRoot._tokenLayoutFanOpenFrame) {
+            window.cancelAnimationFrame(fanRoot._tokenLayoutFanOpenFrame);
+            fanRoot._tokenLayoutFanOpenFrame = null;
+          }
+        }
+
+        function positionTokenLayoutFanOverlay(fanRoot) {
+          if (!fanRoot) return;
+          var menu = fanRoot.querySelector("[data-token-layout-fan-menu]");
+          if (!menu) return;
+          var fanRect = fanRoot.getBoundingClientRect();
+          menu.style.left = Math.round(fanRect.left - 9) + "px";
+          menu.style.top =
+            Math.round(fanRect.top + fanRect.height / 2) + "px";
+        }
+
+        function closeTokenLayoutFans(exceptRoot) {
+          Array.prototype.forEach.call(
+            document.querySelectorAll("[data-token-layout-fan-root]"),
+            function (fanRoot) {
+              if (fanRoot === exceptRoot) return;
+              clearTokenLayoutFanTimers(fanRoot);
+              fanRoot.classList.remove("is-open");
+              var trigger = fanRoot.querySelector(
+                "[data-token-layout-fan-trigger]",
+              );
+              var menu = fanRoot.querySelector("[data-token-layout-fan-menu]");
+              if (trigger) trigger.classList.remove("is-open");
+              if (menu) {
+                menu.setAttribute("aria-hidden", "true");
+                fanRoot._tokenLayoutFanHideTimer = window.setTimeout(function () {
+                  menu.hidden = true;
+                  fanRoot._tokenLayoutFanHideTimer = null;
+                }, 180);
+              }
+              hideTokenLayoutHint(fanRoot);
+            },
+          );
+        }
+
+        function openTokenLayoutFan(fanRoot) {
+          if (!fanRoot) return;
+          var trigger = fanRoot.querySelector("[data-token-layout-fan-trigger]");
+          var menu = fanRoot.querySelector("[data-token-layout-fan-menu]");
+          if (!trigger || !menu) return;
+          closeTokenLayoutFans(fanRoot);
+          closeAgentsFans(null);
+          clearTokenLayoutFanTimers(fanRoot);
+          positionTokenLayoutFanOverlay(fanRoot);
+          menu.hidden = false;
+          menu.setAttribute("aria-hidden", "false");
+          fanRoot.classList.remove("is-open");
+          trigger.classList.remove("is-open");
+          void menu.offsetWidth;
+          fanRoot._tokenLayoutFanOpenFrame = window.requestAnimationFrame(
+            function () {
+              fanRoot._tokenLayoutFanOpenFrame = null;
+              fanRoot.classList.add("is-open");
+              trigger.classList.add("is-open");
+            },
+          );
+        }
+
+        function syncTokenLayoutFanDom(fanRoot) {
+          if (!fanRoot || !view) return;
+          fanRoot.setAttribute(
+            "data-token-layout-selected",
+            view.tokenStatsLayout,
+          );
+          var combo = fanRoot.closest(".instruction-path-combo");
+          if (combo) {
+            var codeNode = combo.querySelector(".instruction-path-code");
+            if (codeNode) {
+              codeNode.textContent = view.tokenStatsLayout || "right";
+              codeNode.setAttribute("title", view.tokenStatsLayout || "right");
+            }
+          }
+          Array.prototype.forEach.call(
+            fanRoot.querySelectorAll("[data-token-layout-option]"),
+            function (node) {
+              var option = node.getAttribute("data-token-layout-option") || "";
+              node.classList.toggle(
+                "is-selected",
+                view.tokenStatsLayout === option,
+              );
+            },
+          );
+          hideTokenLayoutHint(fanRoot);
+          positionTokenLayoutFanOverlay(fanRoot);
+        }
+
+        function showTokenLayoutHint(fanRoot, node) {
+          var hintNode =
+            fanRoot && fanRoot.querySelector("[data-token-layout-fan-hint]");
+          if (!hintNode || !fanRoot.classList.contains("is-open")) return;
+          positionTokenLayoutFanOverlay(fanRoot);
+          var hintText = node.getAttribute("data-token-layout-hint") || "";
+          var menu = fanRoot.querySelector("[data-token-layout-fan-menu]");
+          var menuRect = menu ? menu.getBoundingClientRect() : null;
+          var nodeRect = node.getBoundingClientRect();
+          hintNode.textContent = hintText;
+          hintNode.style.left =
+            Math.round((menuRect ? menuRect.left : nodeRect.right) + 114) + "px";
+          hintNode.style.top =
+            Math.round(nodeRect.top + nodeRect.height / 2) + "px";
+          hintNode.hidden = false;
+          hintNode.classList.add("is-visible");
+          hintNode.setAttribute("aria-hidden", "false");
+        }
+
+        function submitTokenStatsLayout(fanRoot, node) {
+          var layout = node.getAttribute("data-token-layout-option") || "";
+          var url =
+            fanRoot.getAttribute("data-token-layout-url") ||
+            view.tokenStatsLayoutUrl ||
+            "";
+          if (!layout || !url) return;
+          closeBinagotchyNotice();
+          window
+            .fetch(url, {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/x-www-form-urlencoded;charset=UTF-8",
+                "ngrok-skip-browser-warning": "1",
+              },
+              body: "layout=" + encodeURIComponent(layout),
+            })
+            .then(function (response) {
+              return response
+                .json()
+                .catch(function () {
+                  return null;
+                })
+                .then(function (payload) {
+                  if (!response.ok || !payload || payload.ok !== true) {
+                    var message =
+                      payload && payload.error
+                        ? String(payload.error)
+                        : "Failed to update token stats layout";
+                    throw new Error(message);
+                  }
+                  var nextLayout = validateTokenStatsLayout(
+                    payload.tokenStatsLayout,
+                  );
+                  if (nextLayout === null) {
+                    throw new Error("Failed to update token stats layout");
+                  }
+                  view.tokenStatsLayout = nextLayout;
+                  render();
+                });
+            })
+            .catch(function (error) {
+              console.error(error);
+              openBinagotchyNotice(
+                "Failed to set token stats layout",
+                error && error.message
+                  ? error.message
+                  : "Failed to set token stats layout",
+                true,
+              );
+            });
+        }
+
+        function bindTokenLayoutFans(root) {
+          if (!root) return;
+          Array.prototype.forEach.call(
+            root.querySelectorAll("[data-token-layout-fan-root]"),
+            function (fanRoot) {
+              var trigger = fanRoot.querySelector(
+                "[data-token-layout-fan-trigger]",
+              );
+              var menu = fanRoot.querySelector("[data-token-layout-fan-menu]");
+              var optionNodes = fanRoot.querySelectorAll(
+                "[data-token-layout-option]",
+              );
+              if (!trigger || !menu || !optionNodes.length) return;
+
+              trigger.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (fanRoot.classList.contains("is-open")) {
+                  closeTokenLayoutFans(null);
+                  return;
+                }
+                openTokenLayoutFan(fanRoot);
+                syncTokenLayoutFanDom(fanRoot);
+              });
+
+              Array.prototype.forEach.call(optionNodes, function (node) {
+                function selectOption(event) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeTokenLayoutFans(null);
+                  submitTokenStatsLayout(fanRoot, node);
+                }
+
+                node.addEventListener("mousedown", function (event) {
+                  event.preventDefault();
+                });
+                node.addEventListener("mouseenter", function () {
+                  showTokenLayoutHint(fanRoot, node);
+                });
+                node.addEventListener("mouseleave", function () {
+                  hideTokenLayoutHint(fanRoot);
+                });
+                node.addEventListener("focus", function () {
+                  showTokenLayoutHint(fanRoot, node);
+                });
+                node.addEventListener("blur", function () {
+                  hideTokenLayoutHint(fanRoot);
+                });
+                node.addEventListener("click", selectOption);
+                node.addEventListener("keydown", function (event) {
+                  if (event.key === "Enter" || event.key === " ") {
+                    selectOption(event);
+                  }
+                });
+              });
+            },
+          );
+
+          if (!tokenLayoutFanBindingsBound) {
+            document.addEventListener("click", function (event) {
+              if (event.target.closest("[data-token-layout-fan-root]")) return;
+              closeTokenLayoutFans(null);
+            });
+            window.addEventListener("keydown", function (event) {
+              if (event.key === "Escape") closeTokenLayoutFans(null);
+            });
+            tokenLayoutFanBindingsBound = true;
           }
         }
 
@@ -4777,6 +5265,12 @@
 
         function renderTurnToken(current) {
           if (!current) return "";
+          var tokenStatsLayout = validateTokenStatsLayout(current.tokenStatsLayout);
+          if (tokenStatsLayout === "disabled") return "";
+          if (tokenStatsLayout === null) tokenStatsLayout = "right";
+          var sideClass =
+            "token-side" +
+            (tokenStatsLayout === "below" ? " token-side-footer" : "");
           var usage = current.turnTokenUsage || {
             inputTokens: 0,
             outputTokens: 0,
@@ -4806,7 +5300,9 @@
           if (!hasCurrent && !hasHistory) return "";
           if (!hasHistory) {
             return (
-              '<div class="token-side">' +
+              '<div class="' +
+              sideClass +
+              '">' +
               renderTokenFace(usage, callCount, "", {
                 faceClass: "token-face-live",
                 animate: true,
@@ -4815,7 +5311,9 @@
             );
           }
           return (
-            '<div class="token-side token-side-hover" tabindex="0" aria-label="Hover to show historical totals">' +
+            '<div class="' +
+            sideClass +
+            ' token-side-hover" tabindex="0" aria-label="Hover to show historical totals">' +
             renderTokenFace(usage, callCount, currentLabel, {
               faceClass: "token-face-live",
               animate: true,
@@ -4871,6 +5369,7 @@
             current.title,
             current.state,
             current.command,
+            current.tokenStatsLayout,
             current.searchPattern,
             current.searchPath,
             current.searchBackend,
@@ -5078,12 +5577,18 @@
           tokenRollState.rafId = window.requestAnimationFrame(tick);
         }
 
-        function renderLoadingTokenPanel() {
+        function renderLoadingTokenPanel(tokenStatsLayout) {
+          if (tokenStatsLayout === "disabled") return "";
+          var sideClass =
+            "token-side" +
+            (tokenStatsLayout === "below" ? " token-side-footer" : "");
           return (
-            '<div class="token-side">' +
+            '<div class="' +
+            sideClass +
+            '">' +
             renderTokenFace(
               { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-              0,
+              1,
               "This tool call",
               {
                 faceClass: "token-face-live token-face-loading",
@@ -5314,9 +5819,13 @@
             filesSectionHtml;
           var contentRowHtml = "";
           if (mainContentHtml && tokenPanelHtml) {
+            var tokenLayoutClass = tokenStatsLayoutClassName(
+              view.tokenStatsLayout,
+            );
             contentRowHtml =
               '<div class="files-token-row' +
               (isCatDeskInstruction ? " has-instruction-popout" : "") +
+              tokenLayoutClass +
               '">' +
               '<div class="main-stack">' +
               mainContentHtml +
@@ -5343,6 +5852,7 @@
           }
           bindBinagotchyBrowser(root);
           bindAgentsPathFans(root);
+          bindTokenLayoutFans(root);
 
           playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
           if (fromLoading && !shouldAnimateLiveTokenFace(view)) {
@@ -5358,9 +5868,9 @@
           stopTokenRollAnimation();
           stopInstructionMascotAnimation();
           tokenRollState.signature = "";
-          root.innerHTML =
-            '<section class="root">' +
-            '<div class="files-token-row">' +
+          var tokenStatsLayout = currentTokenStatsLayout();
+          var tokenPanelHtml = renderLoadingTokenPanel(tokenStatsLayout);
+          var mainContentHtml =
             '<div class="main-stack">' +
             '<section class="section">' +
             '<div class="section-body">' +
@@ -5369,10 +5879,17 @@
             "</div>" +
             "</div>" +
             "</section>" +
-            "</div>" +
-            renderLoadingTokenPanel() +
-            "</div>" +
-            "</section>";
+            "</div>";
+          var contentHtml = tokenPanelHtml
+            ? '<div class="files-token-row' +
+              tokenStatsLayoutClassName(tokenStatsLayout) +
+              '">' +
+              mainContentHtml +
+              tokenPanelHtml +
+              "</div>"
+            : mainContentHtml;
+          root.innerHTML =
+            '<section class="root">' + contentHtml + "</section>";
           playLoadingTokenAnimation(root);
         }
 
