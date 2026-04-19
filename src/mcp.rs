@@ -882,17 +882,24 @@ fn tool_response(
     is_error: bool,
 ) -> JsonRpcResponse {
     let mut result = json!({
-        "content": [{"type": "text", "text": text}]
+        "content": []
     });
     if let Some(obj) = result.as_object_mut() {
-        if let Some(structured) = structured {
-            obj.insert("structuredContent".to_string(), structured);
-        }
+        let structured = structured.unwrap_or_else(|| tool_message_structured(req, text, is_error));
+        obj.insert("structuredContent".to_string(), structured);
         if is_error {
             obj.insert("isError".to_string(), Value::Bool(true));
         }
     }
     JsonRpcResponse::success(req.id.clone(), result)
+}
+
+fn tool_message_structured(req: &JsonRpcRequest, message: String, is_error: bool) -> Value {
+    json!({
+        "toolName": tool_name_from_request(req),
+        "message": message,
+        "success": !is_error,
+    })
 }
 
 fn tool_success_response_with_structured(
@@ -1417,6 +1424,15 @@ fn ensure_tool_descriptor_widget_template(tool: &mut Value) {
 }
 
 fn extract_tool_result_text(result: &Value) -> String {
+    let content_text = extract_tool_result_content_text(result);
+    if !content_text.is_empty() {
+        return content_text;
+    }
+
+    extract_tool_result_structured_text(result)
+}
+
+fn extract_tool_result_content_text(result: &Value) -> String {
     result
         .get("content")
         .and_then(Value::as_array)
@@ -1431,6 +1447,55 @@ fn extract_tool_result_text(result: &Value) -> String {
                 .join("\n")
         })
         .unwrap_or_default()
+}
+
+fn extract_tool_result_structured_text(result: &Value) -> String {
+    let Some(structured) = result.get("structuredContent").and_then(Value::as_object) else {
+        return String::new();
+    };
+
+    let mut parts = Vec::new();
+    for key in [
+        "message",
+        "text",
+        "instructionText",
+        "stdout",
+        "stderr",
+        "value",
+    ] {
+        if let Some(text) = structured.get(key).and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn remove_text_content_from_tool_result(req: &JsonRpcRequest, result: &mut Value) {
+    let content_text = extract_tool_result_content_text(result);
+    let Some(result_obj) = result.as_object_mut() else {
+        return;
+    };
+
+    if !content_text.is_empty() && !result_obj.contains_key("structuredContent") {
+        result_obj.insert(
+            "structuredContent".to_string(),
+            json!({
+                "toolName": tool_name_from_request(req),
+                "text": content_text,
+            }),
+        );
+    }
+
+    let Some(content) = result_obj.get_mut("content").and_then(Value::as_array_mut) else {
+        result_obj.insert("content".to_string(), Value::Array(Vec::new()));
+        return;
+    };
+    content.retain(|entry| {
+        entry.get("type").and_then(Value::as_str) != Some("text") && entry.get("text").is_none()
+    });
 }
 
 fn truncate_for_widget(text: &str, max_chars: usize) -> String {
@@ -1831,11 +1896,13 @@ fn enrich_tool_result(
     widget_context: Option<&AutoWidgetContext>,
 ) -> Value {
     if !result.is_object() {
+        let value = result;
         result = json!({
-            "content": [{
-                "type": "text",
-                "text": result.to_string()
-            }]
+            "content": [],
+            "structuredContent": {
+                "toolName": tool_name_from_request(req),
+                "value": value
+            }
         });
     }
     let has_widget_payload = result
@@ -1857,6 +1924,7 @@ fn enrich_tool_result(
     if let Some(widget_payload) = widget_payload {
         attach_widget_payload_meta(&mut result, widget_payload);
     }
+    remove_text_content_from_tool_result(req, &mut result);
     result
 }
 
@@ -2432,16 +2500,20 @@ fn handle_write_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     match workspace_tools::write_file(workspace_root, path, content, create_dirs) {
-        Ok(text) => tool_success_response_with_structured(
-            req,
-            text,
-            json!({
-                "toolName": "write",
-                "path": path,
-                "bytesWritten": content.len(),
-                "createDirs": create_dirs,
-            }),
-        ),
+        Ok(text) => {
+            let message = text.clone();
+            tool_success_response_with_structured(
+                req,
+                text,
+                json!({
+                    "toolName": "write",
+                    "path": path,
+                    "bytesWritten": content.len(),
+                    "createDirs": create_dirs,
+                    "message": message,
+                }),
+            )
+        }
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2465,15 +2537,19 @@ fn handle_edit_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespon
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     match workspace_tools::edit_file(workspace_root, path, old_string, new_string, replace_all) {
-        Ok(text) => tool_success_response_with_structured(
-            req,
-            text,
-            json!({
-                "toolName": "edit",
-                "path": path,
-                "replaceAll": replace_all,
-            }),
-        ),
+        Ok(text) => {
+            let message = text.clone();
+            tool_success_response_with_structured(
+                req,
+                text,
+                json!({
+                    "toolName": "edit",
+                    "path": path,
+                    "replaceAll": replace_all,
+                    "message": message,
+                }),
+            )
+        }
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2621,15 +2697,19 @@ fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     match workspace_tools::delete_path(workspace_root, path, recursive) {
-        Ok(text) => tool_success_response_with_structured(
-            req,
-            text,
-            json!({
-                "toolName": "delete",
-                "path": path,
-                "recursive": recursive,
-            }),
-        ),
+        Ok(text) => {
+            let message = text.clone();
+            tool_success_response_with_structured(
+                req,
+                text,
+                json!({
+                    "toolName": "delete",
+                    "path": path,
+                    "recursive": recursive,
+                    "message": message,
+                }),
+            )
+        }
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -2666,12 +2746,30 @@ mod tests {
         response
             .result
             .as_ref()
-            .and_then(|result| result.get("content"))
-            .and_then(Value::as_array)
-            .and_then(|content| content.first())
-            .and_then(|entry| entry.get("text"))
+            .and_then(|result| result.get("structuredContent"))
+            .and_then(Value::as_object)
+            .and_then(|structured| {
+                structured
+                    .get("message")
+                    .or_else(|| structured.get("text"))
+                    .or_else(|| structured.get("instructionText"))
+            })
             .and_then(Value::as_str)
             .expect("missing result text")
+    }
+
+    fn assert_no_text_content(response: &JsonRpcResponse) {
+        let content = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("content"))
+            .and_then(Value::as_array)
+            .expect("missing content array");
+        assert!(
+            content.iter().all(|entry| entry.get("text").is_none()
+                && entry.get("type").and_then(Value::as_str) != Some("text")),
+            "tool result content must not contain text entries: {content:?}"
+        );
     }
 
     #[tokio::test]
@@ -2800,6 +2898,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         assert_eq!(
             response
                 .result
@@ -2841,6 +2940,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         assert_eq!(
             response
                 .result
@@ -2872,6 +2972,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         assert_eq!(
             response
                 .result
@@ -2921,6 +3022,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         let structured = response
             .result
             .as_ref()
@@ -3003,6 +3105,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         let widget_payload = response
             .result
             .as_ref()
@@ -3062,6 +3165,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         assert_eq!(
             std::fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
             "alpha\nbeta\ngamma\n"
@@ -3131,6 +3235,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         assert_eq!(
             response
                 .result
@@ -3179,6 +3284,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         let structured = response
             .result
             .as_ref()
@@ -3246,6 +3352,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         assert!(!workspace_root.join("old.txt").exists());
         assert_eq!(
             std::fs::read_to_string(workspace_root.join("dest/old.txt")).expect("read moved file"),
@@ -3328,6 +3435,7 @@ mod tests {
         )
         .await;
 
+        assert_no_text_content(&response);
         assert_eq!(
             std::fs::read_to_string(workspace_root.join("old.txt")).expect("read source"),
             "old\n"
@@ -3370,6 +3478,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(workspace_root);
     }
 
+    #[tokio::test]
+    async fn catdesk_instruction_result_does_not_emit_text_content() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-instruction-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+
+        let req = tool_call_request("catdesk_instruction", json!({}));
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_no_text_content(&response);
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        assert!(
+            structured
+                .get("instructionText")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_returns_structured_text_without_text_content() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-read-file-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("notes.txt"), "hello world\n").expect("write file");
+
+        let req = tool_call_request("read", json!({ "path": "notes.txt" }));
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_no_text_content(&response);
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        assert_eq!(
+            structured.get("text").and_then(Value::as_str),
+            Some("hello world\n")
+        );
+
+        let _ = std::fs::remove_file(workspace_root.join("notes.txt"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn delete_tool_returns_structured_message_without_text_content() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-delete-file-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("notes.txt"), "hello world\n").expect("write file");
+
+        let req = tool_call_request("delete", json!({ "path": "notes.txt" }));
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_no_text_content(&response);
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        assert_eq!(
+            structured.get("message").and_then(Value::as_str),
+            Some("deleted file: notes.txt")
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
     #[test]
     fn read_file_separates_model_payload_from_widget_payload() {
         let req = tool_call_request(
@@ -3398,6 +3610,11 @@ hello world"
         });
 
         let result = enrich_tool_result(&req, raw, None);
+        let content = result
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("missing content array");
+        assert!(content.is_empty());
         let structured = result
             .get("structuredContent")
             .expect("missing structuredContent");
@@ -3483,6 +3700,11 @@ hello world"
         });
 
         let result = enrich_tool_result(&req, raw, None);
+        let content = result
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("missing content array");
+        assert!(content.is_empty());
         let widget_payload = result
             .get("_meta")
             .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
