@@ -82,18 +82,18 @@ pub enum AgentsPathMode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenStatsLayout {
-    Disabled,
+    Disable,
     #[default]
     Right,
-    Below,
+    Bottom,
 }
 
 impl TokenStatsLayout {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Disabled => "disabled",
+            Self::Disable => "disable",
             Self::Right => "right",
-            Self::Below => "below",
+            Self::Bottom => "bottom",
         }
     }
 }
@@ -1227,13 +1227,13 @@ toolCallCount = 7
         let config_path = workspace.join(APP_CONFIG_FILE_NAME);
 
         let config = AppConfig {
-            token_stats_layout: TokenStatsLayout::Below,
+            token_stats_layout: TokenStatsLayout::Bottom,
             ..AppConfig::default()
         };
         config.save_to_path(&config_path).expect("save config");
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
-        assert!(matches!(saved.token_stats_layout, TokenStatsLayout::Below));
+        assert!(matches!(saved.token_stats_layout, TokenStatsLayout::Bottom));
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);

@@ -1097,7 +1097,7 @@
         --hover-y: 7.4px;
       }
 
-      .agents-fan-sector-group[data-token-layout-option="disabled"] {
+      .agents-fan-sector-group[data-token-layout-option="disable"] {
         --fan-delay: 0ms;
         --start-x: -31.3px;
         --start-y: 24.9px;
@@ -1117,7 +1117,7 @@
         --hover-y: 0px;
       }
 
-      .agents-fan-sector-group[data-token-layout-option="below"] {
+      .agents-fan-sector-group[data-token-layout-option="bottom"] {
         --fan-delay: 48ms;
         --start-x: -31.3px;
         --start-y: -24.9px;
@@ -1923,7 +1923,7 @@
         align-self: start;
       }
 
-      .files-token-row.token-layout-below {
+      .files-token-row.token-layout-bottom {
         grid-template-columns: minmax(0, 1fr);
       }
 
@@ -2518,7 +2518,7 @@
         }
 
         function validateTokenStatsLayout(value) {
-          return value === "disabled" || value === "right" || value === "below"
+          return value === "disable" || value === "right" || value === "bottom"
             ? value
             : null;
         }
@@ -2562,8 +2562,8 @@
         }
 
         function tokenStatsLayoutClassName(layout) {
-          return layout === "below"
-            ? " token-layout-below"
+          return layout === "bottom"
+            ? " token-layout-bottom"
             : " token-layout-right";
         }
 
@@ -4072,9 +4072,9 @@
             }
 
             function tokenStatsLayoutLabel(layout) {
-              if (layout === "disabled") return "disabled";
-              if (layout === "below") return "below";
-              return "right";
+              if (layout === "disable") return "Disable";
+              if (layout === "bottom") return "Bottom";
+              return "Right";
             }
 
             function renderTokenLayoutFanSector(
@@ -4221,9 +4221,9 @@
                 '<span class="agents-fan-menu" data-token-layout-fan-menu aria-hidden="true" hidden>' +
                 '<svg class="agents-fan-svg" viewBox="0 0 124 176" aria-hidden="true" focusable="false">' +
                 renderTokenLayoutFanSector(
-                  "disabled",
+                  "disable",
                   "Disable token stats",
-                  "disabled",
+                  "Disable",
                   "M37.93 66.05L55.08 39.03A58 58 0 0 1 78.77 68.93L48.55 79.45A26 26 0 0 0 37.93 66.05Z",
                   "translate(56.13 62.53)",
                   '<circle cx="0" cy="0" r="6.5"></circle>' +
@@ -4233,7 +4233,7 @@
                 renderTokenLayoutFanSector(
                   "right",
                   "Show token stats on the right",
-                  "right",
+                  "Right",
                   "M48.55 79.45L78.77 68.93A58 58 0 0 1 78.77 107.07L48.55 96.55A26 26 0 0 0 48.55 79.45Z",
                   "translate(65 88)",
                   '<path class="agents-fan-fill" d="M3 -6.8h2.2a1.6 1.6 0 0 1 1.6 1.6V5.2a1.6 1.6 0 0 1-1.6 1.6H3Z"></path>' +
@@ -4241,9 +4241,9 @@
                     '<path d="M3 -6.8v13.6"></path>',
                 ) +
                 renderTokenLayoutFanSector(
-                  "below",
-                  "Show token stats below",
-                  "below",
+                  "bottom",
+                  "Show token stats at the bottom",
+                  "Bottom",
                   "M48.55 96.55L78.77 107.07A58 58 0 0 1 55.08 136.97L37.93 109.95A26 26 0 0 0 48.55 96.55Z",
                   "translate(56.13 113.47)",
                   '<path class="agents-fan-fill" d="M-6.8 3H6.8v2.2a1.6 1.6 0 0 1-1.6 1.6H-5.2a1.6 1.6 0 0 1-1.6-1.6Z"></path>' +
@@ -4950,8 +4950,9 @@
           if (combo) {
             var codeNode = combo.querySelector(".instruction-path-code");
             if (codeNode) {
-              codeNode.textContent = view.tokenStatsLayout || "right";
-              codeNode.setAttribute("title", view.tokenStatsLayout || "right");
+              var layoutLabel = tokenStatsLayoutLabel(view.tokenStatsLayout || "right");
+              codeNode.textContent = layoutLabel;
+              codeNode.setAttribute("title", layoutLabel);
             }
           }
           Array.prototype.forEach.call(
@@ -5492,11 +5493,11 @@
         function renderTurnToken(current) {
           if (!current) return "";
           var tokenStatsLayout = validateTokenStatsLayout(current.tokenStatsLayout);
-          if (tokenStatsLayout === "disabled") return "";
+          if (tokenStatsLayout === "disable") return "";
           if (tokenStatsLayout === null) tokenStatsLayout = "right";
           var sideClass =
             "token-side" +
-            (tokenStatsLayout === "below" ? " token-side-footer" : "");
+            (tokenStatsLayout === "bottom" ? " token-side-footer" : "");
           var usage = current.turnTokenUsage || {
             inputTokens: 0,
             outputTokens: 0,
@@ -5801,10 +5802,10 @@
         }
 
         function renderLoadingTokenPanel(tokenStatsLayout) {
-          if (tokenStatsLayout === "disabled") return "";
+          if (tokenStatsLayout === "disable") return "";
           var sideClass =
             "token-side" +
-            (tokenStatsLayout === "below" ? " token-side-footer" : "");
+            (tokenStatsLayout === "bottom" ? " token-side-footer" : "");
           return (
             '<div class="' +
             sideClass +

@@ -358,9 +358,9 @@ fn parse_agents_path_mode(value: &str) -> Option<AgentsPathMode> {
 
 fn parse_token_stats_layout(value: &str) -> Option<TokenStatsLayout> {
     match value.trim() {
-        "disabled" => Some(TokenStatsLayout::Disabled),
+        "disable" => Some(TokenStatsLayout::Disable),
         "right" => Some(TokenStatsLayout::Right),
-        "below" => Some(TokenStatsLayout::Below),
+        "bottom" => Some(TokenStatsLayout::Bottom),
         _ => None,
     }
 }
