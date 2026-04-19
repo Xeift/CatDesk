@@ -1686,11 +1686,13 @@ fn build_read_file_widget_payload(result: &Value, is_error: bool) -> Option<Valu
         Some("read"),
     );
     payload.insert("path".to_string(), structured.get("path")?.clone());
-    payload.insert("bytes".to_string(), structured.get("bytes")?.clone());
-    payload.insert("text".to_string(), structured.get("text")?.clone());
     payload.insert(
-        "truncated".to_string(),
-        structured.get("truncated")?.clone(),
+        "sizeBytes".to_string(),
+        structured.get("sizeBytes")?.clone(),
+    );
+    payload.insert(
+        "lineCount".to_string(),
+        structured.get("lineCount")?.clone(),
     );
     payload.insert("changedFiles".to_string(), json!([]));
     payload.insert("hasChanges".to_string(), json!(false));
@@ -2405,6 +2407,8 @@ fn handle_read_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespon
                 "toolName": "read",
                 "path": output.path,
                 "bytes": output.bytes,
+                "sizeBytes": output.size_bytes,
+                "lineCount": output.line_count,
                 "text": output.text,
                 "truncated": output.truncated,
             }),
@@ -3379,6 +3383,8 @@ mod tests {
                 "toolName": "read",
                 "path": "README.md",
                 "bytes": 11,
+                "sizeBytes": 11,
+                "lineCount": 1,
                 "text": "hello world",
                 "truncated": false
             },
@@ -3410,6 +3416,11 @@ hello world"
         );
         assert_eq!(structured.get("bytes").and_then(Value::as_u64), Some(11));
         assert_eq!(
+            structured.get("sizeBytes").and_then(Value::as_u64),
+            Some(11)
+        );
+        assert_eq!(structured.get("lineCount").and_then(Value::as_u64), Some(1));
+        assert_eq!(
             structured.get("text").and_then(Value::as_str),
             Some("hello world")
         );
@@ -3432,13 +3443,24 @@ hello world"
             Some("tool_call")
         );
         assert_eq!(
-            widget_payload.get("text").and_then(Value::as_str),
-            Some("hello world")
+            widget_payload.get("path").and_then(Value::as_str),
+            Some("README.md")
         );
+        assert_eq!(
+            widget_payload.get("sizeBytes").and_then(Value::as_u64),
+            Some(11)
+        );
+        assert_eq!(
+            widget_payload.get("lineCount").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(widget_payload.get("bytes").is_none());
+        assert!(widget_payload.get("text").is_none());
+        assert!(widget_payload.get("truncated").is_none());
     }
 
     #[test]
-    fn read_file_missing_structured_field_emits_widget_payload_error_panel() {
+    fn read_file_missing_path_emits_widget_payload_error_panel() {
         let req = tool_call_request(
             "read",
             json!({
@@ -3448,8 +3470,10 @@ hello world"
         let raw = json!({
             "structuredContent": {
                 "toolName": "read",
-                "path": "README.md",
                 "bytes": 11,
+                "sizeBytes": 11,
+                "lineCount": 1,
+                "text": "hello world",
                 "truncated": false
             },
             "content": [{

@@ -69,6 +69,8 @@ impl ListFilesOutput {
 pub struct ReadFileOutput {
     pub path: String,
     pub bytes: usize,
+    pub size_bytes: u64,
+    pub line_count: usize,
     pub text: String,
     pub truncated: bool,
 }
@@ -251,6 +253,8 @@ pub fn read_file(workspace_root: &str, path: &str) -> Result<ReadFileOutput, Str
         return Err(format!("Not a file: {}", target.display()));
     }
 
+    let size_bytes = target.metadata().map_err(|e| e.to_string())?.len();
+    let line_count = count_file_lines(&target)?;
     let mut file = fs::File::open(&target).map_err(|e| e.to_string())?;
     let mut buf = vec![0_u8; MAX_READ_BYTES + 1];
     let read_n = file.read(&mut buf).map_err(|e| e.to_string())?;
@@ -261,9 +265,33 @@ pub fn read_file(workspace_root: &str, path: &str) -> Result<ReadFileOutput, Str
     Ok(ReadFileOutput {
         path: to_workspace_relative(&root, &target),
         bytes: data.len(),
+        size_bytes,
+        line_count,
         text,
         truncated,
     })
+}
+
+fn count_file_lines(path: &Path) -> Result<usize, String> {
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = [0_u8; 8192];
+    let mut line_count = 0_usize;
+    let mut last_byte = None;
+
+    loop {
+        let read_n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if read_n == 0 {
+            break;
+        }
+        line_count += buf[..read_n].iter().filter(|byte| **byte == b'\n').count();
+        last_byte = Some(buf[read_n - 1]);
+    }
+
+    if matches!(last_byte, Some(byte) if byte != b'\n') {
+        line_count += 1;
+    }
+
+    Ok(line_count)
 }
 
 pub fn write_file(

@@ -304,6 +304,96 @@
         padding: 8px 12px 10px;
       }
 
+      .read-panel {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+        padding: 10px 12px;
+      }
+
+      .read-target {
+        display: inline-flex;
+        align-items: center;
+        flex: 1 1 auto;
+        max-width: 100%;
+        min-width: 0;
+        gap: 8px;
+        color: var(--text-2);
+        font-size: 12px;
+      }
+
+      .read-icon {
+        width: 15px;
+        height: 15px;
+        flex: 0 0 auto;
+        color: var(--text-3);
+      }
+
+      .read-icon svg {
+        width: 15px;
+        height: 15px;
+        display: block;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .read-label {
+        color: var(--text-3);
+      }
+
+      .read-name-wrap {
+        position: relative;
+        display: inline-flex;
+        min-width: 0;
+        max-width: 100%;
+      }
+
+      .read-name {
+        display: inline-block;
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text);
+        font-weight: 650;
+        outline: none;
+      }
+
+      .read-name-full {
+        display: none;
+      }
+
+      .read-name-wrap:hover .read-name-short,
+      .read-name-wrap:focus-within .read-name-short {
+        display: none;
+      }
+
+      .read-name-wrap:hover .read-name-full,
+      .read-name-wrap:focus-within .read-name-full {
+        display: inline-block;
+      }
+
+      .read-meta {
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 auto;
+        gap: 10px;
+        color: var(--text-3);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
+      .read-meta-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+
       .command-line {
         color: var(--text);
         font-size: 12px;
@@ -2639,9 +2729,8 @@
             command: "",
             output: "",
             readFilePath: "",
-            readFileBytes: 0,
-            readFileText: "",
-            readFileTruncated: false,
+            readFileSizeBytes: 0,
+            readFileLineCount: 0,
             searchPattern: "",
             searchPath: "",
             searchBackend: "",
@@ -2925,23 +3014,20 @@
 
           if (toolName === "read") {
             var readFilePath = readNonEmptyString(data.path);
-            var readFileBytes = readNonNegativeInteger(data.bytes);
-            var readFileText = readString(data.text);
-            var readFileTruncated = readBoolean(data.truncated);
+            var readFileSizeBytes = readNonNegativeInteger(data.sizeBytes);
+            var readFileLineCount = readNonNegativeInteger(data.lineCount);
             if (
               readFilePath === null ||
-              readFileBytes === null ||
-              readFileText === null ||
-              readFileTruncated === null
+              readFileSizeBytes === null ||
+              readFileLineCount === null
             ) {
               return invalidPayload(
                 "read widget payload is missing required fields.",
               );
             }
             next.readFilePath = readFilePath;
-            next.readFileBytes = readFileBytes;
-            next.readFileText = readFileText;
-            next.readFileTruncated = readFileTruncated;
+            next.readFileSizeBytes = readFileSizeBytes;
+            next.readFileLineCount = readFileLineCount;
             return validPayload(next);
           }
 
@@ -3287,26 +3373,61 @@
           );
         }
 
-        function renderReadFilePanel(current) {
-          var summaryHtml =
-            '<div class="search-summary">' +
-            '<div class="summary-row metrics with-kicker">' +
-            renderSummaryStat("path", "path", current.readFilePath, "path") +
-            renderSummaryStat("file", "bytes", current.readFileBytes, "other") +
-            '<span class="panel-kicker summary-kicker">file contents</span>' +
-            "</div>" +
-            "</div>";
-          var textHtml = current.readFileText
-            ? '<pre class="command-output">' + esc(current.readFileText) + "</pre>"
-            : '<div class="empty">File is empty.</div>';
-          var truncatedHtml = current.readFileTruncated
-            ? '<div class="search-note">File output truncated by byte limit.</div>'
-            : "";
+        function fileNameFromPath(path) {
+          var parts = String(path || "").split(/[\\/]/);
+          return parts[parts.length - 1] || path || "-";
+        }
+
+        function formatFileSize(bytes) {
+          var value = Number(bytes);
+          if (!Number.isFinite(value) || value <= 0) return "0 B";
+          var units = ["B", "KB", "MB", "GB"];
+          var unitIndex = 0;
+          while (value >= 1024 && unitIndex < units.length - 1) {
+            value /= 1024;
+            unitIndex += 1;
+          }
+          if (unitIndex === 0) return String(Math.round(value)) + " B";
+          var decimals = value >= 100 ? 0 : value >= 10 ? 1 : 2;
           return (
-            '<div class="search-panel">' +
-            summaryHtml +
-            textHtml +
-            truncatedHtml +
+            value.toFixed(decimals).replace(/\.?0+$/, "") +
+            " " +
+            units[unitIndex]
+          );
+        }
+
+        function formatLineCount(count) {
+          var value = Number(count);
+          if (!Number.isFinite(value) || value < 0) value = 0;
+          return formatTokenCompact(value) + (value === 1 ? " line" : " lines");
+        }
+
+        function renderReadFilePanel(current) {
+          var fileName = fileNameFromPath(current.readFilePath);
+          return (
+            '<div class="read-panel">' +
+            '<div class="read-target">' +
+            '<span class="read-icon">' +
+            summaryIconSvg("file") +
+            "</span>" +
+            '<span class="read-label">read</span>' +
+            '<span class="read-name-wrap">' +
+            '<span class="read-name read-name-short" tabindex="0">' +
+            esc(fileName) +
+            "</span>" +
+            '<span class="read-name read-name-full" tabindex="0">' +
+            esc(current.readFilePath) +
+            "</span>" +
+            "</span>" +
+            "</div>" +
+            '<div class="read-meta" aria-label="file metadata">' +
+            '<span class="read-meta-item">' +
+            esc(formatFileSize(current.readFileSizeBytes)) +
+            "</span>" +
+            '<span class="read-meta-item">' +
+            esc(formatLineCount(current.readFileLineCount)) +
+            "</span>" +
+            "</div>" +
             "</div>"
           );
         }
