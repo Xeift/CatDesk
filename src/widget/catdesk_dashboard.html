@@ -5320,16 +5320,13 @@
           );
         }
 
-        function renderTokenLine(kind, valueText, animate, titleText) {
+        function renderTokenLine(kind, valueText, animate) {
           var priceClass = kind === "price" ? " token-price" : "";
-          var titleAttr = titleText ? ' title="' + esc(titleText) + '"' : "";
           if (!animate) {
             return (
               '<div class="token-line' +
               priceClass +
-              '"' +
-              titleAttr +
-              ">" +
+              '">' +
               '<span class="token-key">' +
               tokenKeySvg(kind) +
               "</span><span>" +
@@ -5343,9 +5340,7 @@
             priceClass +
             ' value-preview" data-token-kind="' +
             esc(kind) +
-            '"' +
-            titleAttr +
-            ">" +
+            '">' +
             '<span class="token-value-impact"></span>' +
             '<span class="token-key">' +
             tokenKeySvg(kind) +
@@ -5367,14 +5362,9 @@
           var faceClass = options.faceClass ? " " + options.faceClass : "";
           var animate = !!options.animate;
           var estimatedUsd = estimateGpt54TurnCostUsd(usage);
-          var inputFull = formatTokenNumber(usage.inputTokens);
-          var outputFull = formatTokenNumber(usage.outputTokens);
-          var totalFull = formatTokenNumber(usage.totalTokens);
           var callsHtml =
             callCount > 0
-              ? '<div class="token-line" title="' +
-                esc(formatTokenNumber(callCount)) +
-                '"><span class="token-key">' +
+              ? '<div class="token-line"><span class="token-key">' +
                 tokenKeySvg("calls") +
                 "</span><span>" +
                 esc(formatTokenCompact(callCount)) +
@@ -5395,19 +5385,16 @@
               "input",
               formatTokenCompact(usage.inputTokens),
               animate,
-              inputFull,
             ) +
             renderTokenLine(
               "output",
               formatTokenCompact(usage.outputTokens),
               animate,
-              outputFull,
             ) +
             renderTokenLine(
               "total",
               formatTokenCompact(usage.totalTokens),
               animate,
-              totalFull,
             ) +
             renderTokenLine("price", priceText, animate) +
             callsHtml +
