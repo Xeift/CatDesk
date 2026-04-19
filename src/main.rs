@@ -2870,7 +2870,7 @@ fn draw_ui(
     let guide_strong_style = Style::default()
         .fg(palette.primary_fg)
         .add_modifier(Modifier::BOLD);
-    let guide_separator_style = Style::default().fg(palette.muted_fg);
+    let guide_separator_style = Style::default().fg(palette.secondary_fg);
     let guide_link_style = Style::default()
         .fg(palette.primary_fg)
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
@@ -2898,20 +2898,17 @@ fn draw_ui(
             ]),
             Line::from(vec![
                 Span::styled("     Name          ", guide_detail_style),
-                Span::styled("│", guide_separator_style),
-                Span::styled(" ", guide_text_style),
+                Span::styled(" │ ", guide_separator_style),
                 Span::styled("CatDesk", guide_strong_style),
             ]),
             Line::from(vec![
                 Span::styled("     MCP Server URL", guide_detail_style),
-                Span::styled("│", guide_separator_style),
-                Span::styled(" ", guide_text_style),
+                Span::styled(" │ ", guide_separator_style),
                 Span::styled(mcp_url.clone(), guide_strong_style),
             ]),
             Line::from(vec![
                 Span::styled("     Authentication", guide_detail_style),
-                Span::styled("│", guide_separator_style),
-                Span::styled(" ", guide_text_style),
+                Span::styled(" │ ", guide_separator_style),
                 Span::styled("None", guide_strong_style),
             ]),
             Line::from(""),
