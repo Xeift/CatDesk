@@ -4335,14 +4335,6 @@
                 current.workspacePathDisplay,
               ) +
               renderInstructionPathRow(
-                "agents",
-                "AGENTS.md",
-                current.agentsPath,
-                current.agentsPathDisplay,
-                renderAgentsPathActionButton(),
-                current.agentsPathModeUrl ? "has-popout" : "",
-              ) +
-              renderInstructionPathRow(
                 "file",
                 "config.toml",
                 current.configPath,
@@ -4355,6 +4347,14 @@
                 tokenStatsLayoutLabel(current.tokenStatsLayout),
                 renderTokenStatsLayoutActionButton(),
                 current.tokenStatsLayoutUrl ? "has-popout" : "",
+              ) +
+              renderInstructionPathRow(
+                "agents",
+                "AGENTS.md",
+                current.agentsPath,
+                current.agentsPathDisplay,
+                renderAgentsPathActionButton(),
+                current.agentsPathModeUrl ? "has-popout" : "",
               ) +
               renderInstructionPathRow(
                 "binagotchy",
