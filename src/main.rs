@@ -2931,13 +2931,21 @@ fn draw_ui(
         status_lines = guide_lines;
     }
 
-    let status_columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(TUI_MASCOT_BLOCK_WIDTH),
-        ])
-        .split(chunks[1]);
+    let show_mascot = area.width >= 120;
+    let status_columns = if show_mascot {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(TUI_MASCOT_BLOCK_WIDTH),
+            ])
+            .split(chunks[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0)])
+            .split(chunks[1])
+    };
     let status_title = if show_guide {
         " What to do next? "
     } else if bootstrap_status_flow.is_some() {
@@ -2952,19 +2960,21 @@ fn draw_ui(
         .border_style(Style::default().fg(palette.border_fg));
     let status_inner = status_block.inner(status_columns[0]);
     f.render_widget(status_block, status_columns[0]);
-    let mascot_block = Block::default()
-        .title(" Binagotchy ")
-        .borders(Borders::ALL)
-        .border_type(palette.border_type)
-        .border_style(Style::default().fg(palette.border_fg));
-    let mascot_inner = mascot_block.inner(status_columns[1]);
-    f.render_widget(mascot_block, status_columns[1]);
-    let mascot = Paragraph::new(render_tui_lines(
-        app.mascot.current_tui_frame(now_millis),
-        mascot_inner.height,
-    ))
-    .alignment(Alignment::Center);
-    f.render_widget(mascot, mascot_inner);
+    if show_mascot {
+        let mascot_block = Block::default()
+            .title(" Binagotchy ")
+            .borders(Borders::ALL)
+            .border_type(palette.border_type)
+            .border_style(Style::default().fg(palette.border_fg));
+        let mascot_inner = mascot_block.inner(status_columns[1]);
+        f.render_widget(mascot_block, status_columns[1]);
+        let mascot = Paragraph::new(render_tui_lines(
+            app.mascot.current_tui_frame(now_millis),
+            mascot_inner.height,
+        ))
+        .alignment(Alignment::Center);
+        f.render_widget(mascot, mascot_inner);
+    }
 
     let status_content = status_inner.inner(Margin {
         horizontal: 2,
