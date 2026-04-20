@@ -2298,6 +2298,8 @@ async fn run_tui(
     #[allow(unused_assignments)]
     let mut screen_lines: Vec<String> = vec![];
     let mut last_animation_snapshot = String::new();
+    #[allow(unused_assignments)]
+    let mut last_mcp_url: Option<String> = None;
 
     loop {
         {
@@ -2307,6 +2309,7 @@ async fn run_tui(
         }
         {
             let app = state.lock().await;
+            last_mcp_url = app.public_mcp_url();
             let toast_ref = toast
                 .as_ref()
                 .filter(|(_, _, t)| t.elapsed().as_secs() < 2)
@@ -2449,6 +2452,51 @@ async fn run_tui(
                                             (mouse.column, mouse.row),
                                             Instant::now(),
                                         ));
+                                    }
+                                } else {
+                                    let row = start.1 as usize;
+                                    if row < screen_lines.len() {
+                                        let line = &screen_lines[row];
+                                        let copy_value =
+                                            if line.contains("chatgpt.com/apps") {
+                                                Some("https://chatgpt.com/apps#settings/Connectors".to_string())
+                                            } else if let Some(ref url) = last_mcp_url {
+                                                let prefix = &url[..url.len().min(30)];
+                                                if line.contains("MCP Server URL")
+                                                    || line.contains(prefix)
+                                                {
+                                                    Some(url.clone())
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                            .or_else(|| {
+                                                if line.contains("\u{2502}") {
+                                                    if line.contains("Name") {
+                                                        Some("CatDesk".to_string())
+                                                    } else if line.contains("Authentication") {
+                                                        Some("None".to_string())
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
+                                            });
+                                        if let Some(text) = copy_value {
+                                            let message = if clipboard_copy(&text) {
+                                                "Copied!"
+                                            } else {
+                                                "Copy failed"
+                                            };
+                                            toast = Some((
+                                                message,
+                                                (mouse.column, mouse.row),
+                                                Instant::now(),
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -2871,18 +2919,21 @@ fn draw_ui(
         .fg(palette.primary_fg)
         .add_modifier(Modifier::BOLD);
     let guide_separator_style = Style::default().fg(palette.secondary_fg);
-    let guide_link_style = Style::default()
+    let guide_copyable_style = Style::default()
         .fg(palette.primary_fg)
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     let guide_lines = if show_guide {
         vec![
             Line::from(vec![
                 Span::styled("  1. ", guide_step_style),
-                Span::styled("Open connector settings:", guide_text_style),
-                Span::styled(" ", guide_text_style),
+                Span::styled("Open connector settings: ", guide_text_style),
+                Span::styled("(click to copy)", guide_detail_style),
+            ]),
+            Line::from(vec![
+                Span::styled("     ", guide_text_style),
                 Span::styled(
                     "https://chatgpt.com/apps#settings/Connectors",
-                    guide_link_style,
+                    guide_copyable_style,
                 ),
             ]),
             Line::from(""),
@@ -2894,22 +2945,23 @@ fn draw_ui(
             Line::from(""),
             Line::from(vec![
                 Span::styled("  3. ", guide_step_style),
-                Span::styled("Fill in the form:", guide_text_style),
+                Span::styled("Fill in the form: ", guide_text_style),
+                Span::styled("(click to copy)", guide_detail_style),
             ]),
             Line::from(vec![
                 Span::styled("     Name          ", guide_detail_style),
                 Span::styled(" │ ", guide_separator_style),
-                Span::styled("CatDesk", guide_strong_style),
+                Span::styled("CatDesk", guide_copyable_style),
             ]),
             Line::from(vec![
                 Span::styled("     MCP Server URL", guide_detail_style),
                 Span::styled(" │ ", guide_separator_style),
-                Span::styled(mcp_url.clone(), guide_strong_style),
+                Span::styled(mcp_url.clone(), guide_copyable_style),
             ]),
             Line::from(vec![
                 Span::styled("     Authentication", guide_detail_style),
                 Span::styled(" │ ", guide_separator_style),
-                Span::styled("None", guide_strong_style),
+                Span::styled("None", guide_copyable_style),
             ]),
             Line::from(""),
             Line::from(vec![
@@ -2980,7 +3032,7 @@ fn draw_ui(
         horizontal: 2,
         vertical: 1,
     });
-    let status = Paragraph::new(status_lines);
+    let status = Paragraph::new(status_lines).wrap(Wrap { trim: false });
     f.render_widget(status, status_content);
 
     // ── Keys ──
