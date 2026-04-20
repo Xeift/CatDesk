@@ -460,7 +460,8 @@
       }
 
       .search-panel {
-        display: flex;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
         align-items: center;
         gap: 12px;
         min-width: 0;
@@ -556,10 +557,9 @@
       }
 
       .search-target {
-        display: inline-flex;
+        display: flex;
         align-items: center;
-        flex: 1 1 auto;
-        max-width: 100%;
+        width: 100%;
         min-width: 0;
         gap: 7px;
         color: var(--text-2);
@@ -592,10 +592,9 @@
       }
 
       .search-value {
-        display: inline-block;
+        display: block;
         min-width: 0;
-        max-width: 24ch;
-        flex: 0 1 auto;
+        max-width: none;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -603,8 +602,15 @@
         font-weight: 650;
       }
 
+      .search-pattern {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
       .search-path {
-        max-width: 32ch;
+        flex: 0 1 auto;
+        min-width: 0;
+        max-width: min(24ch, 28vw);
       }
 
       .search-meta {
