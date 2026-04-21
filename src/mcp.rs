@@ -690,6 +690,7 @@ async fn handle_run_command(
         "stdout": result.stdout,
         "stderr": result.stderr,
         "success": result.success,
+        "elapsedMs": result.elapsed_ms,
     });
 
     if result.success {
@@ -1777,6 +1778,9 @@ fn build_run_command_widget_payload(
             MAX_COMMAND_OUTPUT_CHARS,
         )),
     );
+    if let Some(elapsed) = structured.get("elapsedMs") {
+        payload.insert("elapsedMs".to_string(), elapsed.clone());
+    }
     attach_widget_changed_files(&mut payload, widget_context);
     Some(Value::Object(payload))
 }

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tree_sitter::{Node, Parser};
@@ -14,6 +15,7 @@ pub struct CommandResult {
     pub stdout: String,
     pub stderr: String,
     pub success: bool,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +112,7 @@ pub fn detect_move_path_intercept(command: &str) -> Option<InterceptedMovePathRe
 
 /// Execute a shell command via `/bin/bash`.
 pub async fn run_command(command: &str, cwd: &Path, timeout_ms: u64) -> CommandResult {
+    let start = Instant::now();
     let fut = Command::new("/bin/bash")
         .arg("-c")
         .arg(command)
@@ -118,6 +121,7 @@ pub async fn run_command(command: &str, cwd: &Path, timeout_ms: u64) -> CommandR
 
     match timeout(Duration::from_millis(timeout_ms), fut).await {
         Ok(Ok(output)) => {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
             let stdout = String::from_utf8_lossy(
                 &output.stdout[..output.stdout.len().min(MAX_BUFFER_BYTES)],
             )
@@ -130,17 +134,20 @@ pub async fn run_command(command: &str, cwd: &Path, timeout_ms: u64) -> CommandR
                 stdout,
                 stderr,
                 success: output.status.success(),
+                elapsed_ms,
             }
         }
         Ok(Err(e)) => CommandResult {
             stdout: String::new(),
             stderr: format!("Failed to execute: {e}"),
             success: false,
+            elapsed_ms: start.elapsed().as_millis() as u64,
         },
         Err(_) => CommandResult {
             stdout: String::new(),
             stderr: format!("Command timed out after {timeout_ms} ms"),
             success: false,
+            elapsed_ms: start.elapsed().as_millis() as u64,
         },
     }
 }

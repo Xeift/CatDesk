@@ -299,9 +299,89 @@
       }
 
       .command-panel {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+        padding: 10px 12px;
+      }
+
+      .detail-panel {
         display: grid;
         gap: 8px;
         padding: 8px 12px 10px;
+      }
+
+      .command-card {
+        border: 0;
+        background: transparent;
+      }
+
+      .command-card > summary {
+        list-style: none;
+        cursor: pointer;
+      }
+
+      .command-card > summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .command-card[open] > summary {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .command-target {
+        display: flex;
+        align-items: center;
+        flex: 1 1 auto;
+        min-width: 0;
+        gap: 7px;
+        color: var(--text-2);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .command-icon {
+        width: 15px;
+        height: 15px;
+        flex: 0 0 auto;
+        color: var(--text-3);
+      }
+
+      .command-icon svg {
+        width: 15px;
+        height: 15px;
+        display: block;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .command-label {
+        color: var(--text-3);
+        flex: 0 0 auto;
+      }
+
+      .command-value {
+        display: block;
+        min-width: 0;
+        flex: 0 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text);
+        font-weight: 650;
+      }
+
+      .command-meta {
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 auto;
+        color: var(--text-3);
+        font-size: 11px;
+        white-space: nowrap;
       }
 
       .read-panel {
@@ -433,12 +513,6 @@
         gap: 4px;
       }
 
-      .command-line {
-        color: var(--text);
-        font-size: 12px;
-        white-space: pre-wrap;
-        word-break: break-word;
-      }
 
       .command-output {
         margin: 0;
@@ -455,6 +529,13 @@
           Consolas,
           "Liberation Mono",
           monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .command-line {
+        color: var(--text);
+        font-size: 12px;
         white-space: pre-wrap;
         word-break: break-word;
       }
@@ -2769,7 +2850,8 @@
             mascotFrames: mascotState.mascotFrames,
             mascotSequence: mascotState.mascotSequence,
             command: "",
-            output: "",
+            commandElapsedMs: 0,
+            commandOutput: "",
             readFilePath: "",
             readFileSizeBytes: 0,
             readFileLineCount: 0,
@@ -3005,14 +3087,16 @@
 
           if (toolName === "run_command") {
             var command = readString(data.command);
-            var output = readString(data.output);
-            if (command === null || output === null) {
+            var commandElapsedMs = readNonNegativeInteger(data.elapsedMs);
+            var commandOutput = readString(data.output);
+            if (command === null) {
               return invalidPayload(
                 "run_command widget payload is missing required fields.",
               );
             }
             next.command = command;
-            next.output = output;
+            next.commandElapsedMs = commandElapsedMs !== null ? commandElapsedMs : 0;
+            next.commandOutput = commandOutput !== null ? commandOutput : "";
             return validPayload(next);
           }
 
@@ -3408,17 +3492,55 @@
           );
         }
 
-        function renderCommandPanel(current) {
-          var commandLine = current.command
-            ? '<div class="command-line">$ ' + esc(current.command) + "</div>"
-            : "";
+        function formatElapsedMs(ms) {
+          var value = Number(ms);
+          if (!Number.isFinite(value) || value < 0) value = 0;
+          if (value < 1000) return value + "ms";
+          var seconds = value / 1000;
+          if (seconds < 60) return seconds.toFixed(1) + "s";
+          var minutes = Math.floor(seconds / 60);
+          var remainingSeconds = Math.round(seconds % 60);
+          return minutes + "m" + remainingSeconds + "s";
+        }
+
+        function commandIconSvg() {
           return (
+            '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+            '<polyline points="4 17 10 11 4 5"></polyline>' +
+            '<line x1="12" y1="19" x2="20" y2="19"></line>' +
+            '</svg>'
+          );
+        }
+
+        function renderCommandPanel(current) {
+          var elapsedText = formatElapsedMs(current.commandElapsedMs);
+          var summaryHtml =
             '<div class="command-panel">' +
-            commandLine +
+            '<div class="command-target">' +
+            '<span class="command-icon">' +
+            commandIconSvg() +
+            '</span>' +
+            '<span class="command-label">run</span>' +
+            '<span class="command-value">' +
+            esc(current.command) +
+            '</span>' +
+            '</div>' +
+            '<div class="command-meta" aria-label="command metadata">' +
+            esc(elapsedText) +
+            '</div>' +
+            '</div>';
+          if (!current.commandOutput) {
+            return summaryHtml;
+          }
+          return (
+            '<details class="command-card">' +
+            '<summary>' +
+            summaryHtml +
+            '</summary>' +
             '<pre class="command-output">' +
-            esc(current.output) +
-            "</pre>" +
-            "</div>"
+            esc(current.commandOutput) +
+            '</pre>' +
+            '</details>'
           );
         }
 
@@ -5564,7 +5686,7 @@
           var detailHtml = current.detail
             ? '<pre class="command-output">' + esc(current.detail) + "</pre>"
             : "";
-          return '<div class="command-panel">' + callHtml + detailHtml + "</div>";
+          return '<div class="detail-panel">' + callHtml + detailHtml + "</div>";
         }
 
         function stopTokenRollAnimation() {
@@ -6156,7 +6278,7 @@
             '<section class="root">' +
             '<section class="section">' +
             '<div class="section-body">' +
-            '<div class="command-panel">' +
+            '<div class="detail-panel">' +
             '<div class="panel-head"><div class="panel-title">' +
             esc(title) +
             "</div></div>" +
