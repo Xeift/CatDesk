@@ -1275,19 +1275,19 @@
 
       .binagotchy-modal {
         position: relative;
-        width: min(100%, 760px);
+        width: min(100%, 900px);
         border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 14px;
+        border-radius: 8px;
         background: linear-gradient(180deg, #353332 0%, #2f2d2c 100%);
         box-shadow: 0 20px 60px rgba(0, 0, 0, 0.42);
         overflow: hidden;
       }
 
       .binagotchy-modal-header {
-        display: flex;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto auto;
         align-items: center;
-        justify-content: space-between;
-        gap: 12px;
+        gap: 10px;
         padding: 12px 14px 10px;
         border-bottom: 1px solid rgba(255, 255, 255, 0.06);
         background: rgba(0, 0, 0, 0.08);
@@ -1298,61 +1298,81 @@
         font-size: 12px;
         font-weight: 600;
         color: var(--text-2);
-        letter-spacing: 0.02em;
+        letter-spacing: 0;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
+      .binagotchy-modal-count {
+        color: var(--text-3);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
+      .binagotchy-modal-reset,
       .binagotchy-modal-close {
-        width: 22px;
-        height: 22px;
+        width: 28px;
+        height: 28px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
         padding: 0;
         border: 1px solid var(--line);
-        border-radius: 6px;
-        background: var(--bg-2);
+        border-radius: 7px;
+        background: var(--bg);
         color: var(--text-3);
         font: inherit;
         cursor: pointer;
       }
 
-      .binagotchy-modal-body {
-        display: grid;
-        gap: 12px;
-        padding: 12px 14px 14px;
+      .binagotchy-modal-reset svg {
+        width: 15px;
+        height: 15px;
+        display: block;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        fill: none;
       }
 
-      .binagotchy-browser-path {
-        padding: 7px 9px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: #242323;
-        color: var(--text-2);
-        font:
-          11px/1.35 "SFMono-Regular",
-          Menlo,
-          Consolas,
-          "Liberation Mono",
-          monospace;
+      .binagotchy-modal-reset:disabled {
+        color: var(--text-3);
+        cursor: default;
+        opacity: 0.45;
+      }
+
+      .binagotchy-modal-reset:not(:disabled):hover,
+      .binagotchy-modal-reset:not(:disabled):focus-visible,
+      .binagotchy-modal-close:hover,
+      .binagotchy-modal-close:focus-visible {
+        background: var(--panel-2);
+        color: var(--text);
+        outline: none;
+      }
+
+      .binagotchy-modal-body {
+        display: grid;
+        padding: 14px;
       }
 
       .binagotchy-browser-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
         gap: 10px;
-        max-height: 340px;
+        max-height: min(590px, calc(100vh - 150px));
         overflow: auto;
-        padding-right: 2px;
       }
 
       .binagotchy-browser-card {
         position: relative;
         display: grid;
-        grid-template-rows: auto auto;
         gap: 8px;
         padding: 10px;
         border: 1px solid rgba(255, 255, 255, 0.06);
-        border-radius: 10px;
+        border-radius: 8px;
         background: rgba(255, 255, 255, 0.02);
         align-content: start;
       }
@@ -1377,32 +1397,15 @@
       }
 
       .binagotchy-browser-actions {
-        position: absolute;
-        top: 18px;
-        right: 18px;
-        z-index: 2;
-        display: inline-flex;
-        align-items: center;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
         gap: 6px;
-        opacity: 0;
-        transform: translateY(4px);
-        transition:
-          opacity 0.16s ease,
-          transform 0.16s ease;
-        pointer-events: none;
-      }
-
-      .binagotchy-browser-card:hover .binagotchy-browser-actions,
-      .binagotchy-browser-card:focus-within .binagotchy-browser-actions {
-        opacity: 1;
-        transform: translateY(0);
-        pointer-events: auto;
       }
 
       .binagotchy-browser-action {
         position: relative;
-        width: 26px;
-        height: 26px;
+        width: 100%;
+        height: 30px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -1427,9 +1430,9 @@
       }
 
       .binagotchy-browser-action.is-active {
-        color: #73bcff;
-        border-color: rgba(115, 188, 255, 0.34);
-        background: rgba(31, 54, 78, 0.72);
+        color: var(--text);
+        border-color: rgba(255, 255, 255, 0.28);
+        background: var(--panel-2);
       }
 
       .binagotchy-browser-action::after {
@@ -1475,14 +1478,10 @@
           Consolas,
           "Liberation Mono",
           monospace;
-        line-height: 1.25;
-        word-break: break-all;
         overflow: hidden;
-      }
-
-      .binagotchy-browser-footer {
-        color: var(--text-3);
-        font-size: 11px;
+        line-height: 1.25;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .binagotchy-notice-root {
@@ -4112,6 +4111,11 @@
           var cards = Array.isArray(current.binagotchyCards)
             ? current.binagotchyCards
             : [];
+          var resetPartnerUrl = current.binagotchyApiBaseUrl
+            ? current.binagotchyApiBaseUrl + "/partner"
+            : "";
+          var resetPartnerDisabled =
+            current.partnerBinagotchySeed && resetPartnerUrl ? "" : " disabled";
           var cardsHtml =
             cards.length > 0
               ? cards
@@ -4128,6 +4132,16 @@
                       '" data-binagotchy-card-seed="' +
                       esc(card.seed) +
                       '">' +
+                      '<div class="binagotchy-browser-art">' +
+                      '<img src="' +
+                      esc(card.image) +
+                      '" alt="Binagotchy seed ' +
+                      esc(card.seed) +
+                      '">' +
+                      "</div>" +
+                      '<div class="binagotchy-browser-seed">' +
+                      esc(card.seed) +
+                      "</div>" +
                       '<div class="binagotchy-browser-actions">' +
                       '<button type="button" class="' +
                       partnerButtonClass +
@@ -4156,16 +4170,6 @@
                       "</svg>" +
                       "</button>" +
                       "</div>" +
-                      '<div class="binagotchy-browser-art">' +
-                      '<img src="' +
-                      esc(card.image) +
-                      '" alt="Binagotchy seed ' +
-                      esc(card.seed) +
-                      '">' +
-                      "</div>" +
-                      '<div class="binagotchy-browser-seed">' +
-                      esc(card.seed) +
-                      "</div>" +
                       "</article>"
                     );
                   })
@@ -4176,19 +4180,24 @@
             '<div class="binagotchy-modal" role="dialog" aria-modal="true" aria-labelledby="binagotchy-browser-title">' +
             '<div class="binagotchy-modal-header">' +
             '<h2 class="binagotchy-modal-title" id="binagotchy-browser-title">Binagotchy Library</h2>' +
+            '<span class="binagotchy-modal-count">' +
+            esc(String(cards.length)) +
+            " folders</span>" +
+            '<button type="button" class="binagotchy-modal-reset" data-reset-binagotchy-partner-url="' +
+            esc(resetPartnerUrl) +
+            '" aria-label="Reset to random Binagotchy" title="Reset to random Binagotchy"' +
+            resetPartnerDisabled +
+            ">" +
+            '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
+            '<path d="M13 4.5A5.5 5.5 0 1 0 14 8"></path>' +
+            '<path d="M13 2v2.5h-2.5"></path>' +
+            "</svg>" +
+            "</button>" +
             '<button type="button" class="binagotchy-modal-close" data-close-binagotchy-browser aria-label="Close binagotchy browser">×</button>' +
             "</div>" +
             '<div class="binagotchy-modal-body">' +
-            '<div class="binagotchy-browser-path">' +
-            esc(current.binagotchyPath || "-") +
-            "</div>" +
             '<div class="binagotchy-browser-grid">' +
             cardsHtml +
-            "</div>" +
-            '<div class="binagotchy-browser-footer">' +
-            "<span>" +
-            esc(String(cards.length)) +
-            " archived Binagotchy folders</span>" +
             "</div>" +
             "</div>" +
             '<div class="binagotchy-notice-root" id="binagotchy-notice-root" aria-hidden="true">' +
@@ -5728,6 +5737,49 @@
             });
         }
 
+        function resetBinagotchyPartner(button) {
+          if (!button) return;
+          var url = button.getAttribute("data-reset-binagotchy-partner-url") || "";
+          if (!url) return;
+          button.disabled = true;
+          closeBinagotchyNotice();
+          window
+            .fetch(url, {
+              method: "DELETE",
+              headers: {
+                "ngrok-skip-browser-warning": "1",
+              },
+            })
+            .then(function (response) {
+              if (!response.ok) {
+                throw new Error("Failed to reset Binagotchy partner");
+              }
+              return response.json();
+            })
+            .then(function (payload) {
+              if (!payload || payload.ok !== true) {
+                throw new Error("Failed to reset Binagotchy partner");
+              }
+              syncBinagotchyPartnerSelection("");
+              applyWidgetMascotToView(payload.widgetMascot);
+              render();
+              openBinagotchyBrowser();
+            })
+            .catch(function (error) {
+              console.error(error);
+              openBinagotchyNotice(
+                "Failed to reset partner",
+                error && error.message
+                  ? error.message
+                  : "Failed to reset partner",
+                true,
+              );
+            })
+            .finally(function () {
+              button.disabled = false;
+            });
+        }
+
         function saveBinagotchyFolder(button) {
           if (!button) return;
           var url = button.getAttribute("data-save-folder-url") || "";
@@ -5793,6 +5845,9 @@
           var closeButton = root.querySelector(
             "[data-close-binagotchy-browser]",
           );
+          var resetButton = root.querySelector(
+            "[data-reset-binagotchy-partner-url]",
+          );
           var noticeCloseButton = root.querySelector(
             "[data-close-binagotchy-notice]",
           );
@@ -5808,6 +5863,13 @@
             closeButton.addEventListener("click", function (event) {
               event.preventDefault();
               closeBinagotchyBrowser();
+            });
+          }
+          if (resetButton) {
+            resetButton.addEventListener("click", function (event) {
+              event.preventDefault();
+              event.stopPropagation();
+              resetBinagotchyPartner(resetButton);
             });
           }
           if (noticeCloseButton) {

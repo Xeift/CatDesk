@@ -49,7 +49,9 @@ pub fn router(
         )
         .route(
             "/binagotchy/partner",
-            post(post_binagotchy_partner).options(options_binagotchy_partner),
+            post(post_binagotchy_partner)
+                .delete(delete_binagotchy_partner)
+                .options(options_binagotchy_partner),
         )
         .route(
             "/agents/path-mode",
@@ -77,7 +79,10 @@ fn with_widget_action_cors(
     mut builder: axum::http::response::Builder,
 ) -> axum::http::response::Builder {
     builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
-    builder = builder.header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, OPTIONS");
+    builder = builder.header(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        "GET, POST, DELETE, OPTIONS",
+    );
     builder = builder.header(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         "content-type, ngrok-skip-browser-warning",
@@ -643,6 +648,52 @@ async fn post_binagotchy_partner(
                 "ok": true,
                 "seed": seed,
                 "message": "partner updated",
+                "widgetMascot": widget_mascot
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+async fn delete_binagotchy_partner(State(s): State<ServerState>) -> Response<Body> {
+    let random_seed = rand::random::<u64>();
+    let random_seed_hex = format!("{random_seed:016x}");
+    let mascot = crate::mascot::build_workspace_mascot(random_seed);
+    let widget_mascot = crate::mascot::build_widget_mascot(random_seed);
+
+    #[cfg(not(test))]
+    if let Err(error) = crate::mascot::archive_startup_mascot(random_seed) {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": error.to_string() }).to_string(),
+            ))
+            .unwrap();
+    }
+
+    let mut app = s.app.lock().await;
+    app.partner_binagotchy_seed = None;
+    app.mascot_seed = random_seed;
+    app.mascot = mascot;
+    if let Err(error) = app.persist_state() {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": error.to_string() }).to_string(),
+            ))
+            .unwrap();
+    }
+
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "ok": true,
+                "seed": random_seed_hex,
+                "message": "partner reset",
                 "widgetMascot": widget_mascot
             })
             .to_string(),
