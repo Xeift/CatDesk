@@ -43,6 +43,7 @@ const FLOW_LANE_LEFT_LABEL: &str = "Your computer ";
 const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
 const UI_POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const STATUS_PANEL_HEIGHT: u16 = TUI_MASCOT_BLOCK_HEIGHT + 6;
+const STATUS_LABEL_WIDTH: usize = 19;
 
 // ── Selection ───────────────────────────────────────────────
 
@@ -2653,6 +2654,15 @@ fn draw_ui(
             ),
         ]
     };
+    let status_label_style = Style::default()
+        .fg(palette.primary_fg)
+        .add_modifier(Modifier::BOLD);
+    let status_label = |label: &'static str| -> Span<'static> {
+        Span::styled(
+            format!("  {label:<width$} ", width = STATUS_LABEL_WIDTH),
+            status_label_style,
+        )
+    };
     let status_inner_height = status_height.saturating_sub(2) as usize;
     let flow_block_lines = 2;
     let visible_flow_slots = if show_flow_panel {
@@ -2663,12 +2673,7 @@ fn draw_ui(
 
     let mut status_lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::styled(
-                "  Mode:             ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Mode:"),
             Span::styled(
                 mode_label,
                 Style::default()
@@ -2677,12 +2682,7 @@ fn draw_ui(
             ),
         ]),
         Line::from(vec![
-            Span::styled(
-                "  Tool mode:        ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Tool mode:"),
             Span::styled(
                 tool_mode_label,
                 Style::default()
@@ -2691,12 +2691,7 @@ fn draw_ui(
             ),
         ]),
         Line::from(vec![
-            Span::styled(
-                "  Server:           ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Server:"),
             Span::styled(
                 &server_status,
                 Style::default().fg(if app.server_running {
@@ -2707,12 +2702,7 @@ fn draw_ui(
             ),
         ]),
         Line::from(vec![
-            Span::styled(
-                "  ngrok:            ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("ngrok:"),
             Span::styled(
                 ngrok_status,
                 Style::default().fg(if app.ngrok_running {
@@ -2723,12 +2713,7 @@ fn draw_ui(
             ),
         ]),
         Line::from(vec![
-            Span::styled(
-                "  DevTools:         ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("DevTools:"),
             Span::styled(
                 devtools_status,
                 Style::default().fg(if app.devtools_running {
@@ -2739,12 +2724,7 @@ fn draw_ui(
             ),
         ]),
         Line::from(vec![
-            Span::styled(
-                "  MCP Server URL:   ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("MCP Server URL:"),
             Span::styled(
                 &mcp_url,
                 Style::default().fg(if has_url {
@@ -2755,24 +2735,14 @@ fn draw_ui(
             ),
         ]),
         Line::from(vec![
-            Span::styled(
-                "  Workspace:        ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Workspace:"),
             Span::styled(
                 &*app.workspace_root,
                 Style::default().fg(palette.secondary_fg),
             ),
         ]),
         {
-            let mut spans = vec![Span::styled(
-                "  Remote connected: ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            )];
+            let mut spans = vec![status_label("Remote connected:")];
             if app.remote_connected {
                 spans.push(Span::styled(
                     "V",
@@ -2794,54 +2764,29 @@ fn draw_ui(
 
     if !show_guide {
         status_lines.push(Line::from(vec![
-            Span::styled(
-                "  Local browsers:   ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Local browsers:"),
             Span::styled(browser_summary, Style::default().fg(palette.title_fg)),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled(
-                "  Remote dbg support:",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Remote dbg support:"),
             Span::styled(remote_support_summary, Style::default().fg(palette.info_fg)),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled(
-                "  Remote dbg active: ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Remote dbg active:"),
             Span::styled(
                 remote_active_summary,
                 Style::default().fg(palette.success_fg),
             ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled(
-                "  Selected browser: ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Selected browser:"),
             Span::styled(
                 selected_browser_summary,
                 Style::default().fg(palette.secondary_fg),
             ),
         ]));
         status_lines.push(Line::from(vec![
-            Span::styled(
-                "  Selected target:  ",
-                Style::default()
-                    .fg(palette.primary_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            status_label("Selected target:"),
             Span::styled(
                 selected_target_summary,
                 Style::default().fg(palette.info_fg),
