@@ -14,8 +14,9 @@ use tokio::sync::{Mutex, mpsc::UnboundedSender};
 use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, WIDGET_PAYLOAD_META_KEY};
 use crate::state::{
-    AgentsPathMode, FlowDirection, ServerUiEvent, SharedState, TokenStatsLayout, UsageTotals,
-    parse_seed_hex, save_agents_path_mode, save_token_stats_layout,
+    AgentsPathMode, FlowDirection, ServerUiEvent, SharedState, ShowDetailMode, TokenStatsLayout,
+    UsageTotals, parse_seed_hex, save_agents_path_mode, save_show_detail_mode,
+    save_token_stats_layout,
 };
 
 const STATELESS_FLOW_ID: &str = "stateless";
@@ -61,6 +62,10 @@ pub fn router(
         .route(
             "/layout/token-stats",
             post(post_token_stats_layout).options(options_token_stats_layout),
+        )
+        .route(
+            "/layout/show-detail",
+            post(post_show_detail_mode).options(options_show_detail_mode),
         )
         .route(&mcp_path, post(post_mcp))
         .route(&mcp_path, get(get_mcp))
@@ -260,6 +265,14 @@ fn attach_catdesk_instruction_actions(
         ),
     );
     widget_payload.insert(
+        "showDetailModeUrl".to_string(),
+        json!(
+            public_base_url
+                .map(|base| format!("{base}/layout/show-detail"))
+                .unwrap_or_default()
+        ),
+    );
+    widget_payload.insert(
         "partnerBinagotchySeed".to_string(),
         json!(partner_binagotchy_seed.unwrap_or("")),
     );
@@ -365,6 +378,15 @@ fn parse_token_stats_layout(value: &str) -> Option<TokenStatsLayout> {
     }
 }
 
+fn parse_show_detail_mode(value: &str) -> Option<ShowDetailMode> {
+    match value.trim() {
+        "disable" => Some(ShowDetailMode::Disable),
+        "expanded" => Some(ShowDetailMode::Expanded),
+        "collapsed" => Some(ShowDetailMode::Collapsed),
+        _ => None,
+    }
+}
+
 async fn post_agents_path_mode(
     State(s): State<ServerState>,
     Form(form): Form<HashMap<String, String>>,
@@ -452,6 +474,52 @@ async fn post_token_stats_layout(
         .unwrap()
 }
 
+async fn post_show_detail_mode(
+    State(_s): State<ServerState>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response<Body> {
+    let Some(mode_raw) = form.get("mode").map(String::as_str) else {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": "missing mode" }).to_string(),
+            ))
+            .unwrap();
+    };
+    let Some(mode) = parse_show_detail_mode(mode_raw) else {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::BAD_REQUEST)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": "invalid mode" }).to_string(),
+            ))
+            .unwrap();
+    };
+
+    if let Err(error) = save_show_detail_mode(mode) {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": error.to_string() }).to_string(),
+            ))
+            .unwrap();
+    }
+
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "ok": true,
+                "showDetailMode": mode.as_str(),
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
 async fn options_agents_path_mode(State(_s): State<ServerState>) -> Response<Body> {
     with_widget_action_cors(Response::builder())
         .status(StatusCode::NO_CONTENT)
@@ -460,6 +528,13 @@ async fn options_agents_path_mode(State(_s): State<ServerState>) -> Response<Bod
 }
 
 async fn options_token_stats_layout(State(_s): State<ServerState>) -> Response<Body> {
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn options_show_detail_mode(State(_s): State<ServerState>) -> Response<Body> {
     with_widget_action_cors(Response::builder())
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
@@ -756,6 +831,12 @@ mod tests {
                 .get("tokenStatsLayoutUrl")
                 .and_then(Value::as_str),
             Some("https://example.ngrok.app/layout/token-stats")
+        );
+        assert_eq!(
+            widget_payload
+                .get("showDetailModeUrl")
+                .and_then(Value::as_str),
+            Some("https://example.ngrok.app/layout/show-detail")
         );
         assert!(widget_payload.get("widgetMascot").is_some());
         assert_eq!(card.get("isPartner").and_then(Value::as_bool), Some(true));

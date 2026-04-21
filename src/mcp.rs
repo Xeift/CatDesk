@@ -12,8 +12,8 @@ use crate::command;
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
 use crate::state::{
-    AgentsPathMode, Mode, TokenStatsLayout, ToolMode, app_config_path, load_app_config,
-    user_home_dir,
+    AgentsPathMode, Mode, ShowDetailMode, TokenStatsLayout, ToolMode, app_config_path,
+    load_app_config, user_home_dir,
 };
 use crate::workspace_tools;
 
@@ -1206,6 +1206,7 @@ fn catdesk_instruction_widget_payload_with_cards(
         }
     }
     payload_obj.insert("tokenStatsLayoutUrl".to_string(), json!(""));
+    payload_obj.insert("showDetailModeUrl".to_string(), json!(""));
     payload_obj.insert("configPath".to_string(), json!(config_path));
     payload_obj.insert("configPathDisplay".to_string(), json!(config_path_display));
     payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
@@ -1597,6 +1598,7 @@ fn base_widget_payload(
 ) -> Map<String, Value> {
     let mut payload = Map::new();
     let token_stats_layout = current_token_stats_layout();
+    let show_detail_mode = current_show_detail_mode();
     payload.insert("schema".to_string(), json!("catdesk.review.v1"));
     payload.insert("panelMode".to_string(), json!(panel_mode));
     payload.insert("title".to_string(), json!(title));
@@ -1604,6 +1606,10 @@ fn base_widget_payload(
     payload.insert(
         "tokenStatsLayout".to_string(),
         json!(token_stats_layout.as_str()),
+    );
+    payload.insert(
+        "showDetailMode".to_string(),
+        json!(show_detail_mode.as_str()),
     );
     if let Some(tool_name) = tool_name {
         payload.insert("toolName".to_string(), json!(tool_name));
@@ -1614,6 +1620,12 @@ fn base_widget_payload(
 fn current_token_stats_layout() -> TokenStatsLayout {
     load_app_config()
         .map(|config| config.token_stats_layout)
+        .unwrap_or_default()
+}
+
+fn current_show_detail_mode() -> ShowDetailMode {
+    load_app_config()
+        .map(|config| config.show_detail_mode)
         .unwrap_or_default()
 }
 
@@ -3968,9 +3980,16 @@ hello world"
         );
         assert!(widget_payload.get("agentsPathMode").is_some());
         assert!(widget_payload.get("tokenStatsLayout").is_some());
+        assert!(widget_payload.get("showDetailMode").is_some());
         assert_eq!(
             widget_payload
                 .get("tokenStatsLayoutUrl")
+                .and_then(Value::as_str),
+            Some("")
+        );
+        assert_eq!(
+            widget_payload
+                .get("showDetailModeUrl")
                 .and_then(Value::as_str),
             Some("")
         );
