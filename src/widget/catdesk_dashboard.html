@@ -3881,6 +3881,17 @@
               "</svg>"
             );
           }
+          if (kind === "detail") {
+            return (
+              '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" stroke-linecap="round" stroke-linejoin="round">' +
+              '<path d="M3 4.2h6.5"></path>' +
+              '<path d="M3 7.2h5.5"></path>' +
+              '<path d="M3 10.2h4.5"></path>' +
+              '<path d="M11.2 7.8v4.8"></path>' +
+              '<path d="M8.8 10.2h4.8"></path>' +
+              "</svg>"
+            );
+          }
           return (
             '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
             '<circle cx="8" cy="8" r="5.25"></circle>' +
@@ -4624,7 +4635,7 @@
                 current.tokenStatsLayoutUrl ? "has-popout" : "",
               ) +
               renderInstructionPathRow(
-                "layout",
+                "detail",
                 "show detail",
                 current.showDetailMode,
                 showDetailModeLabel(current.showDetailMode),
