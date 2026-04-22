@@ -25,8 +25,28 @@ pub enum FileListingFilter {
     DirectoriesOnly,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListFilesInterceptSource {
+    Find,
+    Tree,
+    Ls,
+    Rg,
+}
+
+impl ListFilesInterceptSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Find => "find",
+            Self::Tree => "tree",
+            Self::Ls => "ls",
+            Self::Rg => "rg",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterceptedListFilesRequest {
+    pub source: ListFilesInterceptSource,
     pub path: Option<String>,
     pub include_hidden: bool,
     pub filter: FileListingFilter,
@@ -346,6 +366,7 @@ fn parse_find_list_files_args(args: &[String]) -> Option<InterceptedListFilesReq
     };
 
     Some(InterceptedListFilesRequest {
+        source: ListFilesInterceptSource::Find,
         path,
         include_hidden: true,
         filter,
@@ -370,6 +391,7 @@ fn parse_tree_list_files_args(args: &[String]) -> Option<InterceptedListFilesReq
     }
 
     Some(InterceptedListFilesRequest {
+        source: ListFilesInterceptSource::Tree,
         path,
         include_hidden,
         filter: FileListingFilter::All,
@@ -409,6 +431,7 @@ fn parse_ls_list_files_args(args: &[String]) -> Option<InterceptedListFilesReque
     }
 
     Some(InterceptedListFilesRequest {
+        source: ListFilesInterceptSource::Ls,
         path,
         include_hidden,
         filter: FileListingFilter::All,
@@ -450,6 +473,7 @@ fn parse_rg_list_files_args(args: &[String]) -> Option<InterceptedListFilesReque
     }
 
     Some(InterceptedListFilesRequest {
+        source: ListFilesInterceptSource::Rg,
         path,
         include_hidden,
         filter: FileListingFilter::FilesOnly,
@@ -952,6 +976,7 @@ mod tests {
         assert_eq!(
             detect_list_files_intercept("find src"),
             Some(InterceptedListFilesRequest {
+                source: ListFilesInterceptSource::Find,
                 path: Some("src".into()),
                 include_hidden: true,
                 filter: FileListingFilter::All,
@@ -964,6 +989,7 @@ mod tests {
         assert_eq!(
             detect_list_files_intercept("bash -lc 'rg --files --hidden src'"),
             Some(InterceptedListFilesRequest {
+                source: ListFilesInterceptSource::Rg,
                 path: Some("src".into()),
                 include_hidden: true,
                 filter: FileListingFilter::FilesOnly,
@@ -976,6 +1002,7 @@ mod tests {
         assert_eq!(
             detect_list_files_intercept("ls -Ra src"),
             Some(InterceptedListFilesRequest {
+                source: ListFilesInterceptSource::Ls,
                 path: Some("src".into()),
                 include_hidden: true,
                 filter: FileListingFilter::All,

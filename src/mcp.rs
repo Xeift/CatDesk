@@ -663,6 +663,7 @@ async fn handle_run_command(
                     &effective_command,
                     &cwd,
                     &output,
+                    intercept.source,
                     &listing,
                 );
                 return tool_success_response_with_structured(req, output, structured);
@@ -853,11 +854,13 @@ fn build_run_command_listing_structured(
     command_text: &str,
     cwd: &Path,
     stdout: &str,
+    source: command::ListFilesInterceptSource,
     listing: &workspace_tools::ListFilesOutput,
 ) -> Value {
     json!({
         "toolName": "run_command",
         "interceptedToolName": "list_files",
+        "interceptedCommandName": source.as_str(),
         "command": command_text,
         "cwd": cwd.to_string_lossy().to_string(),
         "stdout": stdout,
@@ -1769,6 +1772,10 @@ fn build_run_command_widget_payload(
         .get("interceptedToolName")
         .and_then(Value::as_str)
         == Some("list_files")
+        && structured
+            .get("interceptedCommandName")
+            .and_then(Value::as_str)
+            != Some("ls")
     {
         return build_list_files_widget_payload_from_structured(
             structured,
@@ -3388,6 +3395,12 @@ mod tests {
             Some("list_files")
         );
         assert_eq!(
+            structured
+                .get("interceptedCommandName")
+                .and_then(Value::as_str),
+            Some("find")
+        );
+        assert_eq!(
             widget_payload.get("toolName").and_then(Value::as_str),
             Some("list_files")
         );
@@ -3401,6 +3414,80 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(|entries| entries.len()),
             Some(1)
+        );
+
+        let _ = std::fs::remove_file(workspace_root.join("src/lib.rs"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_command_ls_listing_intercept_uses_run_command_widget_payload() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-run-command-ls-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(workspace_root.join("src")).expect("create workspace");
+        std::fs::write(workspace_root.join("src/lib.rs"), "pub fn ping() {}\n")
+            .expect("write file");
+
+        let req = tool_call_request(
+            "run_command",
+            json!({
+                "command": "ls -Ra src",
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+        )
+        .await;
+
+        assert_no_text_content(&response);
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        let widget_payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+
+        assert_eq!(
+            structured.get("toolName").and_then(Value::as_str),
+            Some("run_command")
+        );
+        assert_eq!(
+            structured
+                .get("interceptedToolName")
+                .and_then(Value::as_str),
+            Some("list_files")
+        );
+        assert_eq!(
+            structured
+                .get("interceptedCommandName")
+                .and_then(Value::as_str),
+            Some("ls")
+        );
+        assert_eq!(
+            widget_payload.get("toolName").and_then(Value::as_str),
+            Some("run_command")
+        );
+        assert_eq!(
+            widget_payload.get("command").and_then(Value::as_str),
+            Some("ls -Ra src")
+        );
+        assert!(
+            widget_payload
+                .get("output")
+                .and_then(Value::as_str)
+                .is_some_and(|output| output.contains("file src/lib.rs"))
         );
 
         let _ = std::fs::remove_file(workspace_root.join("src/lib.rs"));
