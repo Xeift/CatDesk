@@ -83,8 +83,6 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
    catdesk
    ```
 
-   `catdask` is also installed as an alias.
-
    By default, CatDesk listens on port `3200`, as defined in [`main()`](/home/xeift/Desktop/CatDesk/src/main.rs#L325). You can override it with `PORT`. The workspace root defaults to the current working directory and can be overridden with `WORKSPACE_ROOT`, also in [`main()`](/home/xeift/Desktop/CatDesk/src/main.rs#L325).
 
    On macOS Terminal.app, CatDesk manages a dedicated `CatDesk` Terminal profile automatically. If the current Terminal tab is not already using that profile, CatDesk applies it, closes any temporary helper window, and asks you to run the same command again in that tab. It only starts immediately when the current tab is already using `CatDesk`. Set `CATDESK_SKIP_MACOS_TERMINAL_PROFILE=1` if you want to keep the current Terminal session untouched.
