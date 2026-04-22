@@ -69,14 +69,21 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 > Run it inside a VM or container (DevContainer is a good option).
 > Treat it like OpenClaw, keep it containerized and isolated.
 
-1. Download the CatDesk binary for your platform.
-   Put it anywhere you want. If your platform requires it, make the binary executable first.
-
-2. Run the CatDesk binary.
+1. Install CatDesk globally with npm.
 
    ```bash
-   ./catdesk
+   npm install -g catdesk
    ```
+
+   The npm package downloads a prebuilt CatDesk binary for your platform. You do not need a Rust toolchain.
+
+2. Run CatDesk from any terminal directory.
+
+   ```bash
+   catdesk
+   ```
+
+   `catdask` is also installed as an alias.
 
    By default, CatDesk listens on port `3200`, as defined in [`main()`](/home/xeift/Desktop/CatDesk/src/main.rs#L325). You can override it with `PORT`. The workspace root defaults to the current working directory and can be overridden with `WORKSPACE_ROOT`, also in [`main()`](/home/xeift/Desktop/CatDesk/src/main.rs#L325).
 

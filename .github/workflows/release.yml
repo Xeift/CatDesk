@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            asset: catdesk-linux-x64
+            binary: target/release/catdesk
+          - runner: ubuntu-22.04-arm
+            asset: catdesk-linux-arm64
+            binary: target/release/catdesk
+          - runner: macos-15-intel
+            asset: catdesk-darwin-x64
+            binary: target/release/catdesk
+          - runner: macos-15
+            asset: catdesk-darwin-arm64
+            binary: target/release/catdesk
+          - runner: windows-2022
+            asset: catdesk-win32-x64.exe
+            binary: target/release/catdesk.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build release binary
+        run: cargo +stable build --release --locked
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+          chmod 755 "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches package version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create checksums
+        run: |
+          mkdir -p release
+          find artifacts -type f -name 'catdesk-*' -exec cp {} release/ \;
+          cd release
+          sha256sum catdesk-* > SHA256SUMS
+          ls -la
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release/* \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "CatDesk ${GITHUB_REF_NAME}" \
+            --verify-tag

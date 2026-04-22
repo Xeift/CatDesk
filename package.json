@@ -1,0 +1,30 @@
+{
+  "name": "catdesk",
+  "version": "0.1.0",
+  "description": "Turn ChatGPT Web into a coding agent.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Xeift/CatDesk.git"
+  },
+  "homepage": "https://github.com/Xeift/CatDesk#readme",
+  "bugs": {
+    "url": "https://github.com/Xeift/CatDesk/issues"
+  },
+  "bin": {
+    "catdesk": "npm/catdesk.js",
+    "catdask": "npm/catdesk.js"
+  },
+  "scripts": {
+    "postinstall": "node npm/postinstall.js"
+  },
+  "files": [
+    "npm/catdesk.js",
+    "npm/postinstall.js",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
