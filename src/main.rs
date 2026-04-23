@@ -44,6 +44,7 @@ const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
 const UI_POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const STATUS_PANEL_HEIGHT: u16 = TUI_MASCOT_BLOCK_HEIGHT + 6;
 const STATUS_LABEL_WIDTH: usize = 19;
+const NGROK_SETUP_URL: &str = "https://dashboard.ngrok.com/get-started/setup";
 
 // ── Selection ───────────────────────────────────────────────
 
@@ -1020,8 +1021,15 @@ async fn run_ngrok_auth_setup(
     let config_path_text = config_path.to_string_lossy().into_owned();
     let mut input = String::new();
     let mut error_message: Option<String> = None;
+    let mut toast: Option<(&str, (u16, u16), Instant)> = None;
 
     loop {
+        if let Some((_, _, t)) = &toast {
+            if t.elapsed().as_secs() >= 2 {
+                toast = None;
+            }
+        }
+
         let (current_theme, current_tool_mode, current_mode, browsers, selected_browser) = {
             let app = state.lock().await;
             (
@@ -1040,6 +1048,11 @@ async fn run_ngrok_auth_setup(
             .collect();
         let selected_supported_idx =
             selected_supported_browser_idx(&browsers, selected_browser.as_ref());
+        let toast_ref = toast
+            .as_ref()
+            .filter(|(_, _, t)| t.elapsed().as_secs() < 2)
+            .map(|(m, pos, _)| (*m, *pos));
+        let mut ngrok_setup_copy_area = Rect::default();
         terminal.draw(|f| {
             let anchor_area = if current_mode.browser_enabled() {
                 Layout::default()
@@ -1060,6 +1073,7 @@ async fn run_ngrok_auth_setup(
                     ])
                     .split(f.area())[1]
             };
+            ngrok_setup_copy_area = ngrok_auth_setup_copy_area(anchor_area);
             if current_mode.browser_enabled() {
                 draw_browser_select(
                     f,
@@ -1078,7 +1092,10 @@ async fn run_ngrok_auth_setup(
                 &config_path_text,
                 &masked_secret_preview(&input),
                 error_message.as_deref(),
-            )
+            );
+            if let Some((message, pos)) = toast_ref {
+                render_toast(f, current_theme.palette, message, pos);
+            }
         })?;
 
         if !event::poll(UI_POLL_INTERVAL)? {
@@ -1143,6 +1160,18 @@ async fn run_ngrok_auth_setup(
                 input.push_str(&normalize_ngrok_authtoken_input(&text));
                 error_message = None;
             }
+            Event::Mouse(mouse) => {
+                if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                    && rect_contains(ngrok_setup_copy_area, mouse.column, mouse.row)
+                {
+                    let message = if clipboard_copy(NGROK_SETUP_URL) {
+                        "Copied!"
+                    } else {
+                        "Copy failed"
+                    };
+                    toast = Some((message, (mouse.column, mouse.row), Instant::now()));
+                }
+            }
             _ => {}
         }
     }
@@ -1160,6 +1189,48 @@ fn masked_secret_preview(value: &str) -> String {
     preview
 }
 
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+fn ngrok_auth_setup_modal_area(anchor_area: Rect) -> Rect {
+    centered_rect(90, 15, anchor_area)
+}
+
+fn ngrok_auth_setup_content_area(anchor_area: Rect) -> Rect {
+    let modal_area = ngrok_auth_setup_modal_area(anchor_area);
+    let inner = Rect::new(
+        modal_area.x.saturating_add(1),
+        modal_area.y.saturating_add(1),
+        modal_area.width.saturating_sub(2),
+        modal_area.height.saturating_sub(2),
+    );
+    inner.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    })
+}
+
+fn ngrok_auth_setup_copy_area(anchor_area: Rect) -> Rect {
+    let content_area = ngrok_auth_setup_content_area(anchor_area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(content_area);
+    let body = chunks[0];
+    if body.height <= 2 {
+        return Rect::new(body.x, body.y, 0, 0);
+    }
+    Rect::new(body.x, body.y.saturating_add(2), body.width, 2)
+}
+
 fn draw_ngrok_auth_setup(
     f: &mut Frame,
     theme: &theme::ThemeDef,
@@ -1172,7 +1243,7 @@ fn draw_ngrok_auth_setup(
     let modal_bg = Color::Rgb(34, 38, 47);
     let modal_fg = Color::Rgb(232, 236, 242);
 
-    let modal_area = centered_rect(72, 10, anchor_area);
+    let modal_area = ngrok_auth_setup_modal_area(anchor_area);
     f.render_widget(Clear, modal_area);
     let modal_block = Block::default()
         .title(" ngrok auth ")
@@ -1180,28 +1251,43 @@ fn draw_ngrok_auth_setup(
         .border_type(palette.border_type)
         .border_style(Style::default().fg(palette.border_fg))
         .style(Style::default().bg(modal_bg));
-    let modal_inner = modal_block.inner(modal_area);
     f.render_widget(modal_block, modal_area);
+    let content_area = ngrok_auth_setup_content_area(anchor_area);
 
     let modal_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
+            Constraint::Length(7),
             Constraint::Length(3),
-            Constraint::Length(2),
+            Constraint::Length(1),
         ])
-        .split(modal_inner);
+        .split(content_area);
 
+    let link_style = Style::default()
+        .fg(palette.primary_fg)
+        .bg(modal_bg)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let step_style = Style::default()
+        .fg(palette.title_fg)
+        .bg(modal_bg)
+        .add_modifier(Modifier::BOLD);
     let body_lines = vec![
-        Line::from(Span::styled(
-            "ngrok setup required",
-            Style::default()
-                .fg(palette.title_fg)
-                .add_modifier(Modifier::BOLD),
-        )),
+        Line::from(Span::styled("ngrok setup required", step_style)),
         Line::from(""),
-        Line::from("Open https://dashboard.ngrok.com/get-started/setup to get your authtoken."),
-        Line::from("Paste the token from `ngrok config add-authtoken ...` below."),
+        Line::from(vec![
+            Span::styled("1. Open in browser and get your authtoken", step_style),
+            Span::raw(" "),
+            Span::styled(
+                "(click to copy)",
+                Style::default().fg(palette.secondary_fg).bg(modal_bg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("   "),
+            Span::styled(NGROK_SETUP_URL, link_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("2. Paste the token or ngrok config command below", step_style)),
     ];
     let body = Paragraph::new(body_lines)
         .style(Style::default().fg(modal_fg).bg(modal_bg))
@@ -1237,6 +1323,23 @@ fn draw_ngrok_auth_setup(
         )))
     };
     f.render_widget(footer, modal_chunks[2]);
+}
+
+fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u16)) {
+    let area = f.area();
+    let (col, row) = pos;
+    let label = format!(" {msg} ");
+    let w = label.len() as u16;
+    let x = col.saturating_add(1).min(area.width.saturating_sub(w));
+    let y = if row > 0 { row - 1 } else { row + 1 }.min(area.height.saturating_sub(1));
+    let toast_area = Rect::new(x, y, w, 1);
+    let toast_widget = Paragraph::new(label).style(
+        Style::default()
+            .bg(palette.toast_bg)
+            .fg(palette.toast_fg)
+            .add_modifier(Modifier::BOLD),
+    );
+    f.render_widget(toast_widget, toast_area);
 }
 
 #[cfg(test)]
@@ -3096,18 +3199,7 @@ fn draw_ui(
     f.render_widget(logs, chunks[3]);
 
     // ── Floating toast (top-most layer) ──
-    if let Some((msg, (col, row))) = toast {
-        let label = format!(" {msg} ");
-        let w = label.len() as u16;
-        let x = col.saturating_add(1).min(area.width.saturating_sub(w));
-        let y = if row > 0 { row - 1 } else { row + 1 }.min(area.height.saturating_sub(1));
-        let toast_area = Rect::new(x, y, w, 1);
-        let toast_widget = Paragraph::new(label).style(
-            Style::default()
-                .bg(palette.toast_bg)
-                .fg(palette.toast_fg)
-                .add_modifier(Modifier::BOLD),
-        );
-        f.render_widget(toast_widget, toast_area);
+    if let Some((msg, pos)) = toast {
+        render_toast(f, palette, msg, pos);
     }
 }
