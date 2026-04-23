@@ -2,6 +2,11 @@
 
 An open-source tool that turns ChatGPT Web into a coding agent. No reverse engineering, no API, no Codex. A ChatGPT Plus subscription is enough.
 
+<p align="center">
+  <img src="docs/images/catdesk_preview.gif" alt="CatDesk in ChatGPT Web"><br>
+  <em>CatDesk in ChatGPT Web</em>
+</p>
+
 # Disclaimer
 
 This is an independent open-source project and is not affiliated with or endorsed by OpenAI. I built it as a personal tool and decided to open-source it. Some features are still buggy and may cause unexpected behavior. Use it at your own risk. I am not responsible for any loss caused by this tool. It is strongly recommended to run it inside a VM or container.
@@ -154,10 +159,10 @@ If browser mode is enabled, CatDesk can also expose extra browser/devtools tools
 
 According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and-gpt-54-in-chatgpt#:~:text=Thinking%20(GPT%E2%80%915.4%20Thinking)>) and [the code](https://github.com/openai/codex/blob/main/codex-rs/models-manager/src/model_info.rs#L85), the context window in ChatGPT web is different from Codex.
 
-| Tier     | CatDesk + ChatGPT Web (in + out = sum) | Codex CLI (sum)        |
-| -------- | -------------------------------------- | ---------------------- |
-| Plus     | 128K + 128K = 256K                     | 258K (1M experimental) |
-| Pro tier | 272K + 128K = 400K                     | 258K (1M experimental) |
+| Tier | CatDesk + ChatGPT Web (in + out = sum) | Codex CLI (sum)        |
+| ---- | -------------------------------------- | ---------------------- |
+| Plus | 128K + 128K = 256K                     | 258K (1M experimental) |
+| Pro  | 272K + 128K = 400K                     | 258K (1M experimental) |
 
 # FAQ
 
