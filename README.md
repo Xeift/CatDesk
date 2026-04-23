@@ -230,12 +230,12 @@ For Claude, web and Claude Code share same quota, so just simply use Claude Code
 
 ### How does the input/output token be calculated?
 
-CatDesk does not get official token usage numbers from ChatGPT Web. It estimates them locally with `o200k_base`, the same tokenizer family used by GPT-5.4-style models, so the numbers are useful, but still only estimates.
+CatDesk does not get official token usage numbers from ChatGPT Web. It estimates them locally with `o200k_base`, the same tokenizer family used by GPT-5.5-style models, so the numbers are useful, but still only estimates.
 
 | Field          | Symbol | What it means                | Price                         |
 | -------------- | ------ | ---------------------------- | ----------------------------- |
-| `inputTokens`  | `↓`    | Tool input ≈ LLM output      | ≈ `$15.00 / 1M` output tokens |
-| `outputTokens` | `↑`    | Tool output ≈ LLM input      | ≈ `$2.50 / 1M` input tokens   |
+| `inputTokens`  | `↓`    | Tool input ≈ LLM output      | ≈ `$30.00 / 1M` output tokens |
+| `outputTokens` | `↑`    | Tool output ≈ LLM input      | ≈ `$5.00 / 1M` input tokens   |
 | `totalTokens`  | `Σ`    | `inputTokens + outputTokens` | `input price + output price`  |
 
 CatDesk does not count:

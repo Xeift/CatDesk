@@ -5919,19 +5919,19 @@
           }
         }
 
-        var GPT54_INPUT_USD_PER_1M = 2.5;
-        var GPT54_OUTPUT_USD_PER_1M = 15.0;
+        var GPT55_INPUT_USD_PER_1M = 5.0;
+        var GPT55_OUTPUT_USD_PER_1M = 30.0;
         var PRICE_ANIMATION_DECIMALS = 6;
 
-        function estimateGpt54TurnCostUsd(usage) {
+        function estimateGpt55TurnCostUsd(usage) {
           if (!usage) return 0;
           var input = Number(usage.inputTokens);
           var output = Number(usage.outputTokens);
           if (!Number.isFinite(input) || input < 0) input = 0;
           if (!Number.isFinite(output) || output < 0) output = 0;
           return (
-            (input * GPT54_OUTPUT_USD_PER_1M +
-              output * GPT54_INPUT_USD_PER_1M) /
+            (input * GPT55_OUTPUT_USD_PER_1M +
+              output * GPT55_INPUT_USD_PER_1M) /
             1000000
           );
         }
@@ -6050,7 +6050,7 @@
           options = options || {};
           var faceClass = options.faceClass ? " " + options.faceClass : "";
           var animate = !!options.animate;
-          var estimatedUsd = estimateGpt54TurnCostUsd(usage);
+          var estimatedUsd = estimateGpt55TurnCostUsd(usage);
           var callsHtml =
             callCount > 0
               ? '<div class="token-line"><span class="token-key">' +
@@ -6302,13 +6302,13 @@
             input: formatTokenCompact(usage.inputTokens),
             output: formatTokenCompact(usage.outputTokens),
             total: formatTokenCompact(usage.totalTokens),
-            price: formatUsdCompact(estimateGpt54TurnCostUsd(usage)),
+            price: formatUsdCompact(estimateGpt55TurnCostUsd(usage)),
           };
           var animatedText = {
             input: finalText.input,
             output: finalText.output,
             total: finalText.total,
-            price: formatUsdAnimated(estimateGpt54TurnCostUsd(usage)),
+            price: formatUsdAnimated(estimateGpt55TurnCostUsd(usage)),
           };
           var locked = {
             input: false,
@@ -6484,7 +6484,7 @@
               output: formatTokenCompact(usage.output),
               total: formatTokenCompact(usage.total),
               price: formatUsdAnimated(
-                estimateGpt54TurnCostUsd({
+                estimateGpt55TurnCostUsd({
                   inputTokens: usage.input,
                   outputTokens: usage.output,
                 }),
@@ -6495,7 +6495,7 @@
               output: formatTokenCompact(ghostUsage.output),
               total: formatTokenCompact(ghostUsage.total),
               price: formatUsdAnimated(
-                estimateGpt54TurnCostUsd({
+                estimateGpt55TurnCostUsd({
                   inputTokens: ghostUsage.input,
                   outputTokens: ghostUsage.output,
                 }),
