@@ -118,9 +118,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 10. Start using the connector from ChatGPT Web. Some important tips:
 
-- I strongly recommend manually selecting the connector using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability.
-- **Do NOT let ChatGPT automatically decide which connector to use.** There is a strange bug where ChatGPT keeps saying _"Resource not found."_ This bug is driving me crazy. It is also very unstable if you do not explicitly select CatDesk.
-- However, the `web` tool that ChatGPT uses to search and open links will be disabled if you explicitly select CatDesk. The `web` tool and a custom connector cannot be used at the same time. If you need to search some docs, click the x to remove CatDesk temporarily. After finishing the search, add it back.
+- I recommend let ChatGPT to decide which connector automatically. You can manually selecting the connector using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability. However, the downside is, `web.search` and `web.open` will be disabled. Which means it can't search latest info. The `web` tool and a custom connector cannot be used at the same time.
 
 <table align="center">
   <tr>
@@ -135,21 +133,29 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
+- To improve performance and avoid high memory usage, I strongly recommend **opening a new session for every small feature**. If you need context, you can ask ChatGPT to create a handoff note and paste it into the new session. It will become extremely laggy after 50+ tool calls.
+<p align="center">
+  <img src="docs/images/high_ram_usage.png" alt="3.9 GB Memory usage🥹" width="300"><br>
+  <em>3.9 GB Memory usage🥹</em>
+</p>
+
+- Use 5.5 with `Standard` thinking effort for CatDesk. It‘s smoother and faster, and produces better code quality than `Extended`(at least in my experience).
+
 # Tools
 
 CatDesk has two local tool modes: `multi-tools` exposes 7 tools, and `read-only` exposes 3 tools.
 
 CatDesk's local tools in `multi-tools` mode are:
 
-| Tool                  | Type  | What it does                                                            |
-| --------------------- | ----- | ----------------------------------------------------------------------- |
-| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and reads your workspace `AGENTS.md` |
-| `read`                | Read  | Reads a text file from the workspace                                    |
-| `search`              | Read  | Searches workspace text with `rg`, `grep`, or built-in search           |
-| `write`               | Write | Creates or overwrites a file                                            |
-| `edit`                | Write | Replaces exact text inside a file                                       |
-| `delete`              | Write | Deletes a file or directory                                             |
-| `run_command`         | Shell | Runs a shell command inside the workspace.                              |
+| Tool                  | Type  | What it does                                                  |
+| --------------------- | ----- | ------------------------------------------------------------- |
+| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and render Binagotchy      |
+| `read`                | Read  | Reads a text file from the workspace                          |
+| `search`              | Read  | Searches workspace text with `rg`, `grep`, or built-in search |
+| `write`               | Write | Creates or overwrites a file                                  |
+| `edit`                | Write | Replaces exact text inside a file                             |
+| `delete`              | Write | Deletes a file or directory                                   |
+| `run_command`         | Shell | Runs a shell command inside the workspace.                    |
 
 If browser mode is enabled, CatDesk can also expose extra browser/devtools tools. Those are provided by the browser bridge, so the exact list depends on your environment.
 
