@@ -13,7 +13,7 @@ async function setEnabled(enabled) {
 
 async function updateAction(enabled) {
   await chrome.action.setBadgeText({ text: enabled ? "ON" : "OFF" });
-  await chrome.action.setBadgeBackgroundColor({ color: enabled ? "#16a34a" : "#64748b" });
+  await chrome.action.setBadgeBackgroundColor({ color: enabled ? "#383838" : "#212121" });
   await chrome.action.setTitle({
     title: enabled
       ? "CatDesk Auto Approval: enabled"

@@ -1,5 +1,5 @@
 (() => {
-  if (globalThis.__chatgptApprovalHighlighter?.version === "0.2.0") {
+  if (globalThis.__chatgptApprovalHighlighter?.version === "0.2.2") {
     globalThis.__chatgptApprovalHighlighter.reinitialize();
     return;
   }
@@ -7,7 +7,11 @@
   const STORAGE_KEY = "enabled";
   const OVERLAY_ATTR = "data-catdesk-auto-approval-overlay";
   const OUTLINED_ATTR = "data-catdesk-auto-approval-outlined";
-  const VERSION = "0.2.0";
+  const VERSION = "0.2.2";
+  const HIGHLIGHT_COLOR = "rgba(255, 255, 255, 0.42)";
+  const HIGHLIGHT_BACKGROUND = "rgba(255, 255, 255, 0.14)";
+  const HIGHLIGHT_LABEL_BACKGROUND = "rgba(26, 26, 28, 0.96)";
+  const HIGHLIGHT_TEXT_COLOR = "#cdcdcd";
 
   let enabled = false;
   let observer = null;
@@ -201,11 +205,12 @@
     return candidates.sort((a, b) => b.score - a.score);
   }
 
-  function addOverlay(el, label, color) {
+  function addOverlay(el, label) {
     const rect = el.getBoundingClientRect();
 
-    el.style.setProperty("outline", `3px solid ${color}`, "important");
+    el.style.setProperty("outline", `3px solid ${HIGHLIGHT_COLOR}`, "important");
     el.style.setProperty("outline-offset", "3px", "important");
+    el.style.setProperty("box-shadow", `0 0 0 6px ${HIGHLIGHT_BACKGROUND}`, "important");
     el.setAttribute(OUTLINED_ATTR, "1");
     outlinedElements.add(el);
 
@@ -217,7 +222,8 @@
       `top: ${Math.max(0, rect.top)}px`,
       `width: ${Math.max(1, rect.width)}px`,
       `height: ${Math.max(1, rect.height)}px`,
-      `border: 2px solid ${color}`,
+      `border: 2px solid ${HIGHLIGHT_COLOR}`,
+      `background: ${HIGHLIGHT_BACKGROUND}`,
       "box-sizing: border-box",
       "z-index: 2147483647",
       "pointer-events: none",
@@ -231,8 +237,9 @@
       "position: fixed",
       `left: ${Math.max(0, rect.left)}px`,
       `top: ${Math.max(0, rect.top - 24)}px`,
-      `background: ${color}`,
-      "color: white",
+      `background: ${HIGHLIGHT_LABEL_BACKGROUND}`,
+      `border: 1px solid ${HIGHLIGHT_BACKGROUND}`,
+      `color: ${HIGHLIGHT_TEXT_COLOR}`,
       "font: 12px/1.4 system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
       "padding: 2px 6px",
       "border-radius: 6px",
@@ -255,6 +262,7 @@
       if (!(el instanceof HTMLElement)) continue;
       el.style.removeProperty("outline");
       el.style.removeProperty("outline-offset");
+      el.style.removeProperty("box-shadow");
       el.removeAttribute(OUTLINED_ATTR);
     }
 
@@ -273,9 +281,7 @@
 
     if (!best) return null;
 
-    addOverlay(best.card, "APPROVAL CARD", "#7c4dff");
-    addOverlay(best.negative, "NEGATIVE PAIR", "#2979ff");
-    addOverlay(best.el, `PRIMARY APPROVAL score=${best.score}`, "#ff1744");
+    addOverlay(best.el, `APPROVE score=${best.score}`);
     best.el.click();
 
     return globalThis.__chatgptApprovalHighlighterLastResult;

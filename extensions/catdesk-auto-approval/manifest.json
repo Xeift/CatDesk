@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CatDesk Auto Approval",
-  "version": "0.1.1",
+  "version": "0.2.2",
   "description": "Highlights ChatGPT tool approval primary buttons.",
   "permissions": [
     "storage",
