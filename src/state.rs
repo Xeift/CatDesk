@@ -1544,7 +1544,10 @@ toolCallCount = 0
             ("resources/read:run_command", FlowDirection::Forward),
             ("resources/read:run_command", FlowDirection::Backward),
             ("resources/read:catdesk_instruction", FlowDirection::Forward),
-            ("resources/read:catdesk_instruction", FlowDirection::Backward),
+            (
+                "resources/read:catdesk_instruction",
+                FlowDirection::Backward,
+            ),
             ("resources/read:read", FlowDirection::Forward),
             ("resources/read:read", FlowDirection::Backward),
             ("resources/read:search", FlowDirection::Forward),
@@ -1566,7 +1569,10 @@ toolCallCount = 0
             ("resources/read:run_command", FlowDirection::Forward),
             ("resources/read:run_command", FlowDirection::Backward),
             ("resources/read:catdesk_instruction", FlowDirection::Forward),
-            ("resources/read:catdesk_instruction", FlowDirection::Backward),
+            (
+                "resources/read:catdesk_instruction",
+                FlowDirection::Backward,
+            ),
             ("resources/read:read", FlowDirection::Forward),
             ("resources/read:read", FlowDirection::Backward),
             ("resources/read:search", FlowDirection::Forward),

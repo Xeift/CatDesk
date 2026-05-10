@@ -224,14 +224,27 @@ impl SearchMatcher {
 fn workspace_root_path(workspace_root: &str) -> Result<PathBuf, String> {
     Path::new(workspace_root)
         .canonicalize()
+        .map(command::normalize_windows_verbatim_path)
         .map_err(|e| e.to_string())
 }
 
 fn to_workspace_relative(root: &Path, path: &Path) -> String {
     match path.strip_prefix(root) {
         Ok(rel) if rel.as_os_str().is_empty() => ".".into(),
-        Ok(rel) => rel.display().to_string(),
-        Err(_) => path.display().to_string(),
+        Ok(rel) => tool_path_string(rel),
+        Err(_) => tool_path_string(path),
+    }
+}
+
+fn tool_path_string(path: &Path) -> String {
+    let path = path.display().to_string();
+    #[cfg(windows)]
+    {
+        path.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path
     }
 }
 

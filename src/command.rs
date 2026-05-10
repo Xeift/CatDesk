@@ -74,6 +74,7 @@ pub fn resolve_workspace_path(
 ) -> Result<PathBuf, String> {
     let root = Path::new(workspace_root)
         .canonicalize()
+        .map(normalize_windows_verbatim_path)
         .map_err(|e| e.to_string())?;
     let input = input.unwrap_or(".");
 
@@ -83,7 +84,7 @@ pub fn resolve_workspace_path(
         root.join(input)
     };
 
-    let candidate = candidate.canonicalize().unwrap_or(candidate);
+    let candidate = normalize_windows_verbatim_path(candidate.canonicalize().unwrap_or(candidate));
     if !candidate.starts_with(&root) {
         return Err(format!(
             "Path escapes workspace root: {}",
@@ -101,6 +102,7 @@ pub fn resolve_command_path(
 ) -> Result<PathBuf, String> {
     let root = Path::new(workspace_root)
         .canonicalize()
+        .map(normalize_windows_verbatim_path)
         .map_err(|e| e.to_string())?;
     let input = input.unwrap_or(".");
 
@@ -110,7 +112,7 @@ pub fn resolve_command_path(
         cwd.join(input)
     };
 
-    let candidate = candidate.canonicalize().unwrap_or(candidate);
+    let candidate = normalize_windows_verbatim_path(candidate.canonicalize().unwrap_or(candidate));
     if !candidate.starts_with(&root) {
         return Err(format!(
             "Path escapes workspace root: {}",
@@ -118,6 +120,44 @@ pub fn resolve_command_path(
         ));
     }
     Ok(candidate)
+}
+
+pub fn normalize_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    normalize_windows_verbatim_path_impl(path)
+}
+
+#[cfg(windows)]
+fn normalize_windows_verbatim_path_impl(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+
+    let mut normalized = match prefix.kind() {
+        Prefix::VerbatimDisk(disk) => PathBuf::from(format!("{}:\\", disk as char)),
+        Prefix::VerbatimUNC(server, share) => PathBuf::from(format!(
+            r"\\{}\{}",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        )),
+        _ => return path,
+    };
+
+    for component in components {
+        if matches!(component, Component::RootDir) {
+            continue;
+        }
+        normalized.push(component.as_os_str());
+    }
+
+    normalized
+}
+
+#[cfg(not(windows))]
+fn normalize_windows_verbatim_path_impl(path: PathBuf) -> PathBuf {
+    path
 }
 
 pub fn detect_list_files_intercept(command: &str) -> Option<InterceptedListFilesRequest> {
@@ -130,14 +170,11 @@ pub fn detect_move_path_intercept(command: &str) -> Option<InterceptedMovePathRe
     detect_move_path_intercept_from_words(&words)
 }
 
-/// Execute a shell command via `/bin/bash`.
+/// Execute a shell command via the platform shell.
 pub async fn run_command(command: &str, cwd: &Path, timeout_ms: u64) -> CommandResult {
     let start = Instant::now();
-    let fut = Command::new("/bin/bash")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .output();
+    let mut shell = shell_command(command);
+    let fut = shell.current_dir(cwd).output();
 
     match timeout(Duration::from_millis(timeout_ms), fut).await {
         Ok(Ok(output)) => {
@@ -170,6 +207,27 @@ pub async fn run_command(command: &str, cwd: &Path, timeout_ms: u64) -> CommandR
             elapsed_ms: start.elapsed().as_millis() as u64,
         },
     }
+}
+
+#[cfg(windows)]
+fn shell_command(command: &str) -> Command {
+    let mut shell = Command::new("powershell.exe");
+    shell
+        .arg("-NoLogo")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(command);
+    shell
+}
+
+#[cfg(not(windows))]
+fn shell_command(command: &str) -> Command {
+    let mut shell = Command::new("/bin/bash");
+    shell.arg("-c").arg(command);
+    shell
 }
 
 /// Format stdout+stderr into a single string.
@@ -924,6 +982,57 @@ fn shell_segments(command: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    fn test_workspace(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("catdesk-command-{name}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn resolve_workspace_path_defaults_to_workspace_root_for_missing_or_dot_cwd() {
+        let workspace_root = test_workspace("resolve-default");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let expected = normalize_windows_verbatim_path(
+            workspace_root
+                .canonicalize()
+                .expect("canonicalize workspace"),
+        );
+
+        assert_eq!(
+            resolve_workspace_path(&workspace_root_str, None).expect("resolve missing cwd"),
+            expected
+        );
+        assert_eq!(
+            resolve_workspace_path(&workspace_root_str, Some(".")).expect("resolve dot cwd"),
+            expected
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_command_uses_platform_shell_and_cwd() {
+        let workspace_root = test_workspace("run-cwd");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let leaf = workspace_root
+            .file_name()
+            .expect("workspace leaf")
+            .to_string_lossy()
+            .into_owned();
+        let command = if cfg!(windows) {
+            "Split-Path -Leaf (Get-Location).Path"
+        } else {
+            "basename \"$PWD\""
+        };
+
+        let result = run_command(command, &workspace_root, 10_000).await;
+
+        assert!(result.success, "stderr: {}", result.stderr);
+        assert_eq!(result.stdout.trim(), leaf);
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
 
     #[test]
     fn contains_catdesk_co_author_marker_matches_spaced_and_punctuated_phrase() {

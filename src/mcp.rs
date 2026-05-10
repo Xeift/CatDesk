@@ -863,6 +863,7 @@ fn build_run_command_move_path_structured(
 ) -> Value {
     let root = Path::new(workspace_root)
         .canonicalize()
+        .map(command::normalize_windows_verbatim_path)
         .unwrap_or_else(|_| PathBuf::from(workspace_root));
     json!({
         "toolName": "run_command",
@@ -2076,6 +2077,7 @@ fn collect_watch_targets(req: &JsonRpcRequest, workspace_root: &str) -> Vec<Watc
 fn collect_watched_snapshot(targets: &[WatchTarget], workspace_root: &str) -> WatchedSnapshot {
     let root = Path::new(workspace_root)
         .canonicalize()
+        .map(command::normalize_windows_verbatim_path)
         .unwrap_or_else(|_| PathBuf::from(workspace_root));
     let mut files: HashMap<String, FileSnapshot> = HashMap::new();
     let mut remaining = MAX_WATCHED_FILES;
@@ -2192,8 +2194,20 @@ fn collect_dir_files(
 
 fn to_relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| path.display().to_string())
+        .map(tool_path_string)
+        .unwrap_or_else(|_| tool_path_string(path))
+}
+
+fn tool_path_string(path: &Path) -> String {
+    let path = path.display().to_string();
+    #[cfg(windows)]
+    {
+        path.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
 }
 
 fn capture_file(path: &Path) -> Option<FileSnapshot> {

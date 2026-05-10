@@ -1359,7 +1359,10 @@ fn draw_ngrok_auth_setup(
             Span::styled(NGROK_SETUP_URL, link_style),
         ]),
         Line::from(""),
-        Line::from(Span::styled("2. Paste the token or ngrok config command below", step_style)),
+        Line::from(Span::styled(
+            "2. Paste the token or ngrok config command below",
+            step_style,
+        )),
     ];
     let body = Paragraph::new(body_lines)
         .style(Style::default().fg(modal_fg).bg(modal_bg))
@@ -2684,34 +2687,36 @@ async fn run_tui(
                                     let row = start.1 as usize;
                                     if row < screen_lines.len() {
                                         let line = &screen_lines[row];
-                                        let copy_value =
-                                            if line.contains("chatgpt.com/apps") {
-                                                Some("https://chatgpt.com/apps#settings/Connectors".to_string())
-                                            } else if let Some(ref url) = last_mcp_url {
-                                                let prefix = &url[..url.len().min(30)];
-                                                if line.contains("MCP Server URL")
-                                                    || line.contains(prefix)
-                                                {
-                                                    Some(url.clone())
+                                        let copy_value = if line.contains("chatgpt.com/apps") {
+                                            Some(
+                                                "https://chatgpt.com/apps#settings/Connectors"
+                                                    .to_string(),
+                                            )
+                                        } else if let Some(ref url) = last_mcp_url {
+                                            let prefix = &url[..url.len().min(30)];
+                                            if line.contains("MCP Server URL")
+                                                || line.contains(prefix)
+                                            {
+                                                Some(url.clone())
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                        .or_else(|| {
+                                            if line.contains("\u{2502}") {
+                                                if line.contains("Name") {
+                                                    Some("CatDesk".to_string())
+                                                } else if line.contains("Authentication") {
+                                                    Some("None".to_string())
                                                 } else {
                                                     None
                                                 }
                                             } else {
                                                 None
                                             }
-                                            .or_else(|| {
-                                                if line.contains("\u{2502}") {
-                                                    if line.contains("Name") {
-                                                        Some("CatDesk".to_string())
-                                                    } else if line.contains("Authentication") {
-                                                        Some("None".to_string())
-                                                    } else {
-                                                        None
-                                                    }
-                                                } else {
-                                                    None
-                                                }
-                                            });
+                                        });
                                         if let Some(text) = copy_value {
                                             let message = if clipboard_copy(&text) {
                                                 "Copied!"
