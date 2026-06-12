@@ -10,7 +10,9 @@ use tokio::sync::Mutex;
 
 use crate::command;
 use crate::devtools::DevtoolsBridge;
+use crate::external_mcp::{EXTERNAL_MCP_TOOL_NAME, ExternalMcpManager};
 use crate::mascot;
+use crate::skills;
 use crate::state::{
     AgentsPathMode, Mode, ShowDetailMode, TokenStatsLayout, ToolMode, app_config_path,
     load_app_config, user_home_dir,
@@ -147,6 +149,7 @@ pub async fn handle_request(
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+    external_mcp: &Option<Arc<Mutex<ExternalMcpManager>>>,
 ) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
         "initialize" => {
@@ -172,7 +175,7 @@ pub async fn handle_request(
             Some(handle_initialize(req))
         }
         m if m.starts_with("notifications/") => None,
-        "tools/list" => Some(handle_tools_list(req, mode, tool_mode, devtools).await),
+        "tools/list" => Some(handle_tools_list(req, mode, tool_mode, devtools, external_mcp).await),
         "tools/call" => Some(
             handle_tools_call(
                 req,
@@ -182,6 +185,7 @@ pub async fn handle_request(
                 tool_mode,
                 set_catdesk_as_co_author,
                 devtools,
+                external_mcp,
             )
             .await,
         ),
@@ -324,6 +328,7 @@ async fn handle_tools_list(
     mode: Mode,
     tool_mode: ToolMode,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+    external_mcp: &Option<Arc<Mutex<ExternalMcpManager>>>,
 ) -> JsonRpcResponse {
     let mut tools: Vec<Value> = Vec::new();
 
@@ -395,6 +400,8 @@ async fn handle_tools_list(
             "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
         }));
 
+        tools.extend(skill_tool_descriptors());
+
         if tool_mode.write_tools_enabled() {
             tools.push(json!({
                 "name": "write",
@@ -444,6 +451,49 @@ async fn handle_tools_list(
         }
     }
 
+    if external_mcp.is_some() && tool_mode.write_tools_enabled() {
+        tools.push(json!({
+            "name": EXTERNAL_MCP_TOOL_NAME,
+            "title": "MCP gateway",
+            "description": "Search, describe, connect to, and call tools from configured downstream MCP servers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tool": { "type": "string", "description": "Downstream MCP tool name to call. Use the exposed server-prefixed name when possible." },
+                    "args": {
+                        "description": "Downstream tool arguments as a JSON object. JSON object strings are accepted for compatibility.",
+                        "oneOf": [
+                            { "type": "object", "additionalProperties": true },
+                            { "type": "string" }
+                        ]
+                    },
+                    "connect": { "type": "string", "description": "Downstream MCP server name to connect and list." },
+                    "describe": { "type": "string", "description": "Downstream MCP tool name to describe." },
+                    "search": { "type": "string", "description": "Search downstream tools by name, server, or description." },
+                    "resource": { "type": "string", "description": "Downstream MCP resource URI to read." },
+                    "resources": { "type": "boolean", "description": "List downstream MCP resources." },
+                    "server": { "type": "string", "description": "Server filter or disambiguation." }
+                }
+            },
+            "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+        }));
+        if let Some(manager) = external_mcp {
+            let mut manager = manager.lock().await;
+            if let Ok(direct_tools) = manager.direct_tool_descriptors(tool_mode.read_only()).await {
+                tools.extend(direct_tools);
+            }
+        }
+    }
+
+    if external_mcp.is_some() && tool_mode.read_only() {
+        if let Some(manager) = external_mcp {
+            let mut manager = manager.lock().await;
+            if let Ok(direct_tools) = manager.direct_tool_descriptors(true).await {
+                tools.extend(direct_tools);
+            }
+        }
+    }
+
     // Browser tools — get from devtools bridge
     if mode.browser_enabled() {
         if let Some(bridge) = devtools {
@@ -474,6 +524,7 @@ async fn handle_tools_call(
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+    external_mcp: &Option<Arc<Mutex<ExternalMcpManager>>>,
 ) -> JsonRpcResponse {
     let params = &req.params;
     let tool_name = params
@@ -486,8 +537,16 @@ async fn handle_tools_call(
     let before_snapshot = collect_watched_snapshot(&watch_targets, workspace_root);
 
     let mut response = {
+        if tool_name == EXTERNAL_MCP_TOOL_NAME {
+            if tool_mode.read_only() {
+                read_only_blocked_response(req, &tool_name)
+            } else if let Some(manager) = external_mcp {
+                handle_external_mcp_proxy(req, manager).await
+            } else {
+                tool_error_response(req, format!("Unknown tool: {tool_name}"))
+            }
         // Local computer tools
-        if mode.computer_enabled() {
+        } else if mode.computer_enabled() {
             if tool_name == "run_command" {
                 if tool_mode.run_command_enabled() {
                     handle_run_command(req, workspace_root, set_catdesk_as_co_author).await
@@ -507,6 +566,10 @@ async fn handle_tools_call(
                     ),
                     "read" => handle_read_file(req, workspace_root),
                     "search" => handle_search_text(req, workspace_root),
+                    "list_skills" => handle_list_skills(req, workspace_root),
+                    "search_skills" => handle_search_skills(req, workspace_root),
+                    "read_skill" => handle_read_skill(req, workspace_root),
+                    "read_skill_resource" => handle_read_skill_resource(req, workspace_root),
                     _ => {
                         if tool_mode.write_tools_enabled() {
                             match tool_name.as_str() {
@@ -514,7 +577,16 @@ async fn handle_tools_call(
                                 "edit" => handle_edit_file(req, workspace_root),
                                 "delete" => handle_delete_path(req, workspace_root),
                                 _ => {
-                                    if mode.browser_enabled() {
+                                    if let Some(response) = try_external_mcp_direct_tool(
+                                        req,
+                                        &tool_name,
+                                        tool_mode,
+                                        external_mcp,
+                                    )
+                                    .await
+                                    {
+                                        response
+                                    } else if mode.browser_enabled() {
                                         forward_to_devtools(req, &tool_name, tool_mode, devtools)
                                             .await
                                     } else {
@@ -525,8 +597,23 @@ async fn handle_tools_call(
                                     }
                                 }
                             }
-                        } else if tool_mode.read_only() && is_local_destructive_tool(&tool_name) {
-                            read_only_blocked_response(req, &tool_name)
+                        } else if tool_mode.read_only() {
+                            if let Some(response) = try_external_mcp_direct_tool(
+                                req,
+                                &tool_name,
+                                tool_mode,
+                                external_mcp,
+                            )
+                            .await
+                            {
+                                response
+                            } else if is_local_destructive_tool(&tool_name) {
+                                read_only_blocked_response(req, &tool_name)
+                            } else if mode.browser_enabled() {
+                                forward_to_devtools(req, &tool_name, tool_mode, devtools).await
+                            } else {
+                                tool_error_response(req, format!("Unknown tool: {tool_name}"))
+                            }
                         } else if mode.browser_enabled() {
                             forward_to_devtools(req, &tool_name, tool_mode, devtools).await
                         } else {
@@ -930,6 +1017,74 @@ fn tool_response(
     JsonRpcResponse::success(req.id.clone(), result)
 }
 
+async fn handle_external_mcp_proxy(
+    req: &JsonRpcRequest,
+    manager: &Arc<Mutex<ExternalMcpManager>>,
+) -> JsonRpcResponse {
+    let args = tool_arguments(req);
+    let mut manager = manager.lock().await;
+    match manager.proxy(&args).await {
+        Ok(output) => tool_success_response_with_structured(req, output.text, output.structured),
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+async fn try_external_mcp_direct_tool(
+    req: &JsonRpcRequest,
+    tool_name: &str,
+    tool_mode: ToolMode,
+    external_mcp: &Option<Arc<Mutex<ExternalMcpManager>>>,
+) -> Option<JsonRpcResponse> {
+    let manager = external_mcp.as_ref()?;
+    let arguments = tool_arguments(req);
+    let mut manager = manager.lock().await;
+    if tool_mode.read_only() {
+        match manager.call_direct_tool(tool_name, arguments, true).await {
+            Ok(Some(call)) => {
+                return Some(tool_success_response_with_structured(
+                    req,
+                    format!(
+                        "called {}:{} via MCP gateway",
+                        call.server_name, call.original_name
+                    ),
+                    json!({
+                        "toolName": tool_name,
+                        "server": call.server_name,
+                        "downstreamTool": call.original_name,
+                        "downstreamToolCallCount": 1,
+                        "result": call.result,
+                    }),
+                ));
+            }
+            Ok(None) => {
+                if manager.direct_tool_name_candidate(tool_name) {
+                    return Some(read_only_blocked_response(req, tool_name));
+                }
+                return None;
+            }
+            Err(error) => return Some(tool_error_response(req, error)),
+        }
+    }
+    match manager.call_direct_tool(tool_name, arguments, false).await {
+        Ok(Some(call)) => Some(tool_success_response_with_structured(
+            req,
+            format!(
+                "called {}:{} via MCP gateway",
+                call.server_name, call.original_name
+            ),
+            json!({
+                "toolName": tool_name,
+                "server": call.server_name,
+                "downstreamTool": call.original_name,
+                "downstreamToolCallCount": 1,
+                "result": call.result,
+            }),
+        )),
+        Ok(None) => None,
+        Err(error) => Some(tool_error_response(req, error)),
+    }
+}
+
 fn tool_message_structured(req: &JsonRpcRequest, message: String, is_error: bool) -> Value {
     json!({
         "toolName": tool_name_from_request(req),
@@ -1133,6 +1288,144 @@ fn widget_path_strings(path: &Path) -> (String, String) {
         path.to_string_lossy().to_string(),
         display_path_with_tilde(path),
     )
+}
+
+fn skill_tool_descriptors() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "list_skills",
+            "title": "List skills",
+            "description": "List all available local CatDesk skills. Skills are directories with SKILL.md under configured skill roots.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+        json!({
+            "name": "search_skills",
+            "title": "Search skills",
+            "description": "Search available skills by task, domain, trigger phrase, skill name, description, and SKILL.md body.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Task, domain, trigger phrase, or keyword to search for"}
+                },
+                "required": ["query"]
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+        json!({
+            "name": "read_skill",
+            "title": "Read skill",
+            "description": "Read the complete SKILL.md for one local CatDesk skill.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Skill id, usually the skill directory name"}
+                },
+                "required": ["id"]
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+        json!({
+            "name": "read_skill_resource",
+            "title": "Read skill resource",
+            "description": "Read a template, reference file, or other text resource inside one skill directory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "skill_id": {"type": "string", "description": "Skill id, usually the skill directory name"},
+                    "path": {"type": "string", "description": "Resource path relative to the skill directory"}
+                },
+                "required": ["skill_id", "path"]
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+        }),
+    ]
+}
+
+fn handle_list_skills(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let workspace_root = Path::new(workspace_root);
+    match skills::list_skills(workspace_root) {
+        Ok(skill_list) => {
+            let structured = skills::skill_summaries_payload(&skill_list);
+            let text = render_skill_list(&skill_list);
+            tool_success_response_with_structured(req, text, structured)
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn handle_search_skills(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let query = match required_string_argument(&arguments, "query") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    match skills::search_skills(Path::new(workspace_root), query) {
+        Ok(skill_list) => {
+            let mut structured = skills::skill_summaries_payload(&skill_list);
+            if let Some(object) = structured.as_object_mut() {
+                object.insert("query".to_string(), json!(query));
+                object.insert("toolName".to_string(), json!("search_skills"));
+            }
+            let text = render_skill_list(&skill_list);
+            tool_success_response_with_structured(req, text, structured)
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn handle_read_skill(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let skill_id = match required_string_argument(&arguments, "id") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    match skills::read_skill(Path::new(workspace_root), skill_id) {
+        Ok(document) => {
+            let structured = json!({
+                "toolName": "read_skill",
+                "skill": skills::skill_summary_payload(&document.summary),
+                "content": document.content,
+            });
+            tool_success_response_with_structured(req, document.content, structured)
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn handle_read_skill_resource(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let skill_id = match required_string_argument(&arguments, "skill_id") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let path = match required_string_argument(&arguments, "path") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    match skills::read_skill_resource(Path::new(workspace_root), skill_id, path) {
+        Ok(resource) => {
+            let structured = json!({
+                "toolName": "read_skill_resource",
+                "skillId": resource.skill_id,
+                "path": resource.path,
+                "content": resource.content,
+            });
+            tool_success_response_with_structured(req, resource.content, structured)
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+fn render_skill_list(skill_list: &[skills::SkillSummary]) -> String {
+    if skill_list.is_empty() {
+        return "No skills found.".to_string();
+    }
+    skill_list
+        .iter()
+        .map(|skill| format!("{} - {}\n{}", skill.id, skill.name, skill.description))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn catdesk_instruction_text(
@@ -1662,9 +1955,16 @@ fn current_token_stats_layout() -> TokenStatsLayout {
 }
 
 fn current_show_detail_mode() -> ShowDetailMode {
-    load_app_config()
-        .map(|config| config.show_detail_mode)
-        .unwrap_or_default()
+    #[cfg(test)]
+    {
+        ShowDetailMode::Expanded
+    }
+    #[cfg(not(test))]
+    {
+        crate::state::load_app_config()
+            .map(|config| config.show_detail_mode)
+            .unwrap_or_default()
+    }
 }
 
 fn attach_widget_changed_files(
@@ -2521,7 +2821,10 @@ fn diff_changed_files(before: &WatchedSnapshot, after: &WatchedSnapshot) -> Vec<
 }
 
 fn is_local_destructive_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "run_command" | "write" | "edit" | "delete")
+    matches!(
+        tool_name,
+        "run_command" | "write" | "edit" | "delete" | EXTERNAL_MCP_TOOL_NAME
+    )
 }
 
 fn tool_is_read_only(tool: &Value) -> bool {
@@ -2815,7 +3118,88 @@ fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{DirectToolsConfig, ExternalMcpConfig, ExternalMcpServer};
     use uuid::Uuid;
+
+    fn external_mcp_for_test() -> Option<Arc<Mutex<ExternalMcpManager>>> {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "mock".to_string(),
+            ExternalMcpServer {
+                command: Some("mock-mcp-server".to_string()),
+                ..ExternalMcpServer::default()
+            },
+        );
+        Some(Arc::new(Mutex::new(ExternalMcpManager::new(
+            ExternalMcpConfig {
+                mcp_servers: servers,
+                ..ExternalMcpConfig::default()
+            },
+        ))))
+    }
+
+    fn external_mcp_with_cached_direct_tool_for_test() -> Option<Arc<Mutex<ExternalMcpManager>>> {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "mock".to_string(),
+            ExternalMcpServer {
+                command: Some("mock-mcp-server".to_string()),
+                direct_tools: Some(DirectToolsConfig::Names(vec!["echo".to_string()])),
+                ..ExternalMcpServer::default()
+            },
+        );
+        let mut manager = ExternalMcpManager::new(ExternalMcpConfig {
+            mcp_servers: servers,
+            ..ExternalMcpConfig::default()
+        });
+        manager.set_cached_tools_for_test(
+            "mock",
+            vec![json!({
+                "name": "echo",
+                "description": "Echo a message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}}
+                }
+            })],
+        );
+        Some(Arc::new(Mutex::new(manager)))
+    }
+
+    fn external_mcp_with_cached_read_only_direct_tool_for_test()
+    -> Option<Arc<Mutex<ExternalMcpManager>>> {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "mock".to_string(),
+            ExternalMcpServer {
+                command: Some("mock-mcp-server".to_string()),
+                direct_tools: Some(DirectToolsConfig::Enabled(true)),
+                ..ExternalMcpServer::default()
+            },
+        );
+        let mut manager = ExternalMcpManager::new(ExternalMcpConfig {
+            mcp_servers: servers,
+            ..ExternalMcpConfig::default()
+        });
+        manager.set_cached_tools_for_test(
+            "mock",
+            vec![
+                json!({
+                    "name": "safe",
+                    "description": "Safe read-only direct tool",
+                    "inputSchema": {"type": "object", "properties": {}},
+                    "annotations": {"readOnlyHint": true, "openWorldHint": false, "destructiveHint": false}
+                }),
+                json!({
+                    "name": "unsafe",
+                    "description": "Unsafe direct tool",
+                    "inputSchema": {"type": "object", "properties": {}},
+                    "annotations": {"readOnlyHint": false, "destructiveHint": true}
+                }),
+            ],
+        );
+        Some(Arc::new(Mutex::new(manager)))
+    }
 
     fn resources_read_request(uri: &str) -> JsonRpcRequest {
         JsonRpcRequest {
@@ -2879,7 +3263,8 @@ mod tests {
             params: json!({}),
         };
 
-        let response = handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None).await;
+        let response =
+            handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None, &None).await;
         let names = response
             .result
             .as_ref()
@@ -2897,6 +3282,10 @@ mod tests {
                 "catdesk_instruction",
                 "read",
                 "search",
+                "list_skills",
+                "search_skills",
+                "read_skill",
+                "read_skill_resource",
                 "write",
                 "edit",
                 "delete",
@@ -2913,7 +3302,8 @@ mod tests {
             params: json!({}),
         };
 
-        let response = handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None).await;
+        let response =
+            handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None, &None).await;
         let tools = response
             .result
             .as_ref()
@@ -2950,7 +3340,7 @@ mod tests {
             params: json!({}),
         };
 
-        let response = handle_tools_list(&req, Mode::Both, ToolMode::ReadOnly, &None).await;
+        let response = handle_tools_list(&req, Mode::Both, ToolMode::ReadOnly, &None, &None).await;
         let names = response
             .result
             .as_ref()
@@ -2961,7 +3351,545 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
 
-        assert_eq!(names, vec!["catdesk_instruction", "read", "search"]);
+        assert_eq!(
+            names,
+            vec![
+                "catdesk_instruction",
+                "read",
+                "search",
+                "list_skills",
+                "search_skills",
+                "read_skill",
+                "read_skill_resource",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_list_exposes_skills_tools_in_read_only_mode() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+
+        let response = handle_tools_list(&req, Mode::Both, ToolMode::ReadOnly, &None, &None).await;
+        let names = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"list_skills"));
+        assert!(names.contains(&"search_skills"));
+        assert!(names.contains(&"read_skill"));
+        assert!(names.contains(&"read_skill_resource"));
+    }
+
+    #[tokio::test]
+    async fn list_skills_tool_returns_workspace_skills() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-list-skills-{}", Uuid::new_v4()));
+        let skill_root = workspace_root.join(".catdesk/skills/slides");
+        std::fs::create_dir_all(&skill_root).expect("create skill root");
+        std::fs::write(
+            skill_root.join("SKILL.md"),
+            "---\nname: Slides\ndescription: Create slide decks.\n---\nUse this skill for presentations.\n",
+        )
+        .expect("write skill");
+        let req = tool_call_request("list_skills", json!({}));
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::ReadOnly,
+            false,
+            &None,
+            &None,
+        )
+        .await;
+        let skills = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .and_then(|structured| structured.get("skills"))
+            .and_then(Value::as_array)
+            .expect("missing skills");
+        assert!(
+            skills
+                .iter()
+                .any(|skill| skill.get("id").and_then(Value::as_str) == Some("slides"))
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_skill_resource_tool_rejects_traversal() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-skill-resource-{}", Uuid::new_v4()));
+        let skill_root = workspace_root.join(".catdesk/skills/slides");
+        std::fs::create_dir_all(&skill_root).expect("create skill root");
+        std::fs::write(
+            skill_root.join("SKILL.md"),
+            "---\nname: Slides\ndescription: Create decks.\n---\nUse this skill for slides.\n",
+        )
+        .expect("write skill");
+        let req = tool_call_request(
+            "read_skill_resource",
+            json!({"skill_id": "slides", "path": "../secret.txt"}),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::ReadOnly,
+            false,
+            &None,
+            &None,
+        )
+        .await;
+        let is_error = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("isError"))
+            .and_then(Value::as_bool);
+        assert_eq!(is_error, Some(true));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn tools_list_exposes_mcp_proxy_when_external_manager_present() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+        let external_mcp = external_mcp_for_test();
+
+        let response =
+            handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None, &external_mcp).await;
+        let names = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&EXTERNAL_MCP_TOOL_NAME));
+    }
+
+    #[tokio::test]
+    async fn browser_mode_exposes_unprefixed_gateway_tools_without_devtools_bridge() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-browser-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+        let mut servers = HashMap::new();
+        servers.insert(
+            "browser".to_string(),
+            ExternalMcpServer {
+                command: Some("npx".to_string()),
+                unprefixed_tools: true,
+                direct_tools: Some(DirectToolsConfig::Enabled(true)),
+                ..ExternalMcpServer::default()
+            },
+        );
+        let mut manager = ExternalMcpManager::new(ExternalMcpConfig {
+            mcp_servers: servers,
+            ..ExternalMcpConfig::default()
+        });
+        manager.set_cached_tools_for_test(
+            "browser",
+            vec![json!({
+                "name": "take-screenshot",
+                "description": "Take a browser screenshot",
+                "inputSchema": {"type":"object", "properties": {}}
+            })],
+        );
+        let external_mcp = Some(Arc::new(Mutex::new(manager)));
+
+        let response = handle_tools_list(
+            &req,
+            Mode::Browser,
+            ToolMode::MultiTools,
+            &None,
+            &external_mcp,
+        )
+        .await;
+        let names = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"take_screenshot"));
+    }
+
+    #[tokio::test]
+    async fn tools_list_exposes_direct_downstream_tools_when_enabled() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+        let external_mcp = external_mcp_with_cached_direct_tool_for_test();
+
+        let response =
+            handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None, &external_mcp).await;
+        let tools = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools");
+        let direct_tool = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("mock_echo"))
+            .expect("missing direct tool");
+        assert_eq!(
+            direct_tool
+                .get("inputSchema")
+                .and_then(|schema| schema.get("properties"))
+                .and_then(|properties| properties.get("message"))
+                .and_then(|property| property.get("type"))
+                .and_then(Value::as_str),
+            Some("string")
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_downstream_tool_call_routes_through_external_manager() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-direct-tool-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let server_path = workspace_root.join("mock_mcp_server.py");
+        std::fs::write(
+            &server_path,
+            r#"
+import json
+import sys
+
+for line in sys.stdin:
+    message = json.loads(line)
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "mock", "version": "1.0.0"},
+        }
+    elif method == "tools/list":
+        result = {"tools": [{
+            "name": "echo",
+            "description": "Echo a message",
+            "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}},
+        }]}
+    elif method == "tools/call":
+        args = message.get("params", {}).get("arguments", {})
+        result = {"content": [{"type": "text", "text": args.get("message", "")}], "isError": False}
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "unknown method"}}), flush=True)
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+"#,
+        )
+        .expect("write mock server");
+
+        let mut servers = HashMap::new();
+        servers.insert(
+            "mock".to_string(),
+            ExternalMcpServer {
+                command: Some("python3".to_string()),
+                args: vec!["-u".to_string(), server_path.to_string_lossy().into_owned()],
+                direct_tools: Some(DirectToolsConfig::Names(vec!["echo".to_string()])),
+                ..ExternalMcpServer::default()
+            },
+        );
+        let external_mcp = Some(Arc::new(Mutex::new(ExternalMcpManager::with_workspace(
+            ExternalMcpConfig {
+                mcp_servers: servers,
+                ..ExternalMcpConfig::default()
+            },
+            workspace_root.clone(),
+        ))));
+        let req = tool_call_request("mock_echo", json!({ "message": "hello direct" }));
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            0xff,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+            &external_mcp,
+        )
+        .await;
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+
+        assert_eq!(
+            structured.get("toolName").and_then(Value::as_str),
+            Some("mock_echo")
+        );
+        assert_eq!(
+            structured
+                .get("downstreamToolCallCount")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            structured
+                .get("result")
+                .and_then(|result| result.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|entry| entry.get("text"))
+                .and_then(Value::as_str),
+            Some("hello direct")
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_list_exposes_only_annotated_downstream_direct_tools() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+        let external_mcp = external_mcp_with_cached_read_only_direct_tool_for_test();
+
+        let response =
+            handle_tools_list(&req, Mode::Both, ToolMode::ReadOnly, &None, &external_mcp).await;
+        let names = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"mock_safe"));
+        assert!(!names.contains(&"mock_unsafe"));
+    }
+
+    #[tokio::test]
+    async fn read_only_direct_downstream_tool_call_routes_when_annotated_read_only() {
+        let workspace_root = std::env::temp_dir().join(format!(
+            "catdesk-mcp-read-only-direct-tool-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let server_path = workspace_root.join("mock_mcp_server.py");
+        std::fs::write(
+            &server_path,
+            r#"
+import json
+import sys
+
+for line in sys.stdin:
+    message = json.loads(line)
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "mock", "version": "1.0.0"},
+        }
+    elif method == "tools/list":
+        result = {"tools": [{
+            "name": "status",
+            "description": "Read status",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True, "openWorldHint": False, "destructiveHint": False},
+        }]}
+    elif method == "tools/call":
+        result = {"content": [{"type": "text", "text": "ok"}], "isError": False}
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "unknown method"}}), flush=True)
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}), flush=True)
+"#,
+        )
+        .expect("write mock server");
+
+        let mut servers = HashMap::new();
+        servers.insert(
+            "mock".to_string(),
+            ExternalMcpServer {
+                command: Some("python3".to_string()),
+                args: vec!["-u".to_string(), server_path.to_string_lossy().into_owned()],
+                direct_tools: Some(DirectToolsConfig::Names(vec!["status".to_string()])),
+                ..ExternalMcpServer::default()
+            },
+        );
+        let external_mcp = Some(Arc::new(Mutex::new(ExternalMcpManager::with_workspace(
+            ExternalMcpConfig {
+                mcp_servers: servers,
+                ..ExternalMcpConfig::default()
+            },
+            workspace_root.clone(),
+        ))));
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request("mock_status", json!({}));
+
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            0xff,
+            Mode::Both,
+            ToolMode::ReadOnly,
+            false,
+            &None,
+            &external_mcp,
+        )
+        .await;
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+        assert_eq!(
+            structured
+                .get("downstreamToolCallCount")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            structured
+                .get("result")
+                .and_then(|result| result.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|entry| entry.get("text"))
+                .and_then(Value::as_str),
+            Some("ok")
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn direct_downstream_tool_call_is_blocked_in_read_only_mode() {
+        let external_mcp = external_mcp_with_cached_direct_tool_for_test();
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-direct-read-only-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request("mock_echo", json!({ "message": "blocked" }));
+
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            0xff,
+            Mode::Both,
+            ToolMode::ReadOnly,
+            false,
+            &None,
+            &external_mcp,
+        )
+        .await;
+
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result_text(&response),
+            "Tool 'mock_echo' is disabled in read-only mode"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn mcp_proxy_status_returns_configured_servers() {
+        let external_mcp = external_mcp_for_test();
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-gateway-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request(EXTERNAL_MCP_TOOL_NAME, json!({}));
+
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            0xff,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &None,
+            &external_mcp,
+        )
+        .await;
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing structured content");
+
+        assert_eq!(
+            structured.get("action").and_then(Value::as_str),
+            Some("status")
+        );
+        assert_eq!(
+            structured.get("serverCount").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            structured
+                .get("servers")
+                .and_then(Value::as_array)
+                .and_then(|servers| servers.first())
+                .and_then(|server| server.get("name"))
+                .and_then(Value::as_str),
+            Some("mock")
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
     }
 
     #[tokio::test]
@@ -2973,7 +3901,8 @@ mod tests {
             params: json!({}),
         };
 
-        let response = handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None).await;
+        let response =
+            handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None, &None).await;
         let search_tool = response
             .result
             .as_ref()
@@ -3030,6 +3959,7 @@ mod tests {
             ToolMode::MultiTools,
             false,
             &None,
+            &None,
         )
         .await;
 
@@ -3072,6 +4002,7 @@ mod tests {
             ToolMode::MultiTools,
             false,
             &None,
+            &None,
         )
         .await;
 
@@ -3103,6 +4034,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &None,
             &None,
         )
         .await;
@@ -3153,6 +4085,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &None,
             &None,
         )
         .await;
@@ -3253,6 +4186,7 @@ mod tests {
             ToolMode::MultiTools,
             false,
             &None,
+            &None,
         )
         .await;
 
@@ -3324,6 +4258,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &None,
             &None,
         )
         .await;
@@ -3404,6 +4339,7 @@ mod tests {
             ToolMode::MultiTools,
             false,
             &None,
+            &None,
         )
         .await;
 
@@ -3452,6 +4388,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &None,
             &None,
         )
         .await;
@@ -3528,6 +4465,7 @@ mod tests {
             ToolMode::MultiTools,
             false,
             &None,
+            &None,
         )
         .await;
 
@@ -3600,6 +4538,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &None,
             &None,
         )
         .await;
@@ -3684,6 +4623,7 @@ mod tests {
             ToolMode::MultiTools,
             false,
             &None,
+            &None,
         )
         .await;
 
@@ -3746,6 +4686,7 @@ mod tests {
             ToolMode::MultiTools,
             false,
             &None,
+            &None,
         )
         .await;
 
@@ -3782,6 +4723,7 @@ mod tests {
             ToolMode::MultiTools,
             false,
             &None,
+            &None,
         )
         .await;
 
@@ -3816,6 +4758,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &None,
             &None,
         )
         .await;

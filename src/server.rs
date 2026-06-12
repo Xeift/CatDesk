@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::devtools::DevtoolsBridge;
+use crate::external_mcp::ExternalMcpManager;
 use crate::mcp::{self, JsonRpcRequest, WIDGET_PAYLOAD_META_KEY};
 use crate::state::{
     AgentsPathMode, FlowDirection, ServerUiEvent, SharedState, ShowDetailMode, TokenStatsLayout,
@@ -26,6 +27,7 @@ const STATELESS_FLOW_LABEL: &str = "stateless";
 struct ServerState {
     app: SharedState,
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
+    external_mcp: Option<Arc<Mutex<ExternalMcpManager>>>,
     ui_events: UnboundedSender<ServerUiEvent>,
 }
 
@@ -33,12 +35,14 @@ struct ServerState {
 pub fn router(
     app_state: SharedState,
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
+    external_mcp: Option<Arc<Mutex<ExternalMcpManager>>>,
     mcp_path: String,
     ui_events: UnboundedSender<ServerUiEvent>,
 ) -> Router {
     let state = ServerState {
         app: app_state,
         devtools,
+        external_mcp,
         ui_events,
     };
     Router::new()
@@ -224,6 +228,54 @@ fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) 
         widget_payload.insert("historyTurnTokenUsage".to_string(), history_usage);
         widget_payload.insert("historyToolCallCount".to_string(), history_tool_call_count);
     }
+}
+
+fn external_mcp_failure_log_summary(
+    req: &JsonRpcRequest,
+    response: &mcp::JsonRpcResponse,
+) -> Option<String> {
+    let result = response.result.as_ref()?;
+    if result.get("isError").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let tool_name = req
+        .params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if tool_name.is_empty() {
+        return None;
+    }
+    let structured = result.get("structuredContent").and_then(Value::as_object);
+    let is_external = tool_name == crate::external_mcp::EXTERNAL_MCP_TOOL_NAME
+        || structured
+            .and_then(|content| content.get("downstreamTool"))
+            .is_some();
+    if !is_external {
+        return None;
+    }
+    let action = req
+        .params
+        .get("arguments")
+        .and_then(Value::as_object)
+        .map(|args| {
+            [
+                "tool",
+                "connect",
+                "disconnect",
+                "describe",
+                "search",
+                "resource",
+                "resources",
+            ]
+            .into_iter()
+            .find(|key| args.contains_key(*key))
+            .unwrap_or("status")
+        })
+        .unwrap_or("call");
+    Some(format!(
+        "External MCP tool failure: tool={tool_name} action={action} args=<redacted>"
+    ))
 }
 
 // ── GET / — health ──────────────────────────────────────────
@@ -932,6 +984,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn external_mcp_failure_log_summary_redacts_arguments() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "mcp",
+                "arguments": {
+                    "tool": "danger",
+                    "args": "{\"secret\":\"value\"}"
+                }
+            }),
+        };
+        let response = mcp::JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            result: Some(json!({
+                "isError": true,
+                "structuredContent": {"toolName": "mcp", "message": "failed"}
+            })),
+            error: None,
+        };
+        let message = external_mcp_failure_log_summary(&req, &response).expect("log summary");
+        assert!(message.contains("tool=mcp"));
+        assert!(message.contains("action=tool"));
+        assert!(message.contains("args=<redacted>"));
+        assert!(!message.contains("secret"));
+    }
+
     #[tokio::test]
     async fn post_mcp_accumulates_usage_from_widget_payload_meta() {
         let workspace_root = unique_temp_path("catdesk-post-mcp-workspace");
@@ -952,6 +1034,7 @@ mod tests {
         let server_state = ServerState {
             app: app_state.clone(),
             devtools: None,
+            external_mcp: None,
             ui_events: ui_tx,
         };
 
@@ -1098,6 +1181,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
         tool_mode,
         set_catdesk_as_co_author,
         &s.devtools,
+        &s.external_mcp,
     )
     .await
     {
@@ -1119,6 +1203,25 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
                 mascot_seed,
                 partner_binagotchy_seed.as_deref(),
             );
+        }
+        let external_status = if let Some(manager) = &s.external_mcp {
+            let (failed_count, browser_gateway_enabled) = {
+                let app = s.app.lock().await;
+                (
+                    app.external_mcp_status.failed_server_count,
+                    app.external_mcp_status.browser_gateway_enabled,
+                )
+            };
+            let mut manager = manager.lock().await;
+            Some(manager.tui_status_snapshot(failed_count, browser_gateway_enabled))
+        } else {
+            None
+        };
+        if let Some(message) = external_mcp_failure_log_summary(&req, &resp) {
+            s.app.lock().await.log("WARN", message);
+        }
+        if let Some(status) = external_status {
+            s.app.lock().await.external_mcp_status = status;
         }
         response_json = Some(serde_json::to_value(resp).unwrap());
     }

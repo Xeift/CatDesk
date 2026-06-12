@@ -68,6 +68,124 @@ impl UsageTotals {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DirectToolsConfig {
+    Enabled(bool),
+    Names(Vec<String>),
+}
+
+fn default_external_mcp_tool_prefix() -> String {
+    "server".to_string()
+}
+
+fn default_external_mcp_idle_timeout_minutes() -> u64 {
+    10
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalMcpSettings {
+    #[serde(default = "default_external_mcp_tool_prefix")]
+    pub tool_prefix: String,
+    #[serde(default)]
+    pub direct_tools: bool,
+    #[serde(default = "default_external_mcp_idle_timeout_minutes")]
+    pub idle_timeout: u64,
+}
+
+impl Default for ExternalMcpSettings {
+    fn default() -> Self {
+        Self {
+            tool_prefix: default_external_mcp_tool_prefix(),
+            direct_tools: false,
+            idle_timeout: default_external_mcp_idle_timeout_minutes(),
+        }
+    }
+}
+
+fn default_external_mcp_lifecycle() -> String {
+    "lazy".to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalMcpServer {
+    #[serde(default)]
+    pub unprefixed_tools: bool,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default = "default_external_mcp_lifecycle")]
+    pub lifecycle: String,
+    #[serde(default)]
+    pub direct_tools: Option<DirectToolsConfig>,
+    #[serde(default)]
+    pub exclude_tools: Vec<String>,
+}
+
+impl Default for ExternalMcpServer {
+    fn default() -> Self {
+        Self {
+            unprefixed_tools: false,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: None,
+            headers: HashMap::new(),
+            lifecycle: default_external_mcp_lifecycle(),
+            direct_tools: None,
+            exclude_tools: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExternalMcpTuiStatus {
+    pub configured_server_count: usize,
+    pub connected_server_count: usize,
+    pub failed_server_count: usize,
+    pub tool_count: usize,
+    pub browser_gateway_enabled: bool,
+}
+
+impl ExternalMcpTuiStatus {
+    pub fn render_summary(&self) -> String {
+        let browser = if self.browser_gateway_enabled {
+            ", browser gateway"
+        } else {
+            ""
+        };
+        format!(
+            "{} configured, {} connected, {} failed, {} tools{}",
+            self.configured_server_count,
+            self.connected_server_count,
+            self.failed_server_count,
+            self.tool_count,
+            browser
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalMcpConfig {
+    #[serde(default)]
+    pub settings: ExternalMcpSettings,
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, ExternalMcpServer>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentsPathMode {
@@ -128,6 +246,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub show_detail_mode: ShowDetailMode,
     #[serde(default)]
+    pub mcp: ExternalMcpConfig,
+    #[serde(default)]
     pub partner_binagotchy_seed: Option<String>,
     #[serde(default)]
     pub set_catdesk_as_co_author: bool,
@@ -145,6 +265,7 @@ impl Default for AppConfig {
             agents_path_mode: AgentsPathMode::Default,
             token_stats_layout: TokenStatsLayout::Right,
             show_detail_mode: ShowDetailMode::Expanded,
+            mcp: ExternalMcpConfig::default(),
             partner_binagotchy_seed: None,
             set_catdesk_as_co_author: false,
             theme: theme::DEFAULT_THEME_ID.to_string(),
@@ -506,6 +627,7 @@ pub struct AppState {
     pub remote_connected: bool,
     pub last_remote_activity_ms: Option<u128>,
     pub devtools_running: bool,
+    pub external_mcp_status: ExternalMcpTuiStatus,
     pub port: u16,
     pub workspace_root: String,
     pub mascot_seed: u64,
@@ -888,6 +1010,7 @@ impl AppState {
             remote_connected: false,
             last_remote_activity_ms: None,
             devtools_running: false,
+            external_mcp_status: ExternalMcpTuiStatus::default(),
             port,
             mascot_seed,
             partner_binagotchy_seed,
@@ -1280,6 +1403,21 @@ toolCallCount = 7
     }
 
     #[test]
+    fn external_mcp_tui_status_summary_formats_counts() {
+        let status = ExternalMcpTuiStatus {
+            configured_server_count: 3,
+            connected_server_count: 2,
+            failed_server_count: 1,
+            tool_count: 12,
+            browser_gateway_enabled: true,
+        };
+        assert_eq!(
+            status.render_summary(),
+            "3 configured, 2 connected, 1 failed, 12 tools, browser gateway"
+        );
+    }
+
+    #[test]
     fn app_config_round_trips_agents_path_mode() {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -1343,6 +1481,48 @@ toolCallCount = 7
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
         assert!(matches!(saved.show_detail_mode, ShowDetailMode::Collapsed));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_config_round_trips_external_mcp_servers() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-external-mcp-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp config dir");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let mut servers = HashMap::new();
+        servers.insert(
+            "serena".to_string(),
+            ExternalMcpServer {
+                command: Some("serena-mcp-server".to_string()),
+                args: vec!["--project".to_string(), ".".to_string()],
+                lifecycle: "lazy".to_string(),
+                ..ExternalMcpServer::default()
+            },
+        );
+        let config = AppConfig {
+            mcp: ExternalMcpConfig {
+                mcp_servers: servers,
+                ..ExternalMcpConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        config.save_to_path(&config_path).expect("save config");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("load config");
+        let server = saved
+            .mcp
+            .mcp_servers
+            .get("serena")
+            .expect("missing serena server");
+        assert_eq!(server.command.as_deref(), Some("serena-mcp-server"));
+        assert_eq!(server.args, vec!["--project".to_string(), ".".to_string()]);
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
