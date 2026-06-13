@@ -2,11 +2,13 @@ mod binagotchy_gen;
 mod browser;
 mod command;
 mod devtools;
+mod external_mcp;
 mod macos_terminal;
 mod mascot;
 mod mcp;
 mod ngrok;
 mod server;
+mod skills;
 mod state;
 mod theme;
 mod workspace_tools;
@@ -2396,42 +2398,113 @@ async fn start_services(
         }
     }
 
-    // Start MCP HTTP server
-    let devtools_bridge = if mode.browser_enabled() {
+    // Browser tools are injected into the generic external MCP gateway below.
+    let devtools_bridge = None;
+    if mode.browser_enabled() {
+        let mut app = state.lock().await;
         if selected_browser.is_none() {
-            state.lock().await.log(
+            app.log(
                 "ERROR",
                 "Browser mode requires selecting a supported Chromium browser".into(),
             );
-            None
         } else {
-            state
-                .lock()
-                .await
-                .log("INFO", "Starting chrome-devtools-mcp...".into());
-            match DevtoolsBridge::start(selected_browser.as_ref()).await {
-                Ok(bridge) => {
-                    let mut app = state.lock().await;
-                    app.devtools_running = true;
-                    app.log("INFO", "chrome-devtools-mcp started".into());
-                    Some(bridge)
-                }
-                Err(e) => {
-                    let mut app = state.lock().await;
-                    app.log("ERROR", format!("chrome-devtools-mcp: {e}"));
-                    None
-                }
+            app.log(
+                "INFO",
+                "Browser tools will be served through the external MCP gateway".into(),
+            );
+        }
+    }
+
+    let external_mcp = {
+        let workspace_root = {
+            let app = state.lock().await;
+            app.workspace_root.clone()
+        };
+        let mut app_mcp_config = state::load_app_config()
+            .map(|config| config.mcp)
+            .unwrap_or_default();
+        let browser_gateway_enabled = mode.browser_enabled() && selected_browser.is_some();
+        if browser_gateway_enabled {
+            app_mcp_config.mcp_servers.insert(
+                crate::devtools::BROWSER_MCP_SERVER_NAME.to_string(),
+                crate::devtools::chrome_devtools_mcp_server(selected_browser.as_ref()),
+            );
+        }
+        let mut manager = crate::external_mcp::ExternalMcpManager::from_workspace_and_app_config(
+            &workspace_root,
+            app_mcp_config,
+        );
+        let configured_servers = manager.configured_server_names();
+        let initial_status = manager.tui_status_snapshot(0, browser_gateway_enabled);
+        {
+            let mut app = state.lock().await;
+            app.external_mcp_status = initial_status;
+            if configured_servers.is_empty() {
+                app.log(
+                    "INFO",
+                    "External MCP gateway ready with no configured downstream servers".into(),
+                );
+            } else {
+                app.log(
+                    "INFO",
+                    format!(
+                        "External MCP gateway configured servers: {}",
+                        configured_servers.join(", ")
+                    ),
+                );
             }
         }
-    } else {
-        None
+        Arc::new(Mutex::new(manager))
     };
+
+    let browser_gateway_enabled = mode.browser_enabled() && selected_browser.is_some();
+    let mut external_mcp_failed_count = 0usize;
+    let eager_server_names = { external_mcp.lock().await.eager_server_names() };
+    for server_name in eager_server_names {
+        let result = {
+            let mut manager = external_mcp.lock().await;
+            manager.connect(&server_name).await
+        };
+        let mut app = state.lock().await;
+        match result {
+            Ok(_) => {
+                if server_name == crate::devtools::BROWSER_MCP_SERVER_NAME {
+                    app.devtools_running = true;
+                }
+                app.log(
+                    "INFO",
+                    format!("External MCP server connected: {server_name}"),
+                );
+            }
+            Err(error) => {
+                external_mcp_failed_count = external_mcp_failed_count.saturating_add(1);
+                if server_name == crate::devtools::BROWSER_MCP_SERVER_NAME {
+                    app.devtools_running = false;
+                }
+                app.log(
+                    "WARN",
+                    format!("External MCP server {server_name} connection failed: {error}"),
+                );
+            }
+        }
+        let snapshot = {
+            let mut manager = external_mcp.lock().await;
+            manager.tui_status_snapshot(external_mcp_failed_count, browser_gateway_enabled)
+        };
+        app.external_mcp_status = snapshot;
+    }
 
     let mcp_path = {
         let app = state.lock().await;
         app.mcp_path()
     };
-    let router = server::router(state.clone(), devtools_bridge.clone(), mcp_path, ui_events);
+    let router = server::router(
+        state.clone(),
+        devtools_bridge.clone(),
+        Some(external_mcp.clone()),
+        mcp_path,
+        ui_events,
+    );
     let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
         Err(e) => {
@@ -2443,8 +2516,10 @@ async fn start_services(
         }
     };
 
+    let external_mcp_for_shutdown = external_mcp.clone();
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
+        let _ = external_mcp_for_shutdown.lock().await.shutdown_all().await;
     });
 
     {
@@ -2790,6 +2865,7 @@ fn draw_ui(
             "N/A"
         }
     };
+    let external_mcp_summary = app.external_mcp_status.render_summary();
     let mcp_url: String = app.public_mcp_url().unwrap_or_else(|| "--".into());
     let browser_summary = browser::format_browser_names(&app.detected_browsers);
     let remote_support_summary = browser::format_remote_debug_names(&app.detected_browsers);
@@ -2891,13 +2967,24 @@ fn draw_ui(
             ),
         ]),
         Line::from(vec![
-            status_label("DevTools:"),
+            status_label("Browser MCP:"),
             Span::styled(
                 devtools_status,
                 Style::default().fg(if app.devtools_running {
                     palette.success_fg
                 } else {
                     palette.muted_fg
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            status_label("MCP gateway:"),
+            Span::styled(
+                external_mcp_summary,
+                Style::default().fg(if app.external_mcp_status.failed_server_count == 0 {
+                    palette.success_fg
+                } else {
+                    palette.warning_fg
                 }),
             ),
         ]),

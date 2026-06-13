@@ -5,6 +5,44 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 use crate::browser::DetectedBrowser;
+use crate::state::{DirectToolsConfig, ExternalMcpServer};
+
+pub const BROWSER_MCP_SERVER_NAME: &str = "browser";
+
+pub fn chrome_devtools_mcp_args(selected_browser: Option<&DetectedBrowser>) -> Vec<String> {
+    let mut args = vec!["-y".to_string(), "chrome-devtools-mcp@latest".to_string()];
+    if let Some(browser) = selected_browser {
+        if browser.remote_debug_active {
+            if let Some(target) = browser.remote_debug_target.as_deref() {
+                if target == "pipe" {
+                    args.push("--executablePath".to_string());
+                    args.push(browser.path.clone());
+                } else {
+                    args.push("--browserUrl".to_string());
+                    args.push(format!("http://{target}"));
+                }
+            } else {
+                args.push("--executablePath".to_string());
+                args.push(browser.path.clone());
+            }
+        } else {
+            args.push("--executablePath".to_string());
+            args.push(browser.path.clone());
+        }
+    }
+    args
+}
+
+pub fn chrome_devtools_mcp_server(selected_browser: Option<&DetectedBrowser>) -> ExternalMcpServer {
+    ExternalMcpServer {
+        command: Some("npx".to_string()),
+        args: chrome_devtools_mcp_args(selected_browser),
+        lifecycle: "eager".to_string(),
+        direct_tools: Some(DirectToolsConfig::Enabled(true)),
+        unprefixed_tools: true,
+        ..ExternalMcpServer::default()
+    }
+}
 
 /// A running chrome-devtools-mcp child process with stdin/stdout JSON-RPC bridge.
 pub struct DevtoolsBridge {
@@ -16,27 +54,12 @@ pub struct DevtoolsBridge {
 
 impl DevtoolsBridge {
     /// Spawn `npx chrome-devtools-mcp@latest` and set up stdio bridge.
+    #[allow(dead_code)]
     pub async fn start(
         selected_browser: Option<&DetectedBrowser>,
     ) -> Result<Arc<Mutex<Self>>, String> {
         let mut command = Command::new("npx");
-        command.args(["-y", "chrome-devtools-mcp@latest"]);
-
-        if let Some(browser) = selected_browser {
-            if browser.remote_debug_active {
-                if let Some(target) = browser.remote_debug_target.as_deref() {
-                    if target == "pipe" {
-                        command.args(["--executablePath", &browser.path]);
-                    } else {
-                        command.args(["--browserUrl", &format!("http://{target}")]);
-                    }
-                } else {
-                    command.args(["--executablePath", &browser.path]);
-                }
-            } else {
-                command.args(["--executablePath", &browser.path]);
-            }
-        }
+        command.args(chrome_devtools_mcp_args(selected_browser));
 
         let mut child = command
             .stdin(std::process::Stdio::piped())
@@ -150,5 +173,58 @@ impl DevtoolsBridge {
     #[allow(dead_code)]
     pub async fn stop(&mut self) {
         let _ = self.child.kill().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn browser_with_target(target: Option<&str>) -> DetectedBrowser {
+        DetectedBrowser {
+            name: "Chromium".to_string(),
+            binary: "chromium".to_string(),
+            path: "/usr/bin/chromium".to_string(),
+            remote_debugging: true,
+            remote_debug_hint: "--remote-debugging-port=<port>".to_string(),
+            mcp_supported: true,
+            support_note: "Chromium (supported)".to_string(),
+            remote_debug_active: target.is_some(),
+            remote_debug_target: target.map(str::to_string),
+            remote_debug_pid: Some(42),
+        }
+    }
+
+    #[test]
+    fn chrome_devtools_mcp_server_uses_browser_url_for_remote_debug_target() {
+        let browser = browser_with_target(Some("127.0.0.1:9222"));
+        let server = chrome_devtools_mcp_server(Some(&browser));
+        assert_eq!(server.command.as_deref(), Some("npx"));
+        assert_eq!(server.lifecycle, "eager");
+        assert!(server.unprefixed_tools);
+        assert_eq!(
+            server.args,
+            vec![
+                "-y".to_string(),
+                "chrome-devtools-mcp@latest".to_string(),
+                "--browserUrl".to_string(),
+                "http://127.0.0.1:9222".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn chrome_devtools_mcp_server_uses_executable_path_without_remote_target() {
+        let browser = browser_with_target(None);
+        let server = chrome_devtools_mcp_server(Some(&browser));
+        assert_eq!(
+            server.args,
+            vec![
+                "-y".to_string(),
+                "chrome-devtools-mcp@latest".to_string(),
+                "--executablePath".to_string(),
+                "/usr/bin/chromium".to_string(),
+            ]
+        );
     }
 }
