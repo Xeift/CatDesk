@@ -143,6 +143,20 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   <em>3.9 GB Memory usage🥹</em>
 </p>
 
+- If you change MCP-related settings (including the tool mode or enabling/disabling the widget), you will need to start a new chat and refresh CatDesk in [settings](https://chatgpt.com/#settings/Plugins). The most reliable way is to remove CatDesk and reinstall it (steps 2–7).
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/images/refresh_catdesk.png" alt="Refresh CatDesk in ChatGPT settings" width="500"><br>
+      <em>Refresh CatDesk in ChatGPT settings</em>
+    </td>
+    <td align="center">
+      <img src="docs/images/remove_catdesk.png" alt="Remove CatDesk from ChatGPT settings" width="500"><br>
+      <em>Remove CatDesk from ChatGPT settings</em>
+    </td>
+  </tr>
+</table>
 
 # Stack
 
@@ -228,7 +242,7 @@ There doesn't seem to be any obvious pattern for when the connector triggers `Co
   </tr>
 </table>
 
-I know it’s annoying. I’m trying to find a solution now.
+Looks like it was a bug, and they fixed it 🥳.
 
 ### Can CatDesk be used in other apps?
 
