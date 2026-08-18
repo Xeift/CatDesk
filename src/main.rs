@@ -1091,6 +1091,35 @@ async fn run_app(
     run_tui(terminal, state, devtools_bridge, ui_event_rx).await
 }
 
+fn draw_tui_header(f: &mut Frame, area: Rect, palette: &theme::Palette, title: &str) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(palette.border_type)
+        .border_style(Style::default().fg(palette.border_fg));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let version = format!("v{} ", env!("CARGO_PKG_VERSION"));
+    let version_width = version.chars().count() as u16;
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(version_width)])
+        .split(inner);
+    let style = Style::default()
+        .fg(palette.header_fg)
+        .add_modifier(Modifier::BOLD);
+    f.render_widget(
+        Paragraph::new(format!("  {title}")).style(style),
+        columns[0],
+    );
+    f.render_widget(
+        Paragraph::new(version)
+            .style(style)
+            .alignment(Alignment::Right),
+        columns[1],
+    );
+}
+
 fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode) {
     let palette = theme.palette;
     let area = f.area();
@@ -1104,19 +1133,12 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
         ])
         .split(area);
 
-    let header = Paragraph::new("  CatDesk - Turns ChatGPT Web into a coding agent =w=")
-        .style(
-            Style::default()
-                .fg(palette.header_fg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(palette.border_type)
-                .border_style(Style::default().fg(palette.border_fg)),
-        );
-    f.render_widget(header, chunks[0]);
+    draw_tui_header(
+        f,
+        chunks[0],
+        &palette,
+        "CatDesk - Turns ChatGPT Web into a coding agent =w=",
+    );
 
     let lines = vec![
         Line::from(""),
@@ -1774,10 +1796,11 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 #[cfg(test)]
 mod tests {
     use super::{
-        LogView, key_is_clipboard_paste, mask_mcp_path_in_log, normalize_ngrok_authtoken_input,
+        LogView, draw_tui_header, key_is_clipboard_paste, mask_mcp_path_in_log,
+        normalize_ngrok_authtoken_input,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::layout::Rect;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
     #[test]
     fn normalizes_plain_ngrok_token() {
@@ -1841,6 +1864,26 @@ mod tests {
         assert_eq!(view.log_id_at(11, 23), Some(43));
         assert_eq!(view.log_id_at(11, 20), None);
         assert_eq!(view.log_id_at(10, 21), None);
+    }
+
+    #[test]
+    fn tui_header_places_package_version_at_top_right() {
+        let backend = TestBackend::new(60, 3);
+        let mut terminal = Terminal::new(backend).expect("create test terminal");
+        let palette = super::theme::all()[0].palette;
+
+        terminal
+            .draw(|frame| draw_tui_header(frame, frame.area(), &palette, "CatDesk"))
+            .expect("draw header");
+
+        let buffer = terminal.backend().buffer();
+        let row = (0..60)
+            .map(|column| buffer[(column, 1)].symbol())
+            .collect::<String>();
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+
+        assert!(row.contains("CatDesk"));
+        assert!(row.ends_with(&format!("{version} │")));
     }
 }
 
@@ -2089,19 +2132,7 @@ fn draw_settings(
         ])
         .split(area);
 
-    let header = Paragraph::new("  Settings")
-        .style(
-            Style::default()
-                .fg(palette.header_fg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(palette.border_type)
-                .border_style(Style::default().fg(palette.border_fg)),
-        );
-    f.render_widget(header, chunks[0]);
+    draw_tui_header(f, chunks[0], &palette, "Settings");
 
     let mut selected_line_idx = 0;
     let mut lines = vec![
@@ -2652,19 +2683,12 @@ fn draw_browser_select(
         ])
         .split(area);
 
-    let header = Paragraph::new("  Select Browser - Installed and Remote Debugging Status")
-        .style(
-            Style::default()
-                .fg(palette.header_fg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(palette.border_type)
-                .border_style(Style::default().fg(palette.border_fg)),
-        );
-    f.render_widget(header, chunks[0]);
+    draw_tui_header(
+        f,
+        chunks[0],
+        &palette,
+        "Select Browser - Installed and Remote Debugging Status",
+    );
 
     let active_summary = browser::format_active_remote_debug_names(browsers);
     let mut lines: Vec<Line> = vec![
@@ -3533,19 +3557,12 @@ fn draw_ui(
         .split(area);
 
     // ── Header ──
-    let header = Paragraph::new("  CatDesk - Turns ChatGPT Web into a coding agent =w=")
-        .style(
-            Style::default()
-                .fg(palette.header_fg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(palette.border_type)
-                .border_style(Style::default().fg(palette.border_fg)),
-        );
-    f.render_widget(header, chunks[0]);
+    draw_tui_header(
+        f,
+        chunks[0],
+        &palette,
+        "CatDesk - Turns ChatGPT Web into a coding agent =w=",
+    );
 
     // ── Status ──
     let mode_label = app.mode.label();
