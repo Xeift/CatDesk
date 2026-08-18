@@ -1220,7 +1220,7 @@ fn chatgpt_connector_refresh_content_area(frame_area: Rect) -> Rect {
     )
     .inner(Margin {
         horizontal: 2,
-        vertical: 1,
+        vertical: 0,
     })
 }
 
