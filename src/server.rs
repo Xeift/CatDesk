@@ -45,32 +45,43 @@ pub fn router(
         command_jobs,
         ui_events,
     };
+    let secret_prefix = mcp_path
+        .strip_suffix("/mcp")
+        .expect("MCP path must end with /mcp");
+    let health_path = secret_prefix.to_string();
+    let archive_save_path = format!("{secret_prefix}/binagotchy/archive/{{folder}}/save");
+    let partner_path = format!("{secret_prefix}/binagotchy/partner");
+    let agents_path_mode = format!("{secret_prefix}/agents/path-mode");
+    let agents_path_state = format!("{secret_prefix}/agents/path-state");
+    let token_stats_layout = format!("{secret_prefix}/layout/token-stats");
+    let show_detail_mode = format!("{secret_prefix}/layout/show-detail");
+
     Router::new()
-        .route("/", get(health))
+        .route(&health_path, get(health))
         .route(
-            "/binagotchy/archive/{folder}/save",
+            &archive_save_path,
             post(post_save_binagotchy_folder).options(options_binagotchy_archive_save),
         )
         .route(
-            "/binagotchy/partner",
+            &partner_path,
             post(post_binagotchy_partner)
                 .delete(delete_binagotchy_partner)
                 .options(options_binagotchy_partner),
         )
         .route(
-            "/agents/path-mode",
+            &agents_path_mode,
             post(post_agents_path_mode).options(options_agents_path_mode),
         )
         .route(
-            "/agents/path-state",
+            &agents_path_state,
             get(get_agents_path_state).options(options_agents_path_state),
         )
         .route(
-            "/layout/token-stats",
+            &token_stats_layout,
             post(post_token_stats_layout).options(options_token_stats_layout),
         )
         .route(
-            "/layout/show-detail",
+            &show_detail_mode,
             post(post_show_detail_mode).options(options_show_detail_mode),
         )
         .route(&mcp_path, post(post_mcp))
@@ -233,7 +244,7 @@ fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) 
     }
 }
 
-// ── GET / — health ──────────────────────────────────────────
+// ── GET /<slug> — health ───────────────────────────────────
 
 async fn health(State(s): State<ServerState>) -> Json<Value> {
     let app = s.app.lock().await;
@@ -250,6 +261,7 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
 fn attach_catdesk_instruction_actions(
     result: &mut Option<Value>,
     public_base_url: Option<&str>,
+    mcp_path: &str,
     mascot_seed: u64,
     partner_binagotchy_seed: Option<&str>,
 ) {
@@ -278,7 +290,12 @@ fn attach_catdesk_instruction_actions(
         return;
     };
 
-    let binagotchy_action_base_url = public_base_url.map(|base| format!("{base}/binagotchy"));
+    let public_action_base_url = public_base_url
+        .zip(mcp_path.strip_suffix("/mcp"))
+        .map(|(base, secret_prefix)| format!("{base}{secret_prefix}"));
+    let binagotchy_action_base_url = public_action_base_url
+        .as_deref()
+        .map(|base| format!("{base}/binagotchy"));
     widget_payload.insert(
         "binagotchyApiBaseUrl".to_string(),
         json!(binagotchy_action_base_url.clone().unwrap_or_default()),
@@ -286,7 +303,8 @@ fn attach_catdesk_instruction_actions(
     widget_payload.insert(
         "agentsPathModeUrl".to_string(),
         json!(
-            public_base_url
+            public_action_base_url
+                .as_deref()
                 .map(|base| format!("{base}/agents/path-mode"))
                 .unwrap_or_default()
         ),
@@ -294,7 +312,8 @@ fn attach_catdesk_instruction_actions(
     widget_payload.insert(
         "agentsPathStateUrl".to_string(),
         json!(
-            public_base_url
+            public_action_base_url
+                .as_deref()
                 .map(|base| format!("{base}/agents/path-state"))
                 .unwrap_or_default()
         ),
@@ -302,7 +321,8 @@ fn attach_catdesk_instruction_actions(
     widget_payload.insert(
         "tokenStatsLayoutUrl".to_string(),
         json!(
-            public_base_url
+            public_action_base_url
+                .as_deref()
                 .map(|base| format!("{base}/layout/token-stats"))
                 .unwrap_or_default()
         ),
@@ -310,7 +330,8 @@ fn attach_catdesk_instruction_actions(
     widget_payload.insert(
         "showDetailModeUrl".to_string(),
         json!(
-            public_base_url
+            public_action_base_url
+                .as_deref()
                 .map(|base| format!("{base}/layout/show-detail"))
                 .unwrap_or_default()
         ),
@@ -789,6 +810,79 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn public_routes_require_secret_prefix() {
+        let workspace_root = unique_temp_path("catdesk-route-guard");
+        let config_root = unique_temp_path("catdesk-route-guard-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let router = router(
+            app_state,
+            None,
+            CommandJobManager::new(),
+            "/secret-slug/mcp".to_string(),
+            ui_tx,
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test router");
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+
+        let unprefixed = [
+            ("GET", "/"),
+            ("GET", "/agents/path-state"),
+            ("POST", "/agents/path-mode"),
+            ("POST", "/layout/token-stats"),
+            ("POST", "/layout/show-detail"),
+            ("POST", "/binagotchy/partner"),
+        ];
+        for (method, path) in unprefixed {
+            let request = match method {
+                "GET" => client.get(format!("{base}{path}")),
+                "POST" => client.post(format!("{base}{path}")),
+                _ => unreachable!(),
+            };
+            let response = request.send().await.expect("send unprefixed request");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::NOT_FOUND,
+                "unprefixed route must be hidden: {method} {path}"
+            );
+        }
+
+        let response = client
+            .get(format!("{base}/secret-slug/agents/path-state"))
+            .send()
+            .await
+            .expect("send prefixed request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        server.abort();
+        let _ = server.await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
     #[test]
     fn extract_turn_token_usage_reads_widget_payload_meta() {
         let result = json!({
@@ -886,6 +980,7 @@ mod tests {
         attach_catdesk_instruction_actions(
             &mut result,
             Some("https://example.ngrok.app"),
+            "/secret-slug/mcp",
             0xff,
             Some("deadbeef"),
         );
@@ -912,7 +1007,7 @@ mod tests {
             widget_payload
                 .get("binagotchyApiBaseUrl")
                 .and_then(Value::as_str),
-            Some("https://example.ngrok.app/binagotchy")
+            Some("https://example.ngrok.app/secret-slug/binagotchy")
         );
         assert_eq!(
             widget_payload
@@ -924,35 +1019,37 @@ mod tests {
             widget_payload
                 .get("agentsPathModeUrl")
                 .and_then(Value::as_str),
-            Some("https://example.ngrok.app/agents/path-mode")
+            Some("https://example.ngrok.app/secret-slug/agents/path-mode")
         );
         assert_eq!(
             widget_payload
                 .get("agentsPathStateUrl")
                 .and_then(Value::as_str),
-            Some("https://example.ngrok.app/agents/path-state")
+            Some("https://example.ngrok.app/secret-slug/agents/path-state")
         );
         assert_eq!(
             widget_payload
                 .get("tokenStatsLayoutUrl")
                 .and_then(Value::as_str),
-            Some("https://example.ngrok.app/layout/token-stats")
+            Some("https://example.ngrok.app/secret-slug/layout/token-stats")
         );
         assert_eq!(
             widget_payload
                 .get("showDetailModeUrl")
                 .and_then(Value::as_str),
-            Some("https://example.ngrok.app/layout/show-detail")
+            Some("https://example.ngrok.app/secret-slug/layout/show-detail")
         );
         assert!(widget_payload.get("widgetMascot").is_some());
         assert_eq!(card.get("isPartner").and_then(Value::as_bool), Some(true));
         assert_eq!(
             card.get("saveFolderUrl").and_then(Value::as_str),
-            Some("https://example.ngrok.app/binagotchy/archive/20260403T010203000Z_deadbeef/save")
+            Some(
+                "https://example.ngrok.app/secret-slug/binagotchy/archive/20260403T010203000Z_deadbeef/save"
+            )
         );
         assert_eq!(
             card.get("setPartnerUrl").and_then(Value::as_str),
-            Some("https://example.ngrok.app/binagotchy/partner")
+            Some("https://example.ngrok.app/secret-slug/binagotchy/partner")
         );
     }
 
@@ -1216,6 +1313,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
         tool_mode,
         set_catdesk_as_co_author,
         ngrok_url,
+        mcp_path,
         partner_binagotchy_seed,
     ) = {
         let app = s.app.lock().await;
@@ -1226,6 +1324,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
             app.tool_mode,
             app.set_catdesk_as_co_author,
             app.ngrok_url.clone(),
+            app.mcp_path(),
             app.partner_binagotchy_seed.clone(),
         )
     };
@@ -1259,6 +1358,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
             attach_catdesk_instruction_actions(
                 &mut resp.result,
                 ngrok_url.as_deref(),
+                &mcp_path,
                 mascot_seed,
                 partner_binagotchy_seed.as_deref(),
             );

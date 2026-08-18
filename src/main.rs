@@ -3157,7 +3157,7 @@ async fn start_services(
         mcp_path,
         ui_events,
     );
-    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+    let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
         Ok(l) => l,
         Err(e) => {
             state
