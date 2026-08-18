@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
+use crate::command_jobs::CommandJobManager;
 use crate::devtools::DevtoolsBridge;
 use crate::mcp::{self, JsonRpcRequest, WIDGET_PAYLOAD_META_KEY};
 use crate::state::{
@@ -26,6 +27,7 @@ const STATELESS_FLOW_LABEL: &str = "stateless";
 struct ServerState {
     app: SharedState,
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
+    command_jobs: CommandJobManager,
     ui_events: UnboundedSender<ServerUiEvent>,
 }
 
@@ -33,12 +35,14 @@ struct ServerState {
 pub fn router(
     app_state: SharedState,
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
+    command_jobs: CommandJobManager,
     mcp_path: String,
     ui_events: UnboundedSender<ServerUiEvent>,
 ) -> Router {
     let state = ServerState {
         app: app_state,
         devtools,
+        command_jobs,
         ui_events,
     };
     Router::new()
@@ -953,6 +957,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_command_survives_separate_stateless_http_requests() {
+        let workspace_root = unique_temp_path("catdesk-post-mcp-command-job");
+        let config_root = unique_temp_path("catdesk-post-mcp-command-job-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let command_jobs = CommandJobManager::new();
+        let server_state = ServerState {
+            app: app_state,
+            devtools: None,
+            command_jobs: command_jobs.clone(),
+            ui_events: ui_tx,
+        };
+        let command = if cfg!(windows) {
+            "Start-Sleep -Milliseconds 250; Write-Output http-job-done"
+        } else {
+            "sleep 0.25; printf 'http-job-done\\n'"
+        };
+
+        let start_response = post_mcp(
+            State(server_state.clone()),
+            tool_call_body(
+                "start_command",
+                json!({ "command": command, "timeout": 5_000 }),
+            ),
+        )
+        .await;
+        assert_eq!(start_response.status(), StatusCode::OK);
+        let start_body = to_bytes(start_response.into_body(), usize::MAX)
+            .await
+            .expect("read start response");
+        let start_payload: Value =
+            serde_json::from_slice(&start_body).expect("parse start response");
+        let job_id = start_payload
+            .get("result")
+            .and_then(|result| result.get("structuredContent"))
+            .and_then(|structured| structured.get("jobId"))
+            .and_then(Value::as_str)
+            .expect("start response job id")
+            .to_string();
+
+        let mut cursor = 0u64;
+        let mut seen = String::new();
+        let mut terminal = None;
+        for _ in 0..20 {
+            let poll_response = post_mcp(
+                State(server_state.clone()),
+                tool_call_body(
+                    "poll_command",
+                    json!({ "job_id": job_id, "after": cursor, "wait_ms": 250 }),
+                ),
+            )
+            .await;
+            assert_eq!(poll_response.status(), StatusCode::OK);
+            let poll_body = to_bytes(poll_response.into_body(), usize::MAX)
+                .await
+                .expect("read poll response");
+            let poll_payload: Value =
+                serde_json::from_slice(&poll_body).expect("parse poll response");
+            let structured = poll_payload
+                .get("result")
+                .and_then(|result| result.get("structuredContent"))
+                .expect("poll structured content");
+            if let Some(events) = structured.get("events").and_then(Value::as_array) {
+                for event in events {
+                    if let Some(text) = event.get("text").and_then(Value::as_str) {
+                        seen.push_str(text);
+                    }
+                }
+            }
+            cursor = structured
+                .get("nextCursor")
+                .and_then(Value::as_u64)
+                .unwrap_or(cursor);
+            let state = structured.get("state").and_then(Value::as_str);
+            let has_more = structured
+                .get("hasMoreOutput")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if state == Some("succeeded") && !has_more {
+                terminal = Some(poll_payload);
+                break;
+            }
+        }
+
+        let terminal = terminal.expect("background job did not finish across HTTP requests");
+        let structured = terminal
+            .get("result")
+            .and_then(|result| result.get("structuredContent"))
+            .expect("terminal structured content");
+        assert_eq!(
+            structured.get("state").and_then(Value::as_str),
+            Some("succeeded")
+        );
+        assert_eq!(
+            structured.get("commandSuccess").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(seen.contains("http-job-done"));
+
+        command_jobs.cancel_all().await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
+    #[tokio::test]
     async fn post_mcp_accumulates_usage_from_widget_payload_meta() {
         let workspace_root = unique_temp_path("catdesk-post-mcp-workspace");
         let config_root = unique_temp_path("catdesk-post-mcp-config");
@@ -972,6 +1092,7 @@ mod tests {
         let server_state = ServerState {
             app: app_state.clone(),
             devtools: None,
+            command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
         };
 
@@ -1118,6 +1239,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
         mode,
         tool_mode,
         set_catdesk_as_co_author,
+        &s.command_jobs,
         &s.devtools,
     )
     .await

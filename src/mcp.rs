@@ -9,6 +9,10 @@ use tiktoken_rs::o200k_base_singleton;
 use tokio::sync::Mutex;
 
 use crate::command;
+use crate::command_jobs::{
+    CommandJobManager, CommandJobSnapshot, CommandJobState, DEFAULT_JOB_TIMEOUT_MS,
+    MAX_JOB_TIMEOUT_MS, MAX_POLL_WAIT_MS,
+};
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
 use crate::state::{
@@ -147,6 +151,7 @@ pub async fn handle_request(
     mode: Mode,
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
+    command_jobs: &CommandJobManager,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
@@ -182,6 +187,7 @@ pub async fn handle_request(
                 mode,
                 tool_mode,
                 set_catdesk_as_co_author,
+                command_jobs,
                 devtools,
             )
             .await,
@@ -397,6 +403,43 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
             properties.insert("path".to_string(), json!({ "type": "string" }));
             properties.insert("recursive".to_string(), json!({ "type": "boolean" }));
         }
+        "start_command" | "poll_command" | "cancel_command" => {
+            for field in ["jobId", "command", "cwd", "state"] {
+                properties.insert(field.to_string(), json!({ "type": "string" }));
+            }
+            for field in ["elapsedMs", "nextCursor", "timeoutMs"] {
+                properties.insert(
+                    field.to_string(),
+                    json!({ "type": "integer", "minimum": 0 }),
+                );
+            }
+            properties.insert(
+                "exitCode".to_string(),
+                json!({ "type": ["integer", "null"] }),
+            );
+            properties.insert(
+                "commandSuccess".to_string(),
+                json!({ "type": ["boolean", "null"] }),
+            );
+            properties.insert("hasMoreOutput".to_string(), json!({ "type": "boolean" }));
+            properties.insert("outputTruncated".to_string(), json!({ "type": "boolean" }));
+            properties.insert("deduplicated".to_string(), json!({ "type": "boolean" }));
+            properties.insert(
+                "events".to_string(),
+                json!({
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "seq": { "type": "integer", "minimum": 1 },
+                            "stream": { "type": "string", "enum": ["stdout", "stderr"] },
+                            "text": { "type": "string" }
+                        },
+                        "required": ["seq", "stream", "text"]
+                    }
+                }),
+            );
+        }
         "run_command" => {
             for field in [
                 "command",
@@ -427,11 +470,18 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                     json!({ "type": "integer", "minimum": 0 }),
                 );
             }
+            properties.insert(
+                "exitCode".to_string(),
+                json!({ "type": ["integer", "null"] }),
+            );
             for field in [
                 "destinationOperandWasDirectory",
                 "overwrite",
                 "skipped",
                 "listTruncated",
+                "timedOut",
+                "stdoutTruncated",
+                "stderrTruncated",
             ] {
                 properties.insert(field.to_string(), json!({ "type": "boolean" }));
             }
@@ -502,11 +552,71 @@ async fn handle_tools_list(
                     "properties": {
                         "command": { "type": "string", "description": "The shell command to execute" },
                         "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it" },
-                        "timeout": { "type": "number", "description": "Timeout in milliseconds. Clamped to 120000." }
+                        "timeout": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": command::MAX_TIMEOUT_MS,
+                            "description": format!(
+                                "Timeout in milliseconds for short commands. Maximum {}; use start_command for long-running work.",
+                                command::MAX_TIMEOUT_MS
+                            )
+                        }
                     },
                     "required": ["command"]
                 },
                 "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+            }));
+            tools.push(json!({
+                "name": "start_command",
+                "title": "Start command",
+                "description": "Start a long-running shell command inside the workspace and return a job ID immediately. Prefer this for builds, compilation, dependency installation, long test suites, and development servers instead of keeping run_command open.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The shell command to start" },
+                        "cwd": { "type": "string", "description": "Working directory relative to workspace root or absolute path within it" },
+                        "timeout": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_JOB_TIMEOUT_MS,
+                            "description": format!(
+                                "Maximum command runtime in milliseconds. Defaults to {} ms; maximum is {} ms.",
+                                DEFAULT_JOB_TIMEOUT_MS,
+                                MAX_JOB_TIMEOUT_MS
+                            )
+                        }
+                    },
+                    "required": ["command"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+            }));
+            tools.push(json!({
+                "name": "poll_command",
+                "title": "Poll command",
+                "description": "Read incremental output and current status from a command previously started with start_command. Pass the returned nextCursor as after on the next poll so output is not repeated. If hasMoreOutput is true, poll again even if the job is already terminal so the remaining buffered output can be drained.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "Opaque command job ID returned by start_command" },
+                        "after": { "type": "integer", "minimum": 0, "description": "Return only output events after this cursor (default 0)" },
+                        "wait_ms": { "type": "integer", "minimum": 0, "maximum": MAX_POLL_WAIT_MS, "description": "Wait briefly for new output or completion before returning (maximum 30000 ms)" }
+                    },
+                    "required": ["job_id"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": false }
+            }));
+            tools.push(json!({
+                "name": "cancel_command",
+                "title": "Cancel command",
+                "description": "Cancel a command started with start_command and terminate its complete child process tree.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "Opaque command job ID returned by start_command" }
+                    },
+                    "required": ["job_id"]
+                },
+                "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
         }
 
@@ -637,6 +747,7 @@ async fn handle_tools_call(
     mode: Mode,
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
+    command_jobs: &CommandJobManager,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> JsonRpcResponse {
     let params = &req.params;
@@ -652,9 +763,28 @@ async fn handle_tools_call(
     let mut response = {
         // Local computer tools
         if mode.computer_enabled() {
-            if tool_name == "run_command" {
+            if matches!(
+                tool_name.as_str(),
+                "run_command" | "start_command" | "poll_command" | "cancel_command"
+            ) {
                 if tool_mode.run_command_enabled() {
-                    handle_run_command(req, workspace_root, set_catdesk_as_co_author).await
+                    match tool_name.as_str() {
+                        "run_command" => {
+                            handle_run_command(req, workspace_root, set_catdesk_as_co_author).await
+                        }
+                        "start_command" => {
+                            handle_start_command(
+                                req,
+                                workspace_root,
+                                set_catdesk_as_co_author,
+                                command_jobs,
+                            )
+                            .await
+                        }
+                        "poll_command" => handle_poll_command(req, command_jobs).await,
+                        "cancel_command" => handle_cancel_command(req, command_jobs).await,
+                        _ => unreachable!(),
+                    }
                 } else if tool_mode.read_only() {
                     read_only_blocked_response(req, &tool_name)
                 } else {
@@ -794,6 +924,221 @@ async fn forward_to_devtools(
     }
 }
 
+fn format_command_output_events<'a, I>(events: I) -> String
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let mut output = String::new();
+    for (stream, text) in events {
+        if stream == "stderr" {
+            output.push_str("[stderr] ");
+        }
+        output.push_str(text);
+        if !text.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn command_job_output_text(snapshot: &CommandJobSnapshot) -> String {
+    if snapshot.events.is_empty() {
+        return match snapshot.state {
+            CommandJobState::Running => "(no new output; command is still running)".to_string(),
+            _ => "(no new output)".to_string(),
+        };
+    }
+    let mut output = format_command_output_events(
+        snapshot
+            .events
+            .iter()
+            .map(|event| (event.stream, event.text.as_str())),
+    );
+    if snapshot.has_more_output {
+        output.push_str("[more buffered output available; poll again with nextCursor]\n");
+    }
+    output
+}
+
+fn command_job_structured(tool_name: &str, snapshot: &CommandJobSnapshot) -> Value {
+    let command_success = match snapshot.state {
+        CommandJobState::Succeeded => Some(true),
+        CommandJobState::Failed | CommandJobState::Cancelled | CommandJobState::TimedOut => {
+            Some(false)
+        }
+        CommandJobState::Running => None,
+    };
+    json!({
+        "toolName": tool_name,
+        "jobId": snapshot.job_id,
+        "command": snapshot.command,
+        "cwd": snapshot.cwd,
+        "state": snapshot.state.as_str(),
+        "elapsedMs": snapshot.elapsed_ms,
+        "exitCode": snapshot.exit_code,
+        "events": snapshot.events,
+        "nextCursor": snapshot.next_cursor,
+        "hasMoreOutput": snapshot.has_more_output,
+        "outputTruncated": snapshot.output_truncated,
+        "timeoutMs": snapshot.timeout_ms,
+        "commandSuccess": command_success,
+        "success": true,
+    })
+}
+
+async fn handle_start_command(
+    req: &JsonRpcRequest,
+    workspace_root: &str,
+    set_catdesk_as_co_author: bool,
+    command_jobs: &CommandJobManager,
+) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let command_text = match required_string_argument(&arguments, "command") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    if command::contains_catdesk_co_author_marker(command_text) {
+        let message = if set_catdesk_as_co_author {
+            "Rewrite the commit message normally and remove \"Co-Authored-By: CatDesk\". CatDesk will add that trailer automatically."
+        } else {
+            "Do not include \"Co-Authored-By: CatDesk\" in the commit message. The user does not want that attribution."
+        };
+        return tool_error_response(req, message.into());
+    }
+    let cwd_input = match optional_string_argument(&arguments, "cwd") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let cwd = match command::resolve_workspace_path(workspace_root, cwd_input) {
+        Ok(path) => path,
+        Err(error) => {
+            return tool_error_response(
+                req,
+                format!("code: PATH_OUTSIDE_WORKSPACE\nmessage: {error}"),
+            );
+        }
+    };
+    let requested_timeout = match arguments.get("timeout") {
+        Some(value) => match value.as_u64() {
+            Some(value) => Some(value),
+            None => {
+                return tool_error_response(
+                    req,
+                    "Parameter timeout must be a positive integer".into(),
+                );
+            }
+        },
+        None => None,
+    };
+    let timeout_ms = match CommandJobManager::normalize_timeout(requested_timeout) {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let effective_command =
+        if set_catdesk_as_co_author && command::command_contains_git_commit(command_text) {
+            command::inject_catdesk_co_author_trailer(command_text)
+        } else {
+            command_text.to_string()
+        };
+    let request_key = req.id.as_ref().map(|id| {
+        let mut hasher = DefaultHasher::new();
+        effective_command.hash(&mut hasher);
+        cwd.hash(&mut hasher);
+        timeout_ms.hash(&mut hasher);
+        format!("start_command:{id}:{:016x}", hasher.finish())
+    });
+    match command_jobs
+        .start(effective_command, cwd, timeout_ms, request_key)
+        .await
+    {
+        Ok(started) => {
+            let mut structured = command_job_structured("start_command", &started.snapshot);
+            if let Some(object) = structured.as_object_mut() {
+                object.insert("deduplicated".to_string(), json!(started.deduplicated));
+            }
+            let text = if started.deduplicated {
+                format!("Command job already exists: {}", started.snapshot.job_id)
+            } else {
+                format!("Started command job: {}", started.snapshot.job_id)
+            };
+            tool_success_response_with_structured(req, text, structured)
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+async fn handle_poll_command(
+    req: &JsonRpcRequest,
+    command_jobs: &CommandJobManager,
+) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let job_id = match required_string_argument(&arguments, "job_id") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    let after = match arguments.get("after") {
+        Some(value) => match value.as_u64() {
+            Some(value) => value,
+            None => {
+                return tool_error_response(
+                    req,
+                    "Parameter after must be a non-negative integer".into(),
+                );
+            }
+        },
+        None => 0,
+    };
+    let wait_ms = match arguments.get("wait_ms") {
+        Some(value) => match value.as_u64() {
+            Some(value) if value <= MAX_POLL_WAIT_MS => value,
+            Some(_) => {
+                return tool_error_response(
+                    req,
+                    format!("wait_ms must be at most {MAX_POLL_WAIT_MS}"),
+                );
+            }
+            None => {
+                return tool_error_response(
+                    req,
+                    "Parameter wait_ms must be a non-negative integer".into(),
+                );
+            }
+        },
+        None => 0,
+    };
+    match command_jobs.poll(job_id, after, wait_ms).await {
+        Ok(snapshot) => {
+            let text = command_job_output_text(&snapshot);
+            let structured = command_job_structured("poll_command", &snapshot);
+            tool_success_response_with_structured(req, text, structured)
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
+async fn handle_cancel_command(
+    req: &JsonRpcRequest,
+    command_jobs: &CommandJobManager,
+) -> JsonRpcResponse {
+    let arguments = tool_arguments(req);
+    let job_id = match required_string_argument(&arguments, "job_id") {
+        Ok(value) => value,
+        Err(error) => return tool_error_response(req, error),
+    };
+    match command_jobs.cancel(job_id).await {
+        Ok(snapshot) => {
+            let text = format!(
+                "Command job {} is {}",
+                snapshot.job_id,
+                snapshot.state.as_str()
+            );
+            let structured = command_job_structured("cancel_command", &snapshot);
+            tool_success_response_with_structured(req, text, structured)
+        }
+        Err(error) => tool_error_response(req, error),
+    }
+}
+
 async fn handle_run_command(
     req: &JsonRpcRequest,
     workspace_root: &str,
@@ -810,6 +1155,20 @@ async fn handle_run_command(
 
     let cwd_input = arguments.get("cwd").and_then(|v| v.as_str());
     let timeout_ms = arguments.get("timeout").and_then(|v| v.as_u64());
+    if let Some(timeout_ms) = timeout_ms {
+        if timeout_ms == 0 {
+            return tool_error_response(req, "timeout must be at least 1 ms".into());
+        }
+        if timeout_ms > command::MAX_TIMEOUT_MS {
+            return tool_error_response(
+                req,
+                format!(
+                    "run_command supports at most {} ms. Use start_command for builds, compilation, dependency installation, long test suites, development servers, or other long-running commands.",
+                    command::MAX_TIMEOUT_MS
+                ),
+            );
+        }
+    }
 
     if command::contains_catdesk_co_author_marker(cmd) {
         let message = if set_catdesk_as_co_author {
@@ -888,7 +1247,11 @@ async fn handle_run_command(
         "stdout": result.stdout,
         "stderr": result.stderr,
         "success": result.success,
+        "exitCode": result.exit_code,
         "elapsedMs": result.elapsed_ms,
+        "timedOut": result.timed_out,
+        "stdoutTruncated": result.stdout_truncated,
+        "stderrTruncated": result.stderr_truncated,
     });
 
     if result.success {
@@ -1345,7 +1708,19 @@ Always specify the branch explicitly when using `git push`."#
 
     if mode.computer_enabled() && tool_mode.run_command_enabled() {
         lines.push(
-            "Use run_command only as a last resort when the available dedicated tools cannot complete the operation."
+            "Use run_command only as a last resort when the available dedicated tools cannot complete the operation, and keep it for short commands that should finish quickly."
+                .to_string(),
+        );
+        lines.push(
+            "For builds, compilation, dependency installation, long-running test suites, development servers, or commands that may take more than about one minute, use start_command instead of keeping run_command open."
+                .to_string(),
+        );
+        lines.push(
+            "Use poll_command to read incremental output from a background command. Pass the returned nextCursor as after on the next poll so output is not repeated, and use wait_ms when waiting briefly for new progress. If hasMoreOutput is true, keep polling even after the command reaches a terminal state so all buffered output can be drained."
+                .to_string(),
+        );
+        lines.push(
+            "Use cancel_command when a background command is no longer needed. Do not repeatedly start the same build or server while an existing command job is still running."
                 .to_string(),
         );
     }
@@ -1603,7 +1978,16 @@ fn attach_tool_call_count(result: &mut Value, tool_call_count: u64) {
 fn tool_descriptor_should_attach_widget(name: &str) -> bool {
     matches!(
         name,
-        "run_command" | "catdesk_instruction" | "search" | "read" | "write" | "edit" | "delete"
+        "run_command"
+            | "start_command"
+            | "poll_command"
+            | "cancel_command"
+            | "catdesk_instruction"
+            | "search"
+            | "read"
+            | "write"
+            | "edit"
+            | "delete"
     )
 }
 
@@ -1796,15 +2180,15 @@ fn widget_changed_files(widget_context: Option<&AutoWidgetContext>) -> (Vec<Valu
     (changed_files, has_changes)
 }
 
-fn base_widget_payload(
+fn base_widget_payload_with_show_detail_mode(
     panel_mode: &str,
     title: &str,
     state: &str,
     tool_name: Option<&str>,
+    show_detail_mode: ShowDetailMode,
 ) -> Map<String, Value> {
     let mut payload = Map::new();
     let token_stats_layout = current_token_stats_layout();
-    let show_detail_mode = current_show_detail_mode();
     payload.insert("schema".to_string(), json!("catdesk.review.v1"));
     payload.insert("panelMode".to_string(), json!(panel_mode));
     payload.insert("title".to_string(), json!(title));
@@ -1823,17 +2207,34 @@ fn base_widget_payload(
     payload
 }
 
+fn base_widget_payload(
+    panel_mode: &str,
+    title: &str,
+    state: &str,
+    tool_name: Option<&str>,
+) -> Map<String, Value> {
+    base_widget_payload_with_show_detail_mode(
+        panel_mode,
+        title,
+        state,
+        tool_name,
+        current_show_detail_mode(),
+    )
+}
+
 fn current_token_stats_layout() -> TokenStatsLayout {
     load_app_config()
         .map(|config| config.token_stats_layout)
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn current_show_detail_mode() -> ShowDetailMode {
-    #[cfg(test)]
-    {
-        return ShowDetailMode::Expanded;
-    }
+    ShowDetailMode::Expanded
+}
+
+#[cfg(not(test))]
+fn current_show_detail_mode() -> ShowDetailMode {
     crate::state::load_app_config()
         .map(|config| config.show_detail_mode)
         .unwrap_or_default()
@@ -2011,6 +2412,73 @@ fn build_run_command_widget_payload(
     Some(Value::Object(payload))
 }
 
+fn build_command_job_widget_payload(result: &Value, tool_name: &str) -> Option<Value> {
+    let structured = result_structured_content(result)?;
+    let command = structured.get("command")?.clone();
+    let state = structured.get("state")?.as_str()?;
+    let (title, widget_state) = match state {
+        "running" => (
+            if tool_name == "start_command" {
+                "Command Started"
+            } else {
+                "Command Running"
+            },
+            "waiting",
+        ),
+        "succeeded" => ("Command Complete", "done"),
+        "cancelled" => ("Command Cancelled", "done"),
+        "failed" => ("Command Failed", "failed"),
+        "timed_out" => ("Command Timed Out", "failed"),
+        _ => ("Command Job", "waiting"),
+    };
+    let mut output = structured
+        .get("events")
+        .and_then(Value::as_array)
+        .map(|events| {
+            format_command_output_events(events.iter().map(|event| {
+                (
+                    event
+                        .get("stream")
+                        .and_then(Value::as_str)
+                        .unwrap_or("stdout"),
+                    event
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+            }))
+        })
+        .unwrap_or_default();
+    if output.is_empty() {
+        output = format!(
+            "job {} · {}",
+            structured
+                .get("jobId")
+                .and_then(Value::as_str)
+                .unwrap_or("?"),
+            state
+        );
+    }
+    if structured.get("outputTruncated").and_then(Value::as_bool) == Some(true) {
+        output.push_str("\n[older command output was truncated]\n");
+    }
+    if structured.get("hasMoreOutput").and_then(Value::as_bool) == Some(true) {
+        output.push_str("\n[more buffered output available; poll again]\n");
+    }
+    let mut payload = base_widget_payload("tool_call", title, widget_state, Some(tool_name));
+    payload.insert("command".to_string(), command);
+    payload.insert(
+        "output".to_string(),
+        json!(truncate_for_widget(&output, MAX_COMMAND_OUTPUT_CHARS)),
+    );
+    if let Some(elapsed) = structured.get("elapsedMs") {
+        payload.insert("elapsedMs".to_string(), elapsed.clone());
+    }
+    payload.insert("changedFiles".to_string(), json!([]));
+    payload.insert("hasChanges".to_string(), json!(false));
+    Some(Value::Object(payload))
+}
+
 fn build_generic_widget_payload(
     req: &JsonRpcRequest,
     result: &Value,
@@ -2143,16 +2611,30 @@ fn build_auto_widget_payload(
                 "Failed to build run_command widget payload from structuredContent.".into(),
             ),
         },
+        "start_command" | "poll_command" | "cancel_command" => {
+            match build_command_job_widget_payload(result, &tool_name) {
+                Some(payload) => payload,
+                None if is_error => {
+                    build_generic_widget_payload(req, result, widget_context, is_error)
+                }
+                None => build_widget_payload_error(
+                    req,
+                    widget_context,
+                    format!("Failed to build {tool_name} widget payload from structuredContent."),
+                ),
+            }
+        }
         _ => build_generic_widget_payload(req, result, widget_context, is_error),
     }
 }
 
-fn enrich_tool_result(
+fn enrich_tool_result_with_show_detail_mode(
     req: &JsonRpcRequest,
     mut result: Value,
     widget_context: Option<&AutoWidgetContext>,
+    show_detail_mode: ShowDetailMode,
 ) -> Value {
-    if current_show_detail_mode() == ShowDetailMode::Disable {
+    if show_detail_mode == ShowDetailMode::Disable {
         return result;
     }
 
@@ -2174,7 +2656,14 @@ fn enrich_tool_result(
     let widget_payload = if has_widget_payload {
         None
     } else {
-        Some(build_auto_widget_payload(req, &result, widget_context))
+        let mut payload = build_auto_widget_payload(req, &result, widget_context);
+        if let Some(payload_obj) = payload.as_object_mut() {
+            payload_obj.insert(
+                "showDetailMode".to_string(),
+                json!(show_detail_mode.as_str()),
+            );
+        }
+        Some(payload)
     };
     if let Some(result_obj) = result.as_object_mut() {
         let meta_value = result_obj
@@ -2187,6 +2676,19 @@ fn enrich_tool_result(
     }
     remove_text_content_from_tool_result(req, &mut result);
     result
+}
+
+fn enrich_tool_result(
+    req: &JsonRpcRequest,
+    result: Value,
+    widget_context: Option<&AutoWidgetContext>,
+) -> Value {
+    enrich_tool_result_with_show_detail_mode(
+        req,
+        result,
+        widget_context,
+        current_show_detail_mode(),
+    )
 }
 
 fn collect_watch_targets(req: &JsonRpcRequest, workspace_root: &str) -> Vec<WatchTarget> {
@@ -2697,7 +3199,16 @@ fn diff_changed_files(before: &WatchedSnapshot, after: &WatchedSnapshot) -> Vec<
 }
 
 fn is_local_destructive_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "run_command" | "write" | "edit" | "delete")
+    matches!(
+        tool_name,
+        "run_command"
+            | "start_command"
+            | "poll_command"
+            | "cancel_command"
+            | "write"
+            | "edit"
+            | "delete"
+    )
 }
 
 fn tool_is_read_only(tool: &Value) -> bool {
@@ -3073,6 +3584,477 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_job_tools_start_poll_and_report_terminal_success() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-command-job-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let command_jobs = CommandJobManager::new();
+        let command = if cfg!(windows) {
+            "Start-Sleep -Milliseconds 150; Write-Output job-done"
+        } else {
+            "sleep 0.15; printf 'job-done\\n'"
+        };
+
+        let start_req = tool_call_request(
+            "start_command",
+            json!({ "command": command, "timeout": 5_000 }),
+        );
+        let start_response = handle_tools_call(
+            &start_req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &command_jobs,
+            &None,
+        )
+        .await;
+        assert_no_text_content(&start_response);
+        let start_structured = start_response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing start structured content");
+        let job_id = start_structured
+            .get("jobId")
+            .and_then(Value::as_str)
+            .expect("missing job id")
+            .to_string();
+        assert_eq!(
+            start_structured.get("state").and_then(Value::as_str),
+            Some("running")
+        );
+        assert_eq!(
+            start_response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("_meta"))
+                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                .and_then(|payload| payload.get("toolName"))
+                .and_then(Value::as_str),
+            Some("start_command")
+        );
+
+        let mut terminal = None;
+        let mut cursor = 0;
+        let mut seen_output = String::new();
+        for _ in 0..20 {
+            let poll_req = tool_call_request(
+                "poll_command",
+                json!({ "job_id": job_id, "after": cursor, "wait_ms": 250 }),
+            );
+            let response = handle_tools_call(
+                &poll_req,
+                &workspace_root_str,
+                1,
+                Mode::Both,
+                ToolMode::MultiTools,
+                false,
+                &command_jobs,
+                &None,
+            )
+            .await;
+            let structured = response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("structuredContent"))
+                .expect("missing poll structured content");
+            if let Some(events) = structured.get("events").and_then(Value::as_array) {
+                for event in events {
+                    if let Some(text) = event.get("text").and_then(Value::as_str) {
+                        seen_output.push_str(text);
+                    }
+                }
+            }
+            cursor = structured
+                .get("nextCursor")
+                .and_then(Value::as_u64)
+                .unwrap_or(cursor);
+            if structured.get("state").and_then(Value::as_str) == Some("succeeded")
+                && structured.get("hasMoreOutput").and_then(Value::as_bool) != Some(true)
+            {
+                terminal = Some(response);
+                break;
+            }
+        }
+        let terminal = terminal.expect("job did not reach succeeded state");
+        assert!(
+            terminal
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .is_none(),
+            "successful command polling must not be an MCP tool error"
+        );
+        let structured = terminal
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing terminal structured content");
+        assert_eq!(
+            structured.get("commandSuccess").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(seen_output.contains("job-done"));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn reused_json_rpc_id_with_different_start_arguments_creates_distinct_jobs() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-id-reuse-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let command_jobs = CommandJobManager::new();
+        let first_command = if cfg!(windows) {
+            "Start-Sleep -Milliseconds 500"
+        } else {
+            "sleep 0.5"
+        };
+        let second_command = if cfg!(windows) {
+            "Start-Sleep -Milliseconds 600"
+        } else {
+            "sleep 0.6"
+        };
+
+        // tool_call_request deliberately reuses the same JSON-RPC id. Stateless
+        // clients are allowed to do this across independent calls.
+        let first_req = tool_call_request("start_command", json!({ "command": first_command }));
+        let second_req = tool_call_request("start_command", json!({ "command": second_command }));
+        let first = handle_tools_call(
+            &first_req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &command_jobs,
+            &None,
+        )
+        .await;
+        let second = handle_tools_call(
+            &second_req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &command_jobs,
+            &None,
+        )
+        .await;
+
+        let job_id = |response: &JsonRpcResponse| {
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("jobId"))
+                .and_then(Value::as_str)
+                .expect("missing job id")
+                .to_string()
+        };
+        assert_ne!(job_id(&first), job_id(&second));
+        command_jobs.cancel_all().await;
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn command_job_widget_state_matrix_preserves_command_ui_contract() {
+        let cases = [
+            ("start_command", "running", "Command Started", "waiting"),
+            ("poll_command", "running", "Command Running", "waiting"),
+            ("poll_command", "succeeded", "Command Complete", "done"),
+            ("poll_command", "failed", "Command Failed", "failed"),
+            ("cancel_command", "cancelled", "Command Cancelled", "done"),
+            ("poll_command", "timed_out", "Command Timed Out", "failed"),
+        ];
+
+        for (tool_name, state, expected_title, expected_widget_state) in cases {
+            let result = json!({
+                "structuredContent": {
+                    "toolName": tool_name,
+                    "jobId": "job-123",
+                    "command": "cargo build",
+                    "cwd": "E:/CatDesk",
+                    "state": state,
+                    "elapsedMs": 123,
+                    "exitCode": null,
+                    "events": [],
+                    "nextCursor": 0,
+                    "outputTruncated": false,
+                    "timeoutMs": 5000,
+                    "commandSuccess": null,
+                    "success": true
+                }
+            });
+            let payload = build_command_job_widget_payload(&result, tool_name)
+                .unwrap_or_else(|| panic!("missing widget payload for {tool_name}/{state}"));
+            assert_eq!(
+                payload.get("toolName").and_then(Value::as_str),
+                Some(tool_name)
+            );
+            assert_eq!(
+                payload.get("title").and_then(Value::as_str),
+                Some(expected_title)
+            );
+            assert_eq!(
+                payload.get("state").and_then(Value::as_str),
+                Some(expected_widget_state)
+            );
+            assert_eq!(
+                payload.get("command").and_then(Value::as_str),
+                Some("cargo build")
+            );
+            assert_eq!(payload.get("elapsedMs").and_then(Value::as_u64), Some(123));
+            assert_eq!(
+                payload.get("hasChanges").and_then(Value::as_bool),
+                Some(false)
+            );
+        }
+    }
+
+    #[test]
+    fn command_job_widget_formats_stderr_and_truncation_without_new_styles() {
+        let result = json!({
+            "structuredContent": {
+                "toolName": "poll_command",
+                "jobId": "job-123",
+                "command": "cargo build",
+                "cwd": "E:/CatDesk",
+                "state": "failed",
+                "elapsedMs": 456,
+                "exitCode": 1,
+                "events": [
+                    {"seq": 4, "stream": "stdout", "text": "compiling\n"},
+                    {"seq": 5, "stream": "stderr", "text": "error: nope\n"}
+                ],
+                "nextCursor": 5,
+                "hasMoreOutput": true,
+                "outputTruncated": true,
+                "timeoutMs": 5000,
+                "commandSuccess": false,
+                "success": true
+            }
+        });
+        let payload = build_command_job_widget_payload(&result, "poll_command")
+            .expect("command job widget payload");
+        let output = payload
+            .get("output")
+            .and_then(Value::as_str)
+            .expect("missing widget output");
+        assert!(output.contains("compiling"));
+        assert!(output.contains("[stderr] error: nope"));
+        assert!(output.contains("[older command output was truncated]"));
+        assert!(output.contains("[more buffered output available; poll again]"));
+        assert_eq!(
+            payload.get("title").and_then(Value::as_str),
+            Some("Command Failed")
+        );
+        assert_eq!(payload.get("state").and_then(Value::as_str), Some("failed"));
+    }
+
+    #[test]
+    fn original_run_command_widget_shape_is_unchanged_by_new_runtime_metadata() {
+        let req = tool_call_request("run_command", json!({ "command": "cargo check" }));
+        let raw = json!({
+            "content": [],
+            "structuredContent": {
+                "toolName": "run_command",
+                "command": "cargo check",
+                "cwd": "E:/CatDesk",
+                "stdout": "Finished dev profile\n",
+                "stderr": "",
+                "success": true,
+                "exitCode": 0,
+                "elapsedMs": 321,
+                "timedOut": false,
+                "stdoutTruncated": false,
+                "stderrTruncated": false
+            }
+        });
+        let result = enrich_tool_result(&req, raw, None);
+        let payload = result
+            .get("_meta")
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing run_command widget payload");
+        assert_eq!(
+            payload.get("toolName").and_then(Value::as_str),
+            Some("run_command")
+        );
+        assert_eq!(
+            payload.get("title").and_then(Value::as_str),
+            Some("Command Output")
+        );
+        assert_eq!(payload.get("state").and_then(Value::as_str), Some("done"));
+        assert_eq!(
+            payload.get("command").and_then(Value::as_str),
+            Some("cargo check")
+        );
+        assert_eq!(payload.get("elapsedMs").and_then(Value::as_u64), Some(321));
+        assert!(payload.get("exitCode").is_none());
+        assert!(payload.get("timedOut").is_none());
+        assert!(payload.get("stdoutTruncated").is_none());
+        assert!(payload.get("stderrTruncated").is_none());
+    }
+
+    #[tokio::test]
+    async fn read_only_mode_blocks_all_command_job_calls_even_if_invoked_directly() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-command-read-only-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let command_jobs = CommandJobManager::new();
+
+        for (tool_name, arguments) in [
+            ("start_command", json!({"command": "echo blocked"})),
+            ("poll_command", json!({"job_id": "blocked"})),
+            ("cancel_command", json!({"job_id": "blocked"})),
+        ] {
+            let req = tool_call_request(tool_name, arguments);
+            let response = handle_tools_call(
+                &req,
+                &workspace_root_str,
+                1,
+                Mode::Both,
+                ToolMode::ReadOnly,
+                false,
+                &command_jobs,
+                &None,
+            )
+            .await;
+            assert_eq!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("isError"))
+                    .and_then(Value::as_bool),
+                Some(true),
+                "{tool_name} should be blocked in read-only mode"
+            );
+            assert!(result_text(&response).contains("disabled in read-only mode"));
+        }
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn failed_background_command_is_pollable_without_mcp_error() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-command-fail-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let command_jobs = CommandJobManager::new();
+        let start_req = tool_call_request("start_command", json!({ "command": "exit 7" }));
+        let start_response = handle_tools_call(
+            &start_req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &command_jobs,
+            &None,
+        )
+        .await;
+        let job_id = start_response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .and_then(|structured| structured.get("jobId"))
+            .and_then(Value::as_str)
+            .expect("missing job id")
+            .to_string();
+
+        let mut terminal = None;
+        for _ in 0..20 {
+            let poll_req =
+                tool_call_request("poll_command", json!({ "job_id": job_id, "wait_ms": 250 }));
+            let response = handle_tools_call(
+                &poll_req,
+                &workspace_root_str,
+                1,
+                Mode::Both,
+                ToolMode::MultiTools,
+                false,
+                &command_jobs,
+                &None,
+            )
+            .await;
+            let state = response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("state"))
+                .and_then(Value::as_str);
+            let has_more = response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("hasMoreOutput"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if state == Some("failed") && !has_more {
+                terminal = Some(response);
+                break;
+            }
+        }
+        let terminal = terminal.expect("job did not reach failed state");
+        let result = terminal.result.as_ref().expect("missing result");
+        assert!(result.get("isError").is_none());
+        let structured = result
+            .get("structuredContent")
+            .expect("missing structured content");
+        assert_eq!(
+            structured.get("state").and_then(Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
+            structured.get("commandSuccess").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(structured.get("exitCode").and_then(Value::as_i64), Some(7));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_long_timeout_and_points_to_start_command() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-run-timeout-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request(
+            "run_command",
+            json!({ "command": "echo short", "timeout": command::MAX_TIMEOUT_MS + 1 }),
+        );
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(result_text(&response).contains("Use start_command"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
     async fn multi_tools_list_exposes_run_command_mv_without_move_path_tool() {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -3096,6 +4078,9 @@ mod tests {
             names,
             vec![
                 "run_command",
+                "start_command",
+                "poll_command",
+                "cancel_command",
                 "catdesk_instruction",
                 "read",
                 "search",
@@ -3302,6 +4287,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3344,6 +4330,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3376,6 +4363,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3426,6 +4414,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3525,6 +4514,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3597,6 +4587,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3676,6 +4667,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3725,6 +4717,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3800,6 +4793,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3873,6 +4867,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -3956,6 +4951,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -4018,6 +5014,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -4054,6 +5051,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -4089,6 +5087,7 @@ mod tests {
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            &CommandJobManager::new(),
             &None,
         )
         .await;
@@ -4460,5 +5459,61 @@ hello world"
             Some("deadbeef")
         );
         assert!(widget_payload.get("widgetMascot").is_some());
+    }
+
+    #[test]
+    fn show_detail_modes_are_injectable_for_widget_enrichment() {
+        let req = tool_call_request("unknown_tool", json!({}));
+        let raw = json!({
+            "content": [{ "type": "text", "text": "hello" }],
+            "structuredContent": { "toolName": "unknown_tool" }
+        });
+
+        let disabled = enrich_tool_result_with_show_detail_mode(
+            &req,
+            raw.clone(),
+            None,
+            ShowDetailMode::Disable,
+        );
+        assert_eq!(
+            disabled, raw,
+            "Disable must leave the tool result untouched"
+        );
+
+        for (mode, expected) in [
+            (ShowDetailMode::Expanded, "expanded"),
+            (ShowDetailMode::Collapsed, "collapsed"),
+        ] {
+            let result = enrich_tool_result_with_show_detail_mode(&req, raw.clone(), None, mode);
+            let payload = result
+                .get("_meta")
+                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                .expect("missing injected widget payload");
+            assert_eq!(
+                payload.get("showDetailMode").and_then(Value::as_str),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn base_widget_payload_serializes_all_show_detail_modes() {
+        for (mode, expected) in [
+            (ShowDetailMode::Expanded, "expanded"),
+            (ShowDetailMode::Collapsed, "collapsed"),
+            (ShowDetailMode::Disable, "disable"),
+        ] {
+            let payload = base_widget_payload_with_show_detail_mode(
+                "tool_call",
+                "Test",
+                "done",
+                Some("read"),
+                mode,
+            );
+            assert_eq!(
+                payload.get("showDetailMode").and_then(Value::as_str),
+                Some(expected)
+            );
+        }
     }
 }

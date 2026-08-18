@@ -160,19 +160,24 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 # Tools
 
-CatDesk has two local tool modes: `multi-tools` exposes 7 tools, and `read-only` exposes 3 tools.
+CatDesk has two local tool modes: `multi-tools` exposes 10 tools, and `read-only` exposes 3 tools.
 
 CatDesk's local tools in `multi-tools` mode are:
 
-| Tool                  | Type  | What it does                                                  |
-| --------------------- | ----- | ------------------------------------------------------------- |
-| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and render Binagotchy      |
-| `read`                | Read  | Reads a text file from the workspace                          |
-| `search`              | Read  | Searches workspace text with `rg`, `grep`, or built-in search |
-| `write`               | Write | Creates or overwrites a file                                  |
-| `edit`                | Write | Replaces exact text inside a file                             |
-| `delete`              | Write | Deletes a file or directory                                   |
-| `run_command`         | Shell | Runs a shell command inside the workspace.                    |
+| Tool                  | Type  | What it does                                                               |
+| --------------------- | ----- | -------------------------------------------------------------------------- |
+| `catdesk_instruction` | Guide | Returns CatDesk usage instructions and render Binagotchy                   |
+| `read`                | Read  | Reads a text file from the workspace                                       |
+| `search`              | Read  | Searches workspace text with `rg`, `grep`, or built-in search              |
+| `write`               | Write | Creates or overwrites a file                                               |
+| `edit`                | Write | Replaces exact text inside a file                                          |
+| `delete`              | Write | Deletes a file or directory                                                |
+| `run_command`         | Shell | Runs a short shell command and waits for completion                        |
+| `start_command`       | Job   | Starts a long-running shell command and immediately returns a job ID       |
+| `poll_command`        | Job   | Reads incremental output and status from a background command              |
+| `cancel_command`      | Job   | Stops a background command and its child process tree                      |
+
+Long-running commands are deliberately decoupled from the lifetime of an MCP HTTP request. Builds, compilation, dependency installation, long test suites, and development servers should use `start_command`, then `poll_command` with the returned cursor. Poll responses are bounded; if `hasMoreOutput` is true, keep polling with `nextCursor` even after the command reaches a terminal state to drain the remaining buffered output. `run_command` remains the simpler path for short commands and has a 120-second maximum timeout.
 
 If browser mode is enabled, CatDesk can also expose extra browser/devtools tools. Those are provided by the browser bridge, so the exact list depends on your environment.
 

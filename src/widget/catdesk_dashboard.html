@@ -3130,13 +3130,21 @@
             return validPayload(next);
           }
 
-          if (toolName === "run_command") {
+          if (
+            toolName === "run_command" ||
+            toolName === "start_command" ||
+            toolName === "poll_command" ||
+            toolName === "cancel_command"
+          ) {
             var command = readString(data.command);
             var commandElapsedMs = readNonNegativeInteger(data.elapsedMs);
             var commandOutput = readString(data.output);
+            if (command === null && next.call && next.detail) {
+              return validPayload(next);
+            }
             if (command === null) {
               return invalidPayload(
-                "run_command widget payload is missing required fields.",
+                "command widget payload is missing required fields.",
               );
             }
             next.command = command;
@@ -6549,7 +6557,11 @@
             view.panelMode === "tool_call" &&
             view.toolName === "catdesk_instruction";
           var isRunCommand =
-            view.panelMode === "tool_call" && view.toolName === "run_command";
+            view.panelMode === "tool_call" &&
+            (view.toolName === "run_command" ||
+              view.toolName === "start_command" ||
+              view.toolName === "poll_command" ||
+              view.toolName === "cancel_command");
           var isSearchText =
             view.panelMode === "tool_call" && view.toolName === "search";
           var isReadFile =
@@ -6807,6 +6819,9 @@
             !nextView.hasChanges &&
             nextView.toolName !== "catdesk_instruction" &&
             nextView.toolName !== "run_command" &&
+            nextView.toolName !== "start_command" &&
+            nextView.toolName !== "poll_command" &&
+            nextView.toolName !== "cancel_command" &&
             nextView.toolName !== "search" &&
             nextView.toolName !== "read" &&
             nextView.toolName !== "list_files" &&

@@ -1,13 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
-use tokio::process::Command;
-use tokio::time::{Duration, timeout};
 use tree_sitter::{Node, Parser};
 use tree_sitter_bash::LANGUAGE as BASH_LANGUAGE;
 
 const MAX_BUFFER_BYTES: usize = 1024 * 1024;
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const MAX_TIMEOUT_MS: u64 = 120_000;
+pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+pub const MAX_TIMEOUT_MS: u64 = 120_000;
 pub const CATDESK_CO_AUTHOR_TRAILER: &str = "Co-Authored-By: CatDesk";
 
 #[derive(Debug)]
@@ -15,7 +12,11 @@ pub struct CommandResult {
     pub stdout: String,
     pub stderr: String,
     pub success: bool,
+    pub exit_code: Option<i32>,
     pub elapsed_ms: u64,
+    pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,64 +171,25 @@ pub fn detect_move_path_intercept(command: &str) -> Option<InterceptedMovePathRe
     detect_move_path_intercept_from_words(&words)
 }
 
-/// Execute a shell command via the platform shell.
+/// Execute a short shell command via CatDesk's shared process runner.
+///
+/// The process runner owns the complete process tree. If this future is timed
+/// out or dropped because the MCP request disappears, the child tree is
+/// terminated instead of being left behind as an orphaned build.
 pub async fn run_command(command: &str, cwd: &Path, timeout_ms: u64) -> CommandResult {
-    let start = Instant::now();
-    let mut shell = shell_command(command);
-    let fut = shell.current_dir(cwd).output();
+    let result =
+        crate::process_runner::run_shell_command(command, cwd, timeout_ms, MAX_BUFFER_BYTES).await;
 
-    match timeout(Duration::from_millis(timeout_ms), fut).await {
-        Ok(Ok(output)) => {
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            let stdout = String::from_utf8_lossy(
-                &output.stdout[..output.stdout.len().min(MAX_BUFFER_BYTES)],
-            )
-            .to_string();
-            let stderr = String::from_utf8_lossy(
-                &output.stderr[..output.stderr.len().min(MAX_BUFFER_BYTES)],
-            )
-            .to_string();
-            CommandResult {
-                stdout,
-                stderr,
-                success: output.status.success(),
-                elapsed_ms,
-            }
-        }
-        Ok(Err(e)) => CommandResult {
-            stdout: String::new(),
-            stderr: format!("Failed to execute: {e}"),
-            success: false,
-            elapsed_ms: start.elapsed().as_millis() as u64,
-        },
-        Err(_) => CommandResult {
-            stdout: String::new(),
-            stderr: format!("Command timed out after {timeout_ms} ms"),
-            success: false,
-            elapsed_ms: start.elapsed().as_millis() as u64,
-        },
+    CommandResult {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        success: result.success,
+        exit_code: result.exit_code,
+        elapsed_ms: result.elapsed_ms,
+        timed_out: result.timed_out,
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
     }
-}
-
-#[cfg(windows)]
-fn shell_command(command: &str) -> Command {
-    let mut shell = Command::new("powershell.exe");
-    shell
-        .arg("-NoLogo")
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(command);
-    shell
-}
-
-#[cfg(not(windows))]
-fn shell_command(command: &str) -> Command {
-    let mut shell = Command::new("/bin/bash");
-    shell.arg("-c").arg(command);
-    shell
 }
 
 /// Format stdout+stderr into a single string.

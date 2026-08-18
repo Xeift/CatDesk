@@ -392,6 +392,7 @@ dependencies = [
  "globset",
  "ignore",
  "image",
+ "libc",
  "ngrok",
  "rand 0.8.5",
  "rand_mt",
@@ -408,6 +409,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

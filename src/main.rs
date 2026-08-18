@@ -1,11 +1,13 @@
 mod binagotchy_gen;
 mod browser;
 mod command;
+mod command_jobs;
 mod devtools;
 mod macos_terminal;
 mod mascot;
 mod mcp;
 mod ngrok;
+mod process_runner;
 mod server;
 mod state;
 mod theme;
@@ -914,6 +916,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout().execute(LeaveAlternateScreen)?;
 
     // Cleanup after the TUI is gone so quit never appears frozen on screen.
+    let command_jobs = { state.lock().await.command_jobs.clone() };
+    command_jobs.cancel_all().await;
     {
         let mut app = state.lock().await;
         if let Some(handle) = app.server_handle.take() {
@@ -3000,11 +3004,17 @@ async fn start_services(
         None
     };
 
-    let mcp_path = {
+    let (mcp_path, command_jobs) = {
         let app = state.lock().await;
-        app.mcp_path()
+        (app.mcp_path(), app.command_jobs.clone())
     };
-    let router = server::router(state.clone(), devtools_bridge.clone(), mcp_path, ui_events);
+    let router = server::router(
+        state.clone(),
+        devtools_bridge.clone(),
+        command_jobs,
+        mcp_path,
+        ui_events,
+    );
     let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
         Err(e) => {
