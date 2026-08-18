@@ -48,6 +48,8 @@ const APP_CONFIG_DIR_NAME: &str = ".catdesk";
 const APP_CONFIG_FILE_NAME: &str = "config.toml";
 pub const GPT_5_6_AND_EARLIER_USAGE_BUCKET: &str = "through-gpt-5.6";
 pub const CURRENT_USAGE_BUCKET: &str = GPT_5_6_AND_EARLIER_USAGE_BUCKET;
+/// Bump only when an existing ChatGPT connector must be removed and added again.
+pub const CURRENT_CHATGPT_CONNECTOR_REVISION: u32 = 1;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +188,10 @@ pub struct AppConfig {
     pub mcp_slug: Option<String>,
     pub ngrok_domain: Option<String>,
     #[serde(default)]
+    pub last_started_version: Option<String>,
+    #[serde(default)]
+    pub chatgpt_connector_revision: Option<u32>,
+    #[serde(default)]
     pub agents_path_mode: AgentsPathMode,
     #[serde(default)]
     pub token_stats_layout: TokenStatsLayout,
@@ -209,6 +215,8 @@ impl Default for AppConfig {
             ngrok_authtoken: None,
             mcp_slug: None,
             ngrok_domain: None,
+            last_started_version: None,
+            chatgpt_connector_revision: None,
             agents_path_mode: AgentsPathMode::Default,
             token_stats_layout: TokenStatsLayout::Right,
             show_detail_mode: ShowDetailMode::Expanded,
@@ -506,6 +514,8 @@ pub struct AppState {
     pub mcp_slug: String,
     pub ngrok_domain: Option<String>,
     pub is_returning_user: bool,
+    pub chatgpt_connector_refresh_required: bool,
+    pub chatgpt_connector_revision: Option<u32>,
     pub server_running: bool,
     pub ngrok_running: bool,
     pub ngrok_url: Option<String>,
@@ -915,6 +925,14 @@ impl AppState {
             mascot::archive_startup_mascot(mascot_seed)?;
         }
         let is_returning_user = config.mcp_slug.is_some() && config.ngrok_domain.is_some();
+        let stored_connector_revision = config.chatgpt_connector_revision;
+        let chatgpt_connector_refresh_required = is_returning_user
+            && stored_connector_revision.unwrap_or(0) < CURRENT_CHATGPT_CONNECTOR_REVISION;
+        let chatgpt_connector_revision = if is_returning_user {
+            stored_connector_revision
+        } else {
+            Some(CURRENT_CHATGPT_CONNECTOR_REVISION)
+        };
         let mcp_slug = match config.mcp_slug {
             Some(slug) if !slug.is_empty() => slug,
             _ => generate_mcp_slug(),
@@ -928,6 +946,8 @@ impl AppState {
             mcp_slug,
             ngrok_domain: config.ngrok_domain.clone(),
             is_returning_user,
+            chatgpt_connector_refresh_required,
+            chatgpt_connector_revision,
             server_running: false,
             ngrok_running: false,
             ngrok_url: None,
@@ -991,6 +1011,8 @@ impl AppState {
         let mut config = AppConfig::load_from_path(&self.config_path)?;
         config.mcp_slug = Some(self.mcp_slug.clone());
         config.ngrok_domain = self.ngrok_domain.clone();
+        config.last_started_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        config.chatgpt_connector_revision = self.chatgpt_connector_revision;
         config.partner_binagotchy_seed = self.partner_binagotchy_seed.clone();
         config.set_catdesk_as_co_author = self.set_catdesk_as_co_author;
         config.theme = self.theme.clone();
@@ -1004,6 +1026,11 @@ impl AppState {
 
     pub fn regenerate_mcp_slug(&mut self) {
         self.mcp_slug = generate_mcp_slug();
+    }
+
+    pub fn acknowledge_chatgpt_connector_refresh(&mut self) {
+        self.chatgpt_connector_revision = Some(CURRENT_CHATGPT_CONNECTOR_REVISION);
+        self.chatgpt_connector_refresh_required = false;
     }
 
     pub fn persist_state(&self) -> std::io::Result<()> {
@@ -1268,6 +1295,108 @@ mod tests {
 
         assert!(test_home.starts_with(std::env::temp_dir()));
         assert_ne!(Some(test_home), process_home);
+    }
+
+    #[test]
+    fn new_user_starts_on_current_connector_revision_without_refresh() {
+        let (app, workspace, config_path) = test_app("catdesk-new-user-connector-revision");
+
+        assert!(!app.is_returning_user);
+        assert!(!app.chatgpt_connector_refresh_required);
+        assert_eq!(
+            app.chatgpt_connector_revision,
+            Some(CURRENT_CHATGPT_CONNECTOR_REVISION)
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn returning_user_without_connector_revision_requires_refresh_until_acknowledged() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!(
+            "catdesk-returning-user-connector-revision-{unique}"
+        ));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+        AppConfig {
+            mcp_slug: Some("existing-secret-slug".into()),
+            ngrok_domain: Some("catdesk-example.ngrok.app".into()),
+            ..AppConfig::default()
+        }
+        .save_to_path(&config_path)
+        .expect("save old config");
+
+        let mut app = AppState::from_config_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("load returning user");
+        assert!(app.is_returning_user);
+        assert!(app.chatgpt_connector_refresh_required);
+        assert_eq!(app.chatgpt_connector_revision, None);
+
+        app.persist_state().expect("persist pending refresh state");
+        let pending = AppConfig::load_from_path(&config_path).expect("load pending config");
+        assert_eq!(pending.chatgpt_connector_revision, None);
+        assert_eq!(
+            pending.last_started_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+
+        app.acknowledge_chatgpt_connector_refresh();
+        app.persist_state().expect("persist acknowledged refresh");
+        assert!(!app.chatgpt_connector_refresh_required);
+        let acknowledged =
+            AppConfig::load_from_path(&config_path).expect("load acknowledged config");
+        assert_eq!(
+            acknowledged.chatgpt_connector_revision,
+            Some(CURRENT_CHATGPT_CONNECTOR_REVISION)
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn returning_user_on_current_connector_revision_does_not_require_refresh() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace =
+            std::env::temp_dir().join(format!("catdesk-current-connector-revision-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+        AppConfig {
+            mcp_slug: Some("existing-secret-slug".into()),
+            ngrok_domain: Some("catdesk-example.ngrok.app".into()),
+            chatgpt_connector_revision: Some(CURRENT_CHATGPT_CONNECTOR_REVISION),
+            ..AppConfig::default()
+        }
+        .save_to_path(&config_path)
+        .expect("save current config");
+
+        let app = AppState::from_config_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("load returning user");
+        assert!(app.is_returning_user);
+        assert!(!app.chatgpt_connector_refresh_required);
+        assert_eq!(
+            app.chatgpt_connector_revision,
+            Some(CURRENT_CHATGPT_CONNECTOR_REVISION)
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

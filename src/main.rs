@@ -58,6 +58,8 @@ const GPT_5_6_AND_EARLIER_INPUT_USD_PER_1M: f64 = 5.0;
 const GPT_5_6_AND_EARLIER_OUTPUT_USD_PER_1M: f64 = 30.0;
 const PRICE_DISPLAY_DECIMALS: usize = 6;
 const NGROK_SETUP_URL: &str = "https://dashboard.ngrok.com/get-started/setup";
+const CHATGPT_CONNECTOR_SETTINGS_URL: &str = "https://chatgpt.com/apps#settings/Connectors";
+const CHATGPT_PLUGIN_SETTINGS_URL: &str = "https://chatgpt.com/#settings/Plugins";
 
 // ── Selection ───────────────────────────────────────────────
 
@@ -983,6 +985,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let state: SharedState = Arc::new(Mutex::new(AppState::new(port, workspace_root)?));
+    {
+        let mut app = state.lock().await;
+        app.persist_state_with_log();
+    }
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -1084,11 +1090,290 @@ async fn run_app(
     }
 
     // Start services
-    let (ui_event_tx, ui_event_rx) = unbounded_channel();
+    let (ui_event_tx, mut ui_event_rx) = unbounded_channel();
     let devtools_bridge = start_services(state.clone(), ui_event_tx).await;
+
+    run_chatgpt_connector_refresh_notice(terminal, state.clone(), &mut ui_event_rx).await?;
 
     // Phase 2: main TUI loop
     run_tui(terminal, state, devtools_bridge, ui_event_rx).await
+}
+
+async fn run_chatgpt_connector_refresh_notice(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    state: SharedState,
+    ui_events: &mut UnboundedReceiver<ServerUiEvent>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !state.lock().await.chatgpt_connector_refresh_required {
+        return Ok(());
+    }
+
+    let mut toast: Option<(&str, (u16, u16), Instant)> = None;
+    let mut mcp_url_revealed_until: Option<Instant> = None;
+    loop {
+        {
+            let mut app = state.lock().await;
+            drain_server_ui_events(&mut app, ui_events);
+            app.prune_closed_flows();
+        }
+        if let Some((_, _, created_at)) = &toast {
+            if created_at.elapsed().as_secs() >= 2 {
+                toast = None;
+            }
+        }
+
+        let (current_theme, current_tool_mode, mcp_url) = {
+            let app = state.lock().await;
+            (app.current_theme(), app.tool_mode, app.public_mcp_url())
+        };
+        let reveal_remaining = mcp_url_revealed_until
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()));
+        if mcp_url_revealed_until.is_some() && reveal_remaining.is_none() {
+            mcp_url_revealed_until = None;
+        }
+        let toast_ref = toast
+            .as_ref()
+            .filter(|(_, _, created_at)| created_at.elapsed().as_secs() < 2)
+            .map(|(message, position, _)| (*message, *position));
+        let mut mcp_url_click_area = Rect::default();
+        terminal.draw(|f| {
+            draw_mode_select(f, current_theme, current_tool_mode);
+            mcp_url_click_area = chatgpt_connector_refresh_mcp_url_area(f.area());
+            draw_chatgpt_connector_refresh_notice(
+                f,
+                current_theme,
+                mcp_url.as_deref(),
+                reveal_remaining,
+            );
+            if let Some((message, position)) = toast_ref {
+                render_toast(f, current_theme.palette, message, position);
+            }
+        })?;
+
+        if !event::poll(UI_POLL_INTERVAL)? {
+            continue;
+        }
+        match event::read()? {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Enter => {
+                        if mcp_url.is_none() {
+                            toast = Some(("MCP URL not ready", (2, 2), Instant::now()));
+                            continue;
+                        }
+                        let mut app = state.lock().await;
+                        app.acknowledge_chatgpt_connector_refresh();
+                        app.log("INFO", "ChatGPT connector refresh acknowledged".into());
+                        app.persist_state_with_log();
+                        return Ok(());
+                    }
+                    KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('s') => {
+                        let message = if clipboard_copy(CHATGPT_PLUGIN_SETTINGS_URL) {
+                            "Settings link copied"
+                        } else {
+                            "Copy failed"
+                        };
+                        toast = Some((message, (2, 2), Instant::now()));
+                    }
+                    _ => {}
+                }
+            }
+            Event::Mouse(mouse)
+                if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                    && rect_contains(mcp_url_click_area, mouse.column, mouse.row) =>
+            {
+                let now = Instant::now();
+                let revealed = mcp_url_revealed_until
+                    .and_then(|deadline| deadline.checked_duration_since(now))
+                    .is_some();
+                let message = match mcp_url.as_deref() {
+                    Some(url) if revealed && clipboard_copy(url) => "Copied!",
+                    Some(_) if revealed => "Copy failed",
+                    Some(_) => {
+                        mcp_url_revealed_until = Some(now + MCP_URL_REVEAL_DURATION);
+                        "URL revealed for 10s"
+                    }
+                    None => "MCP URL not ready",
+                };
+                toast = Some((message, (mouse.column, mouse.row), now));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn chatgpt_connector_refresh_modal_area(frame_area: Rect) -> Rect {
+    centered_rect(94, 24, frame_area)
+}
+
+fn chatgpt_connector_refresh_content_area(frame_area: Rect) -> Rect {
+    let area = chatgpt_connector_refresh_modal_area(frame_area);
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
+    .inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    })
+}
+
+fn chatgpt_connector_refresh_mcp_url_area(frame_area: Rect) -> Rect {
+    let content = chatgpt_connector_refresh_content_area(frame_area);
+    Rect::new(content.x, content.y.saturating_add(12), content.width, 1)
+}
+
+fn draw_chatgpt_connector_refresh_notice(
+    f: &mut Frame,
+    theme: &theme::ThemeDef,
+    mcp_url: Option<&str>,
+    mcp_url_reveal_remaining: Option<Duration>,
+) {
+    let palette = theme.palette;
+    let modal_bg = Color::Rgb(34, 38, 47);
+    let modal_fg = Color::Rgb(232, 236, 242);
+    let area = chatgpt_connector_refresh_modal_area(f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" CatDesk Connector Refresh Required ")
+        .borders(Borders::ALL)
+        .border_type(palette.border_type)
+        .border_style(Style::default().fg(palette.warning_fg))
+        .style(Style::default().bg(modal_bg));
+    let inner = chatgpt_connector_refresh_content_area(f.area());
+    f.render_widget(block, area);
+
+    let strong = Style::default()
+        .fg(palette.title_fg)
+        .bg(modal_bg)
+        .add_modifier(Modifier::BOLD);
+    let normal = Style::default().fg(modal_fg).bg(modal_bg);
+    let muted = Style::default().fg(palette.muted_fg).bg(modal_bg);
+    let key = Style::default()
+        .fg(palette.key_fg)
+        .bg(modal_bg)
+        .add_modifier(Modifier::BOLD);
+    let copyable = Style::default()
+        .fg(palette.primary_fg)
+        .bg(modal_bg)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mcp_url_is_revealed = mcp_url.is_some() && mcp_url_reveal_remaining.is_some();
+    let displayed_mcp_url = match (mcp_url, mcp_url_is_revealed) {
+        (Some(url), true) => url.to_string(),
+        (Some(_), false) => MCP_URL_MASK.to_string(),
+        (None, _) => "--".to_string(),
+    };
+    let mcp_url_security_status = mcp_url_reveal_remaining
+        .map(|remaining| format!("[ EXPOSED {:>2}s ]", mcp_url_reveal_seconds(remaining)));
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "The connector changed in this update. Please folow below step:",
+            normal,
+        )),
+        Line::from(""),
+        Line::from(Span::styled("Remove CatDesk", strong)),
+        Line::from(Span::styled(
+            format!("1. Open {CHATGPT_PLUGIN_SETTINGS_URL}"),
+            normal,
+        )),
+        Line::from(Span::styled("2. Find CatDesk and click it", normal)),
+        Line::from(Span::styled(
+            "3. Click the ... button on upper right corner",
+            normal,
+        )),
+        Line::from(Span::styled("4. Click delete", normal)),
+        Line::from(""),
+        Line::from(Span::styled("Add CatDesk Again", strong)),
+        Line::from(Span::styled("5. Open connector settings:", normal)),
+        Line::from(Span::styled(
+            format!("   {CHATGPT_CONNECTOR_SETTINGS_URL}"),
+            muted,
+        )),
+        Line::from(Span::styled("6. Click Create app", normal)),
+        Line::from(vec![
+            Span::styled("7. Fill in the form: ", normal),
+            Span::styled("(URL reveals before copy)", muted),
+        ]),
+        Line::from(Span::styled("   Name           │ CatDesk", muted)),
+        {
+            let mut spans = vec![
+                Span::styled("   MCP Server URL │ ", muted),
+                Span::styled(
+                    displayed_mcp_url.clone(),
+                    if mcp_url_is_revealed { copyable } else { muted },
+                ),
+            ];
+            if mcp_url.is_some() {
+                spans.push(Span::raw("  "));
+                let security_text = mcp_url_security_status
+                    .as_deref()
+                    .unwrap_or("Click to reveal");
+                let security_color = match mcp_url_reveal_remaining {
+                    Some(remaining) if mcp_url_reveal_seconds(remaining) <= 3 => palette.danger_fg,
+                    Some(_) => palette.warning_fg,
+                    None => palette.muted_fg,
+                };
+                spans.push(Span::styled(
+                    security_text.to_string(),
+                    Style::default()
+                        .fg(security_color)
+                        .bg(modal_bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                if let Some(remaining) = mcp_url_reveal_remaining {
+                    let (remaining_bar, elapsed_bar) = mcp_url_reveal_bar_segments(remaining);
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(
+                        remaining_bar,
+                        Style::default()
+                            .fg(security_color)
+                            .bg(modal_bg)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(
+                        elapsed_bar,
+                        Style::default().fg(palette.muted_fg).bg(modal_bg),
+                    ));
+                }
+            }
+            Line::from(spans)
+        },
+        Line::from(Span::styled("   Authentication │ None", muted)),
+        Line::from(Span::styled(
+            "8. Click I understand and want to continue",
+            normal,
+        )),
+        Line::from(Span::styled("9. Click Create", normal)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[s]", key),
+            Span::styled(" Copy settings link   ", muted),
+            Span::styled(
+                "[Enter]",
+                Style::default().fg(palette.success_fg).bg(modal_bg),
+            ),
+            Span::styled(" I've re-added CatDesk   ", muted),
+            Span::styled(
+                "[Esc]",
+                Style::default().fg(palette.warning_fg).bg(modal_bg),
+            ),
+            Span::styled(" Remind me next launch", muted),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(modal_bg))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn draw_tui_header(f: &mut Frame, area: Rect, palette: &theme::Palette, title: &str) {
@@ -1796,8 +2081,8 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 #[cfg(test)]
 mod tests {
     use super::{
-        LogView, draw_tui_header, key_is_clipboard_paste, mask_mcp_path_in_log,
-        normalize_ngrok_authtoken_input,
+        LogView, draw_chatgpt_connector_refresh_notice, draw_tui_header, key_is_clipboard_paste,
+        mask_mcp_path_in_log, normalize_ngrok_authtoken_input,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
@@ -1864,6 +2149,85 @@ mod tests {
         assert_eq!(view.log_id_at(11, 23), Some(43));
         assert_eq!(view.log_id_at(11, 20), None);
         assert_eq!(view.log_id_at(10, 21), None);
+    }
+
+    #[test]
+    fn connector_refresh_notice_explains_remove_and_readd_flow() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("create test terminal");
+        let theme = super::theme::all()[0];
+
+        terminal
+            .draw(|frame| {
+                draw_chatgpt_connector_refresh_notice(
+                    frame,
+                    &theme,
+                    Some("https://example.ngrok.app/secret/mcp"),
+                    None,
+                )
+            })
+            .expect("draw connector refresh notice");
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..24)
+            .map(|row| {
+                (0..100)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("CatDesk Connector Refresh Required"));
+        assert!(text.contains("The connector changed in this update. Please folow below step:"));
+        assert!(text.contains("https://chatgpt.com/#settings/Plugins"));
+        assert!(text.contains("2. Find CatDesk and click it"));
+        assert!(text.contains("3. Click the ... button on upper right corner"));
+        assert!(text.contains("4. Click delete"));
+        assert!(text.contains("5. Open connector settings:"));
+        assert!(text.contains("6. Click Create app"));
+        assert!(text.contains("7. Fill in the form:"));
+        assert!(text.contains("8. Click I understand and want to continue"));
+        assert!(text.contains("9. Click Create"));
+        assert!(text.contains(super::MCP_URL_MASK));
+        assert!(text.contains("Click to reveal"));
+        assert!(!text.contains("https://example.ngrok.app/secret/mcp"));
+        assert!(!text.contains("[c]"));
+        assert!(text.contains("I've re-added CatDesk"));
+        assert!(text.contains("Remind me next launch"));
+    }
+
+    #[test]
+    fn connector_refresh_notice_reveals_mcp_url_with_same_security_ui() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("create test terminal");
+        let theme = super::theme::all()[0];
+        let url = "https://example.ngrok.app/secret/mcp";
+
+        terminal
+            .draw(|frame| {
+                draw_chatgpt_connector_refresh_notice(
+                    frame,
+                    &theme,
+                    Some(url),
+                    Some(std::time::Duration::from_secs(10)),
+                )
+            })
+            .expect("draw revealed connector refresh notice");
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..24)
+            .map(|row| {
+                (0..100)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains(url));
+        assert!(text.contains("[ EXPOSED 10s ]"));
+        assert!(!text.contains("Click to reveal"));
     }
 
     #[test]
@@ -3423,10 +3787,7 @@ async fn run_tui(
                                                 None
                                             }
                                         } else if line.contains("chatgpt.com/apps") {
-                                            Some(
-                                                "https://chatgpt.com/apps#settings/Connectors"
-                                                    .to_string(),
-                                            )
+                                            Some(CHATGPT_CONNECTOR_SETTINGS_URL.to_string())
                                         } else if let Some(ref url) = last_mcp_url {
                                             let prefix = &url[..url.len().min(30)];
                                             if line.contains("MCP Server URL")
@@ -3949,10 +4310,7 @@ fn draw_ui(
                 ]),
                 Line::from(vec![
                     Span::styled("     ", guide_text_style),
-                    Span::styled(
-                        "https://chatgpt.com/apps#settings/Connectors",
-                        guide_copyable_style,
-                    ),
+                    Span::styled(CHATGPT_CONNECTOR_SETTINGS_URL, guide_copyable_style),
                 ]),
                 Line::from(""),
                 Line::from(vec![
