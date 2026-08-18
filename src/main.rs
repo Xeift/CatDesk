@@ -33,6 +33,7 @@ use state::{
     ToolMode, UsageTotals, app_config_path, flow_anim_lit_count, load_ngrok_authtoken,
     load_ngrok_domain, save_ngrok_authtoken, save_ngrok_domain,
 };
+use std::collections::HashMap;
 use std::io::{Write, stdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -47,6 +48,7 @@ const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
 const UI_POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
 const MCP_URL_REVEAL_DURATION: Duration = Duration::from_secs(10);
 const MCP_URL_MASK: &str = "https://▓▓▓▓▓▓▓▓/▓▓▓▓▓▓▓▓/mcp";
+const MCP_PATH_MASK: &str = "/▓▓▓▓▓▓▓▓/mcp";
 const NGROK_URL_MASK: &str = "https://▓▓▓▓▓▓▓▓";
 const NGROK_DOMAIN_MASK: &str = "▓▓▓▓▓▓▓▓";
 const MCP_URL_REVEAL_BAR_CELLS: usize = 10;
@@ -63,6 +65,35 @@ struct Selection {
     start: Option<(u16, u16)>,
     end: Option<(u16, u16)>,
     dragging: bool,
+}
+
+#[derive(Clone)]
+struct LogView {
+    max_scroll: usize,
+    effective_scroll: usize,
+    area: Rect,
+    visible_log_ids: Vec<u64>,
+}
+
+impl LogView {
+    fn log_id_at(&self, column: u16, row: u16) -> Option<u64> {
+        let inner_left = self.area.x.saturating_add(1);
+        let inner_right = self
+            .area
+            .x
+            .saturating_add(self.area.width.saturating_sub(1));
+        let inner_top = self.area.y.saturating_add(1);
+        let inner_bottom = self
+            .area
+            .y
+            .saturating_add(self.area.height.saturating_sub(1));
+        if column < inner_left || column >= inner_right || row < inner_top || row >= inner_bottom {
+            return None;
+        }
+        self.visible_log_ids
+            .get(row.saturating_sub(inner_top) as usize)
+            .copied()
+    }
 }
 
 impl Selection {
@@ -272,6 +303,58 @@ fn mcp_url_reveal_seconds(remaining: Duration) -> u64 {
         .as_millis()
         .div_ceil(1_000)
         .min(MCP_URL_REVEAL_DURATION.as_secs() as u128) as u64
+}
+
+fn post_mcp_path(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix("POST ")?;
+    let (path, _) = rest.split_once(' ')?;
+    let mut parts = path.split('/');
+    let is_mcp_path = parts.next() == Some("")
+        && parts.next().is_some_and(|slug| !slug.is_empty())
+        && parts.next() == Some("mcp")
+        && parts.next().is_none();
+    is_mcp_path.then_some(path)
+}
+
+fn mask_mcp_path_in_log(message: &str, revealed: bool) -> String {
+    if revealed {
+        return message.to_string();
+    }
+    let Some(path) = post_mcp_path(message) else {
+        return message.to_string();
+    };
+    message.replacen(path, MCP_PATH_MASK, 1)
+}
+
+fn is_secret_log_message(message: &str) -> bool {
+    message.starts_with("MCP Server URL: ")
+        || message.starts_with("ngrok URL: ")
+        || message.starts_with("Auto-saved ngrok static domain: ")
+        || post_mcp_path(message).is_some()
+}
+
+fn mask_secret_log_message(message: &str, revealed: bool) -> String {
+    if revealed {
+        return message.to_string();
+    }
+    if message.starts_with("MCP Server URL: ") {
+        return format!("MCP Server URL: {MCP_URL_MASK}");
+    }
+    if message.starts_with("ngrok URL: ") {
+        return format!("ngrok URL: {NGROK_URL_MASK}");
+    }
+    if message.starts_with("Auto-saved ngrok static domain: ") {
+        return format!("Auto-saved ngrok static domain: {NGROK_DOMAIN_MASK}");
+    }
+    mask_mcp_path_in_log(message, false)
+}
+
+fn secret_log_copy_value(message: &str) -> Option<String> {
+    message
+        .strip_prefix("MCP Server URL: ")
+        .or_else(|| message.strip_prefix("ngrok URL: "))
+        .or_else(|| message.strip_prefix("Auto-saved ngrok static domain: "))
+        .map(str::to_string)
 }
 
 fn mcp_url_reveal_bar_segments(remaining: Duration) -> (String, String) {
@@ -1690,8 +1773,11 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 
 #[cfg(test)]
 mod tests {
-    use super::{key_is_clipboard_paste, normalize_ngrok_authtoken_input};
+    use super::{
+        LogView, key_is_clipboard_paste, mask_mcp_path_in_log, normalize_ngrok_authtoken_input,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
 
     #[test]
     fn normalizes_plain_ngrok_token() {
@@ -1723,6 +1809,38 @@ mod tests {
             KeyCode::Insert,
             KeyModifiers::SHIFT
         )));
+    }
+
+    #[test]
+    fn masks_slug_in_post_mcp_logs_until_revealed() {
+        let message = "POST /secret-slug/mcp flow=stateless [tools/list(id=1)]";
+        assert_eq!(
+            mask_mcp_path_in_log(message, false),
+            "POST /▓▓▓▓▓▓▓▓/mcp flow=stateless [tools/list(id=1)]"
+        );
+        assert_eq!(mask_mcp_path_in_log(message, true), message);
+    }
+
+    #[test]
+    fn leaves_non_mcp_post_logs_unchanged() {
+        let message = "POST /layout/show-detail ok";
+        assert_eq!(mask_mcp_path_in_log(message, false), message);
+    }
+
+    #[test]
+    fn log_view_maps_visible_rows_to_independent_log_ids() {
+        let view = LogView {
+            max_scroll: 5,
+            effective_scroll: 2,
+            area: Rect::new(10, 20, 80, 5),
+            visible_log_ids: vec![41, 42, 43],
+        };
+
+        assert_eq!(view.log_id_at(11, 21), Some(41));
+        assert_eq!(view.log_id_at(11, 22), Some(42));
+        assert_eq!(view.log_id_at(11, 23), Some(43));
+        assert_eq!(view.log_id_at(11, 20), None);
+        assert_eq!(view.log_id_at(10, 21), None);
     }
 }
 
@@ -3057,6 +3175,7 @@ async fn run_tui(
     let mut log_follow_tail = true;
     let mut last_log_max_scroll: usize = 0;
     let mut last_log_effective_scroll: usize = 0;
+    let mut last_log_view: Option<LogView> = None;
     let mut selection = Selection::new();
     // (message, position (col, row), created_at)
     let mut toast: Option<(&str, (u16, u16), Instant)> = None;
@@ -3065,14 +3184,8 @@ async fn run_tui(
     let mut last_animation_snapshot = String::new();
     #[allow(unused_assignments)]
     let mut last_mcp_url: Option<String> = None;
-    #[allow(unused_assignments)]
-    let mut last_ngrok_url: Option<String> = None;
-    #[allow(unused_assignments)]
-    let mut last_ngrok_domain: Option<String> = None;
     let mut mcp_url_revealed_until: Option<Instant> = None;
-    let mut log_mcp_url_revealed_until: Option<Instant> = None;
-    let mut log_ngrok_url_revealed_until: Option<Instant> = None;
-    let mut log_ngrok_domain_revealed_until: Option<Instant> = None;
+    let mut log_secret_revealed_until: HashMap<u64, Instant> = HashMap::new();
 
     loop {
         {
@@ -3086,33 +3199,17 @@ async fn run_tui(
             if mcp_url_revealed_until.is_some() && reveal_remaining.is_none() {
                 mcp_url_revealed_until = None;
             }
-            let log_mcp_reveal_remaining = log_mcp_url_revealed_until
-                .and_then(|deadline| deadline.checked_duration_since(Instant::now()));
-            if log_mcp_url_revealed_until.is_some() && log_mcp_reveal_remaining.is_none() {
-                log_mcp_url_revealed_until = None;
-            }
-            let log_ngrok_reveal_remaining = log_ngrok_url_revealed_until
-                .and_then(|deadline| deadline.checked_duration_since(Instant::now()));
-            if log_ngrok_url_revealed_until.is_some() && log_ngrok_reveal_remaining.is_none() {
-                log_ngrok_url_revealed_until = None;
-            }
-            let log_ngrok_domain_reveal_remaining = log_ngrok_domain_revealed_until
-                .and_then(|deadline| deadline.checked_duration_since(Instant::now()));
-            if log_ngrok_domain_revealed_until.is_some()
-                && log_ngrok_domain_reveal_remaining.is_none()
-            {
-                log_ngrok_domain_revealed_until = None;
-            }
+            let now = Instant::now();
+            log_secret_revealed_until
+                .retain(|_, deadline| deadline.checked_duration_since(now).is_some());
             let app = state.lock().await;
             last_mcp_url = app.public_mcp_url();
-            last_ngrok_url = app.ngrok_url.clone();
-            last_ngrok_domain = app.ngrok_domain.clone();
             let toast_ref = toast
                 .as_ref()
                 .filter(|(_, _, t)| t.elapsed().as_secs() < 2)
                 .map(|(m, pos, _)| (*m, *pos));
             let mut new_lines: Vec<String> = Vec::new();
-            let mut latest_log_view: Option<(usize, usize)> = None;
+            let mut latest_log_view: Option<LogView> = None;
             terminal.draw(|f| {
                 draw_ui(
                     f,
@@ -3122,9 +3219,7 @@ async fn run_tui(
                     &mut latest_log_view,
                     toast_ref,
                     reveal_remaining,
-                    log_mcp_reveal_remaining,
-                    log_ngrok_reveal_remaining,
-                    log_ngrok_domain_reveal_remaining,
+                    &log_secret_revealed_until,
                 );
 
                 if let Some(((c0, r0), (c1, r1))) = selection.range() {
@@ -3165,9 +3260,10 @@ async fn run_tui(
                     new_lines.push(line);
                 }
             })?;
-            if let Some((max_scroll, effective_scroll)) = latest_log_view {
-                last_log_max_scroll = max_scroll;
-                last_log_effective_scroll = effective_scroll;
+            if let Some(log_view) = latest_log_view {
+                last_log_max_scroll = log_view.max_scroll;
+                last_log_effective_scroll = log_view.effective_scroll;
+                last_log_view = Some(log_view);
                 if !log_follow_tail && log_scroll > last_log_max_scroll {
                     log_scroll = last_log_max_scroll;
                 }
@@ -3258,83 +3354,55 @@ async fn run_tui(
                                     let row = start.1 as usize;
                                     if row < screen_lines.len() {
                                         let line = &screen_lines[row];
-                                        let copy_value = if line.contains("chatgpt.com/apps") {
+                                        let clicked_log = last_log_view.as_ref().and_then(|view| {
+                                            view.log_id_at(mouse.column, mouse.row)
+                                        });
+                                        let clicked_log = if let Some(log_id) = clicked_log {
+                                            let app = state.lock().await;
+                                            app.logs
+                                                .iter()
+                                                .find(|entry| entry.id == log_id)
+                                                .map(|entry| (entry.id, entry.message.clone()))
+                                        } else {
+                                            None
+                                        };
+                                        let copy_value = if let Some((log_id, message)) =
+                                            clicked_log.as_ref().filter(|(_, message)| {
+                                                is_secret_log_message(message)
+                                            }) {
+                                            let revealed = log_secret_revealed_until
+                                                .get(log_id)
+                                                .and_then(|deadline| {
+                                                    deadline.checked_duration_since(Instant::now())
+                                                })
+                                                .is_some();
+                                            if revealed {
+                                                secret_log_copy_value(message)
+                                            } else {
+                                                let now = Instant::now();
+                                                log_secret_revealed_until
+                                                    .insert(*log_id, now + MCP_URL_REVEAL_DURATION);
+                                                let reveal_message = if message
+                                                    .starts_with("Auto-saved ngrok static domain: ")
+                                                {
+                                                    "Domain revealed for 10s"
+                                                } else if post_mcp_path(message).is_some() {
+                                                    "MCP path revealed for 10s"
+                                                } else {
+                                                    "URL revealed for 10s"
+                                                };
+                                                toast = Some((
+                                                    reveal_message,
+                                                    (mouse.column, mouse.row),
+                                                    now,
+                                                ));
+                                                None
+                                            }
+                                        } else if line.contains("chatgpt.com/apps") {
                                             Some(
                                                 "https://chatgpt.com/apps#settings/Connectors"
                                                     .to_string(),
                                             )
-                                        } else if line.contains("Auto-saved ngrok static domain:") {
-                                            if let Some(ref domain) = last_ngrok_domain {
-                                                let revealed = log_ngrok_domain_revealed_until
-                                                    .and_then(|deadline| {
-                                                        deadline
-                                                            .checked_duration_since(Instant::now())
-                                                    })
-                                                    .is_some();
-                                                if revealed {
-                                                    Some(domain.clone())
-                                                } else {
-                                                    let now = Instant::now();
-                                                    log_ngrok_domain_revealed_until =
-                                                        Some(now + MCP_URL_REVEAL_DURATION);
-                                                    toast = Some((
-                                                        "Domain revealed for 10s",
-                                                        (mouse.column, mouse.row),
-                                                        now,
-                                                    ));
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            }
-                                        } else if line.contains("ngrok URL:") {
-                                            if let Some(ref url) = last_ngrok_url {
-                                                let revealed = log_ngrok_url_revealed_until
-                                                    .and_then(|deadline| {
-                                                        deadline
-                                                            .checked_duration_since(Instant::now())
-                                                    })
-                                                    .is_some();
-                                                if revealed {
-                                                    Some(url.clone())
-                                                } else {
-                                                    let now = Instant::now();
-                                                    log_ngrok_url_revealed_until =
-                                                        Some(now + MCP_URL_REVEAL_DURATION);
-                                                    toast = Some((
-                                                        "URL revealed for 10s",
-                                                        (mouse.column, mouse.row),
-                                                        now,
-                                                    ));
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            }
-                                        } else if line.contains("MCP Server URL:") {
-                                            if let Some(ref url) = last_mcp_url {
-                                                let revealed = log_mcp_url_revealed_until
-                                                    .and_then(|deadline| {
-                                                        deadline
-                                                            .checked_duration_since(Instant::now())
-                                                    })
-                                                    .is_some();
-                                                if revealed {
-                                                    Some(url.clone())
-                                                } else {
-                                                    let now = Instant::now();
-                                                    log_mcp_url_revealed_until =
-                                                        Some(now + MCP_URL_REVEAL_DURATION);
-                                                    toast = Some((
-                                                        "URL revealed for 10s",
-                                                        (mouse.column, mouse.row),
-                                                        now,
-                                                    ));
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            }
                                         } else if let Some(ref url) = last_mcp_url {
                                             let prefix = &url[..url.len().min(30)];
                                             if line.contains("MCP Server URL")
@@ -3428,12 +3496,10 @@ fn draw_ui(
     app: &AppState,
     log_scroll: usize,
     log_follow_tail: bool,
-    log_view: &mut Option<(usize, usize)>,
+    log_view: &mut Option<LogView>,
     toast: Option<(&str, (u16, u16))>,
     mcp_url_reveal_remaining: Option<Duration>,
-    log_mcp_url_reveal_remaining: Option<Duration>,
-    log_ngrok_url_reveal_remaining: Option<Duration>,
-    log_ngrok_domain_reveal_remaining: Option<Duration>,
+    log_secret_revealed_until: &HashMap<u64, Instant>,
 ) {
     let palette = app.current_theme().palette;
     let area = f.area();
@@ -3508,24 +3574,6 @@ fn draw_ui(
     let mcp_url = match (&full_mcp_url, mcp_url_is_revealed) {
         (Some(url), true) => url.clone(),
         (Some(_), false) => MCP_URL_MASK.to_string(),
-        (None, _) => "--".to_string(),
-    };
-    let log_mcp_url = match (&full_mcp_url, log_mcp_url_reveal_remaining.is_some()) {
-        (Some(url), true) => url.clone(),
-        (Some(_), false) => MCP_URL_MASK.to_string(),
-        (None, _) => "--".to_string(),
-    };
-    let log_ngrok_url = match (&app.ngrok_url, log_ngrok_url_reveal_remaining.is_some()) {
-        (Some(url), true) => url.clone(),
-        (Some(_), false) => NGROK_URL_MASK.to_string(),
-        (None, _) => "--".to_string(),
-    };
-    let log_ngrok_domain = match (
-        &app.ngrok_domain,
-        log_ngrok_domain_reveal_remaining.is_some(),
-    ) {
-        (Some(domain), true) => domain.clone(),
-        (Some(_), false) => NGROK_DOMAIN_MASK.to_string(),
         (None, _) => "--".to_string(),
     };
     let mcp_url_security_status = mcp_url_reveal_remaining
@@ -4063,18 +4111,10 @@ fn draw_ui(
                 "WARN" => palette.warning_fg,
                 _ => palette.muted_fg,
             };
-            let message = if entry.message.starts_with("MCP Server URL: ") {
-                format!("MCP Server URL: {log_mcp_url}")
-            } else if entry.message.starts_with("ngrok URL: ") {
-                format!("ngrok URL: {log_ngrok_url}")
-            } else if entry
-                .message
-                .starts_with("Auto-saved ngrok static domain: ")
-            {
-                format!("Auto-saved ngrok static domain: {log_ngrok_domain}")
-            } else {
-                entry.message.to_string()
-            };
+            let message = mask_secret_log_message(
+                &entry.message,
+                log_secret_revealed_until.contains_key(&entry.id),
+            );
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!(" {} ", entry.time),
@@ -4094,7 +4134,19 @@ fn draw_ui(
     } else {
         log_scroll.min(max_scroll)
     };
-    *log_view = Some((max_scroll, effective_scroll));
+    let visible_log_ids = app
+        .logs
+        .iter()
+        .skip(effective_scroll)
+        .take(visible_height)
+        .map(|entry| entry.id)
+        .collect();
+    *log_view = Some(LogView {
+        max_scroll,
+        effective_scroll,
+        area: chunks[3],
+        visible_log_ids,
+    });
     let visible_items: Vec<ListItem> = log_items
         .into_iter()
         .skip(effective_scroll)

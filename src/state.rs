@@ -16,6 +16,7 @@ use crate::theme;
 /// Log entry displayed in the TUI.
 #[derive(Clone)]
 pub struct LogEntry {
+    pub id: u64,
     pub time: String,
     pub level: &'static str,
     pub message: String,
@@ -520,6 +521,7 @@ pub struct AppState {
     pub detected_browsers: Vec<DetectedBrowser>,
     pub selected_browser: Option<DetectedBrowser>,
     pub logs: Vec<LogEntry>,
+    next_log_id: u64,
     pub flows: Vec<FlowLane>,
     pub flow_bootstrap_progress: HashMap<String, FlowBootstrapProgress>,
     pub request_count: u64,
@@ -941,6 +943,7 @@ impl AppState {
             detected_browsers: Vec::new(),
             selected_browser: config.selected_browser,
             logs: Vec::new(),
+            next_log_id: 0,
             flows: Vec::new(),
             flow_bootstrap_progress: HashMap::new(),
             request_count: 0,
@@ -971,7 +974,10 @@ impl AppState {
 
     pub fn log(&mut self, level: &'static str, message: String) {
         let now = now_hms();
+        let id = self.next_log_id;
+        self.next_log_id = self.next_log_id.checked_add(1).expect("log id exhausted");
         self.logs.push(LogEntry {
+            id,
             time: now,
             level,
             message,
@@ -1232,6 +1238,27 @@ mod tests {
         )
         .expect("create app state");
         (app, workspace, config_path)
+    }
+
+    #[test]
+    fn log_ids_stay_stable_when_old_entries_are_evicted() {
+        let (mut app, workspace, config_path) = test_app("catdesk-log-id-buffer");
+
+        for index in 0..501 {
+            app.log("INFO", format!("entry-{index}"));
+        }
+
+        assert_eq!(app.logs.len(), 500);
+        assert_eq!(app.logs.first().map(|entry| entry.id), Some(1));
+        assert_eq!(app.logs.last().map(|entry| entry.id), Some(500));
+        assert!(
+            app.logs
+                .windows(2)
+                .all(|pair| pair[0].id.saturating_add(1) == pair[1].id)
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]
