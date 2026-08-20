@@ -932,6 +932,10 @@ fn key_is_clipboard_paste(key: &crossterm::event::KeyEvent) -> bool {
             && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+fn text_input_key_is_cancel(code: KeyCode) -> bool {
+    matches!(code, KeyCode::Esc)
+}
+
 fn normalize_ngrok_authtoken_input(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -1600,7 +1604,7 @@ async fn run_ngrok_auth_setup(
                     continue;
                 }
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => return Ok(false),
+                    code if text_input_key_is_cancel(code) => return Ok(false),
                     KeyCode::Enter => {
                         let token = normalize_ngrok_authtoken_input(&input);
                         if token.is_empty() {
@@ -1749,7 +1753,7 @@ async fn run_ngrok_domain_setup(
                     continue;
                 }
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => return Ok(false),
+                    code if text_input_key_is_cancel(code) => return Ok(false),
                     KeyCode::Enter => {
                         let domain = normalize_ngrok_domain_input(&input);
                         if domain.is_empty() {
@@ -1903,7 +1907,7 @@ fn draw_ngrok_domain_setup(
         )))
     } else {
         Paragraph::new(Line::from(Span::styled(
-            "[Enter] Save  [q/Esc] Quit  [Paste/Ctrl+V] Insert domain",
+            "[Enter] Save  [Esc] Quit  [Paste/Ctrl+V] Insert domain",
             Style::default().fg(palette.muted_fg).bg(modal_bg),
         )))
     };
@@ -2054,7 +2058,7 @@ fn draw_ngrok_auth_setup(
         )))
     } else {
         Paragraph::new(Line::from(Span::styled(
-            "[Enter] Save  [q/Esc] Quit  [Paste/Ctrl+V] Insert token",
+            "[Enter] Save  [Esc] Quit  [Paste/Ctrl+V] Insert token",
             Style::default().fg(palette.muted_fg).bg(modal_bg),
         )))
     };
@@ -2082,7 +2086,7 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 mod tests {
     use super::{
         LogView, draw_chatgpt_connector_refresh_notice, draw_tui_header, key_is_clipboard_paste,
-        mask_mcp_path_in_log, normalize_ngrok_authtoken_input,
+        mask_mcp_path_in_log, normalize_ngrok_authtoken_input, text_input_key_is_cancel,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
@@ -2117,6 +2121,13 @@ mod tests {
             KeyCode::Insert,
             KeyModifiers::SHIFT
         )));
+    }
+
+    #[test]
+    fn q_does_not_cancel_text_input() {
+        assert!(!text_input_key_is_cancel(KeyCode::Char('q')));
+        assert!(!text_input_key_is_cancel(KeyCode::Char('Q')));
+        assert!(text_input_key_is_cancel(KeyCode::Esc));
     }
 
     #[test]
