@@ -1,6 +1,6 @@
 {
   "name": "catdesk",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Use ChatGPT Chat as a local coding agent.",
   "license": "MIT",
   "repository": {
