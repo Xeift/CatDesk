@@ -2206,6 +2206,13 @@
         min-height: 30px;
       }
 
+      .token-side-footer.token-side-hover:hover::before,
+      .token-side-footer.token-side-hover:focus-within::before {
+        left: 0;
+        right: 0;
+        background: rgba(255, 255, 255, 0.26);
+      }
+
       .token-side-footer .token-face {
         grid-template-columns: repeat(5, minmax(72px, 1fr));
         align-items: stretch;
