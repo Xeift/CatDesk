@@ -219,7 +219,7 @@ fn handle_initialize(req: &JsonRpcRequest) -> JsonRpcResponse {
 
 fn widget_resource_ui_meta(public_base_url: Option<&str>) -> Value {
     let mut ui = Map::new();
-    ui.insert("prefersBorder".to_string(), Value::Bool(true));
+    ui.insert("prefersBorder".to_string(), Value::Bool(false));
     if let Some(origin) = public_base_url.filter(|value| !value.is_empty()) {
         ui.insert(
             "csp".to_string(),
@@ -5310,7 +5310,7 @@ hello world"
 
         assert_eq!(
             ui_meta.get("prefersBorder").and_then(Value::as_bool),
-            Some(true)
+            Some(false)
         );
         assert!(text.contains("var INITIAL_TOKEN_STATS_LAYOUT ="));
         assert!(!text.contains(INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER));

@@ -30,9 +30,9 @@
 
       body {
         margin: 0;
-        padding: 12px;
+        padding: 0;
         color: var(--text);
-        background: var(--bg);
+        background: transparent;
         font:
           13px/1.45 "SFMono-Regular",
           Menlo,
@@ -45,8 +45,8 @@
         display: grid;
         gap: 8px;
         border-radius: 10px;
-        background: var(--bg);
-        padding: 10px;
+        background: transparent;
+        padding: 0;
       }
 
       .header {
@@ -89,7 +89,7 @@
 
       .section {
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: 0;
         background: var(--panel);
         overflow: hidden;
       }
@@ -2028,11 +2028,12 @@
 
       .files-token-row.token-layout-bottom {
         grid-template-columns: minmax(0, 1fr);
+        gap: 0;
       }
 
       .completion-shell {
         position: relative;
-        border-radius: 10px;
+        border-radius: 0;
         padding: 2px;
         overflow: hidden;
         isolation: isolate;
@@ -2117,7 +2118,7 @@
 
       .token-side {
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: 0;
         background: var(--panel);
         padding: 6px 8px;
         display: grid;
@@ -2179,9 +2180,26 @@
         margin-bottom: 1px;
       }
 
+      .files-token-row.token-layout-bottom .main-stack > .section:last-child {
+        border-bottom: 0;
+      }
+
       .token-side-footer {
+        position: relative;
         align-content: center;
         min-width: 0;
+        border-top: 0;
+      }
+
+      .token-side-footer::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 12px;
+        right: 12px;
+        height: 1px;
+        background: rgba(255, 255, 255, 0.06);
+        pointer-events: none;
       }
 
       .token-side-footer.token-side-hover {
