@@ -1350,6 +1350,11 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
                 let mut app = s.app.lock().await;
                 if let Some((tool_input_tokens, tool_output_tokens)) = turn_token_usage {
                     app.record_turn_usage(tool_input_tokens, tool_output_tokens);
+                    let _ = s.ui_events.send(ServerUiEvent::RecordTurnUsage {
+                        flow_id: STATELESS_FLOW_ID.to_string(),
+                        tool_input_tokens,
+                        tool_output_tokens,
+                    });
                     app.persist_state_with_log();
                 }
                 app.all_time_usage_totals()

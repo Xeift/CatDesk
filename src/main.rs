@@ -449,6 +449,45 @@ fn flow_call_offset(text: &str) -> String {
     " ".repeat(FLOW_LANE_LEFT_LABEL.len() + centered_in_lane)
 }
 
+fn flow_turn_usage_line(flow: &FlowLane, palette: &theme::Palette) -> Line<'static> {
+    let label_style = Style::default().fg(palette.muted_fg);
+    let value_style = Style::default()
+        .fg(palette.secondary_fg)
+        .add_modifier(Modifier::BOLD);
+    let price_style = Style::default()
+        .fg(palette.success_fg)
+        .add_modifier(Modifier::BOLD);
+
+    match flow.turn_usage.as_ref() {
+        Some(usage) => {
+            let input = format_token_compact(usage.tool_input_tokens);
+            let output = format_token_compact(usage.tool_output_tokens);
+            let cost = format_usd_compact(estimate_gpt_5_6_and_earlier_usage_cost_usd(usage));
+            let usage_text = format!("↓{input}  ↑{output}  ${cost}");
+            let indent = format!("    {}", flow_call_offset(&usage_text));
+            Line::from(vec![
+                Span::raw(indent),
+                Span::styled("↓", label_style),
+                Span::styled(input, value_style),
+                Span::raw("  "),
+                Span::styled("↑", label_style),
+                Span::styled(output, value_style),
+                Span::raw("  "),
+                Span::styled("$", label_style),
+                Span::styled(cost, price_style),
+            ])
+        }
+        None => {
+            let usage_text = "↓--  ↑--  $--";
+            let indent = format!("    {}", flow_call_offset(usage_text));
+            Line::from(vec![
+                Span::raw(indent),
+                Span::styled(usage_text, label_style),
+            ])
+        }
+    }
+}
+
 fn flow_phase(flow: &FlowLane, now_millis: u128) -> &'static str {
     if flow.closing_started_ms.is_some() {
         return "close";
@@ -4023,7 +4062,7 @@ fn draw_ui(
         )
     };
     let status_content_height = status_height.saturating_sub(4) as usize;
-    let flow_block_lines = 2;
+    let flow_block_lines = 3;
 
     let all_time_usage_totals = app.all_time_usage_totals();
     let session_usage_cost_usd =
@@ -4269,6 +4308,7 @@ fn draw_ui(
                 row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
                 row.extend(request_stats_for(app));
                 status_lines.push(Line::from(row));
+                status_lines.push(flow_turn_usage_line(flow, &palette));
             }
         }
     }

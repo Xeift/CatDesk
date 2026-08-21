@@ -28,6 +28,7 @@ pub struct FlowLane {
     pub flow_id: String,
     pub short_id: String,
     pub events: Vec<String>,
+    pub turn_usage: Option<UsageTotals>,
     pub bootstrap_status_active: bool,
     pub bootstrap_completed_steps: usize,
     pub bootstrap_pending_steps: VecDeque<usize>,
@@ -337,6 +338,11 @@ pub enum ServerUiEvent {
         events: Vec<String>,
         direction: FlowDirection,
     },
+    RecordTurnUsage {
+        flow_id: String,
+        tool_input_tokens: u64,
+        tool_output_tokens: u64,
+    },
     BeginFlowClose {
         flow_id: String,
     },
@@ -547,7 +553,7 @@ pub struct AppState {
 
 pub type SharedState = Arc<Mutex<AppState>>;
 
-pub const FLOW_ANIM_CELLS: usize = 32;
+pub const FLOW_ANIM_CELLS: usize = 48;
 const FLOW_LINK_CELLS: u64 = FLOW_ANIM_CELLS as u64;
 const FLOW_CHAIN_DELAY_CELLS: u64 = 0;
 const FLOW_FORWARD_ANIMATION_DURATION_MS: u64 = 125;
@@ -1080,6 +1086,13 @@ impl AppState {
             } => {
                 self.record_flow(&flow_id, &events, direction);
             }
+            ServerUiEvent::RecordTurnUsage {
+                flow_id,
+                tool_input_tokens,
+                tool_output_tokens,
+            } => {
+                self.record_flow_turn_usage(&flow_id, tool_input_tokens, tool_output_tokens);
+            }
             ServerUiEvent::BeginFlowClose { flow_id } => {
                 self.begin_flow_close(&flow_id);
             }
@@ -1106,9 +1119,14 @@ impl AppState {
             .unwrap_or_default();
         let starts_bootstrap_status = events_start_bootstrap_status(events);
         let only_bootstrap_status_events = events_are_bootstrap_status_events(events);
+        let starts_tool_call = direction == FlowDirection::Forward
+            && events.iter().any(|event| event.starts_with("tools/call:"));
 
         if let Some(idx) = self.flows.iter().position(|flow| flow.flow_id == flow_id) {
             let mut flow = self.flows.remove(idx);
+            if starts_tool_call {
+                flow.turn_usage = None;
+            }
             if starts_bootstrap_status {
                 flow.bootstrap_status_active = true;
             } else if flow.bootstrap_status_active && !only_bootstrap_status_events {
@@ -1152,6 +1170,7 @@ impl AppState {
                 flow_id: flow_id.to_string(),
                 short_id: short_flow_id(flow_id),
                 events: trimmed,
+                turn_usage: None,
                 bootstrap_status_active: starts_bootstrap_status,
                 bootstrap_completed_steps: bootstrap.completed_steps,
                 bootstrap_pending_steps: bootstrap.pending_steps.clone(),
@@ -1176,6 +1195,22 @@ impl AppState {
                 .insert(flow_id.to_string(), bootstrap);
             enqueue_flow_segment(&mut flow.anim_queue, direction, now_ms, step_ms);
         }
+    }
+
+    pub fn record_flow_turn_usage(
+        &mut self,
+        flow_id: &str,
+        tool_input_tokens: u64,
+        tool_output_tokens: u64,
+    ) {
+        let flow = self
+            .flows
+            .iter_mut()
+            .find(|flow| flow.flow_id == flow_id)
+            .expect("tool usage received for unknown flow");
+        let mut usage = UsageTotals::default();
+        usage.accumulate(tool_input_tokens, tool_output_tokens, 1);
+        flow.turn_usage = Some(usage);
     }
 
     pub fn begin_flow_close(&mut self, flow_id: &str) {
@@ -1752,6 +1787,44 @@ toolCallCount = 0
         assert!(!flow.bootstrap_status_active);
         assert_eq!(flow.bootstrap_completed_steps, 0);
         assert!(flow.bootstrap_pending_steps.is_empty());
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn flow_turn_usage_tracks_latest_call_and_clears_on_next_call() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-turn-usage");
+
+        app.record_flow(
+            "stateless",
+            &["tools/call:read".to_string()],
+            FlowDirection::Forward,
+        );
+        app.record_flow_turn_usage("stateless", 123, 45);
+
+        let usage = app
+            .flows
+            .first()
+            .and_then(|flow| flow.turn_usage.as_ref())
+            .expect("missing turn usage");
+        assert_eq!(usage.tool_input_tokens, 123);
+        assert_eq!(usage.tool_output_tokens, 45);
+        assert_eq!(usage.total_tokens, 168);
+        assert_eq!(usage.tool_call_count, 1);
+
+        app.record_flow(
+            "stateless",
+            &["tools/call:search".to_string()],
+            FlowDirection::Forward,
+        );
+        assert!(
+            app.flows
+                .first()
+                .expect("missing flow")
+                .turn_usage
+                .is_none()
+        );
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
