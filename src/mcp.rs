@@ -362,7 +362,17 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
         }
         "edit" => {
             properties.insert("path".to_string(), json!({ "type": "string" }));
-            properties.insert("replaceAll".to_string(), json!({ "type": "boolean" }));
+            for field in [
+                "operationCount",
+                "appliedOperations",
+                "replacedOccurrences",
+                "bytesWritten",
+            ] {
+                properties.insert(
+                    field.to_string(),
+                    json!({ "type": "integer", "minimum": 0 }),
+                );
+            }
         }
         "delete" => {
             properties.insert("path".to_string(), json!({ "type": "string" }));
@@ -652,16 +662,43 @@ async fn handle_tools_list(
             tools.push(json!({
                 "name": "edit",
                 "title": "Edit file",
-                "description": "Replace exact text in a workspace file. If replace_all is omitted or false, old_string must match exactly one occurrence. Use this for targeted edits and append-like changes by replacing the current file ending with a version that includes the new text.",
+                "description": "Apply one or more guarded edits to a workspace file atomically. Operations run in order in memory and the file is written only if every operation succeeds. Use replace for exact literal replacement and range for a 1-based inclusive line range guarded by exact old_text.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string" },
-                        "old_string": { "type": "string", "description": "Exact literal text to replace" },
-                        "new_string": { "type": "string", "description": "Exact literal replacement text" },
-                        "replace_all": { "type": "boolean", "description": "Replace all occurrences of old_string (default false)" }
+                        "edits": {
+                            "type": "array",
+                            "minItems": 1,
+                            "description": "Ordered edit operations. The whole batch is atomic.",
+                            "items": {
+                                "oneOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": { "type": "string", "const": "replace" },
+                                            "old_string": { "type": "string", "description": "Exact literal text to replace" },
+                                            "new_string": { "type": "string", "description": "Exact literal replacement text" },
+                                            "replace_all": { "type": "boolean", "description": "Replace all occurrences of old_string (default false)" }
+                                        },
+                                        "required": ["type", "old_string", "new_string"]
+                                    },
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": { "type": "string", "const": "range" },
+                                            "start_line": { "type": "integer", "minimum": 1, "description": "1-based first line of the guarded range" },
+                                            "end_line": { "type": "integer", "minimum": 1, "description": "1-based inclusive last line of the guarded range" },
+                                            "old_text": { "type": "string", "description": "Exact current text spanning the selected complete lines, including existing line endings" },
+                                            "new_text": { "type": "string", "description": "Replacement text for the selected line range" }
+                                        },
+                                        "required": ["type", "start_line", "end_line", "old_text", "new_text"]
+                                    }
+                                ]
+                            }
+                        }
                     },
-                    "required": ["path", "old_string", "new_string"]
+                    "required": ["path", "edits"]
                 },
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
@@ -1704,7 +1741,7 @@ Always specify the branch explicitly when using `git push`."#
         }
         if tool_mode.write_tools_enabled() {
             lines.push(
-                "Use write with create_dirs=true to create files in new directories. Use edit for targeted exact string replacements, including append-like changes by replacing the current file ending. Use plain mv commands for moves and renames. Use delete for other filesystem changes."
+                "Use write with create_dirs=true to create files in new directories. Use edit for one or more guarded replace/range operations; the whole edit batch is atomic and range operations use 1-based inclusive line numbers plus exact old_text. Use plain mv commands for moves and renames. Use delete for other filesystem changes."
                     .to_string(),
             );
         }
@@ -2349,6 +2386,11 @@ fn build_file_change_widget_payload(
     if let Some(bytes_written) = structured.get("bytesWritten") {
         payload.insert("bytesWritten".to_string(), bytes_written.clone());
     }
+    for field in ["operationCount", "appliedOperations", "replacedOccurrences"] {
+        if let Some(value) = structured.get(field) {
+            payload.insert(field.to_string(), value.clone());
+        }
+    }
     attach_widget_changed_files(&mut payload, widget_context);
     Some(Value::Object(payload))
 }
@@ -2835,35 +2877,122 @@ fn handle_write_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
     }
 }
 
+fn parse_edit_operations(arguments: &Value) -> Result<Vec<workspace_tools::EditOperation>, String> {
+    let edits = arguments
+        .get("edits")
+        .ok_or_else(|| "Missing required parameter: edits".to_string())?
+        .as_array()
+        .ok_or_else(|| "Parameter edits must be an array".to_string())?;
+    if edits.is_empty() {
+        return Err("Parameter edits must contain at least one operation".into());
+    }
+
+    edits
+        .iter()
+        .enumerate()
+        .map(|(index, edit)| {
+            let operation_number = index + 1;
+            let edit = edit.as_object().ok_or_else(|| {
+                format!("Edit operation {operation_number} must be an object")
+            })?;
+            let operation_type = edit
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("Edit operation {operation_number} is missing string field type"))?;
+
+            match operation_type {
+                "replace" => {
+                    let old_string = edit
+                        .get("old_string")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            format!("Edit operation {operation_number} is missing string field old_string")
+                        })?;
+                    let new_string = edit
+                        .get("new_string")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            format!("Edit operation {operation_number} is missing string field new_string")
+                        })?;
+                    let replace_all = match edit.get("replace_all") {
+                        Some(value) => value.as_bool().ok_or_else(|| {
+                            format!("Edit operation {operation_number} field replace_all must be a boolean")
+                        })?,
+                        None => false,
+                    };
+                    Ok(workspace_tools::EditOperation::Replace {
+                        old_string: old_string.to_string(),
+                        new_string: new_string.to_string(),
+                        replace_all,
+                    })
+                }
+                "range" => {
+                    let read_line = |field: &str| -> Result<usize, String> {
+                        edit.get(field)
+                            .and_then(Value::as_u64)
+                            .and_then(|value| usize::try_from(value).ok())
+                            .filter(|value| *value > 0)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Edit operation {operation_number} field {field} must be a positive integer"
+                                )
+                            })
+                    };
+                    let start_line = read_line("start_line")?;
+                    let end_line = read_line("end_line")?;
+                    let old_text = edit
+                        .get("old_text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            format!("Edit operation {operation_number} is missing string field old_text")
+                        })?;
+                    let new_text = edit
+                        .get("new_text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            format!("Edit operation {operation_number} is missing string field new_text")
+                        })?;
+                    Ok(workspace_tools::EditOperation::Range {
+                        start_line,
+                        end_line,
+                        old_text: old_text.to_string(),
+                        new_text: new_text.to_string(),
+                    })
+                }
+                other => Err(format!(
+                    "Edit operation {operation_number} has unsupported type: {other}"
+                )),
+            }
+        })
+        .collect()
+}
+
 fn handle_edit_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let path = match arguments.get("path").and_then(|v| v.as_str()) {
         Some(v) => v,
         None => return tool_error_response(req, "Missing required parameter: path".into()),
     };
-    let old_string = match arguments.get("old_string").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: old_string".into()),
+    let operations = match parse_edit_operations(&arguments) {
+        Ok(operations) => operations,
+        Err(error) => return tool_error_response(req, error),
     };
-    let new_string = match arguments.get("new_string").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: new_string".into()),
-    };
-    let replace_all = arguments
-        .get("replace_all")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    match workspace_tools::edit_file(workspace_root, path, old_string, new_string, replace_all) {
-        Ok(text) => {
+    match workspace_tools::edit_file(workspace_root, path, &operations) {
+        Ok(output) => {
+            let text = output.render_text();
             let message = text.clone();
             tool_success_response_with_structured(
                 req,
                 text,
                 json!({
                     "toolName": "edit",
-                    "path": path,
-                    "replaceAll": replace_all,
+                    "path": output.path,
+                    "operationCount": output.operation_count,
+                    "appliedOperations": output.applied_operations,
+                    "replacedOccurrences": output.replaced_occurrences,
+                    "bytesWritten": output.bytes_written,
                     "message": message,
+                    "success": true,
                 }),
             )
         }
@@ -3677,7 +3806,7 @@ mod tests {
             ("read", "text"),
             ("search", "searchResults"),
             ("write", "bytesWritten"),
-            ("edit", "replaceAll"),
+            ("edit", "operationCount"),
             ("delete", "recursive"),
         ] {
             let properties = tools
@@ -3797,6 +3926,109 @@ mod tests {
                 .and_then(Value::as_str),
             Some("pattern")
         );
+    }
+
+    #[tokio::test]
+    async fn edit_tool_schema_uses_atomic_edits_array() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+
+        let response = handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None).await;
+        let edit_tool = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("edit"))
+            .expect("missing edit tool");
+        let schema = edit_tool
+            .get("inputSchema")
+            .and_then(Value::as_object)
+            .expect("missing edit schema");
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("missing edit properties");
+
+        assert!(properties.contains_key("path"));
+        assert!(properties.contains_key("edits"));
+        assert!(!properties.contains_key("old_string"));
+        assert!(!properties.contains_key("new_string"));
+        assert!(!properties.contains_key("replace_all"));
+        assert_eq!(
+            properties
+                .get("edits")
+                .and_then(|edits| edits.get("minItems"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            properties
+                .get("edits")
+                .and_then(|edits| edits.get("items"))
+                .and_then(|items| items.get("oneOf"))
+                .and_then(Value::as_array)
+                .map(|variants| variants.len()),
+            Some(2)
+        );
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("missing edit required fields");
+        assert!(required.iter().any(|field| field == "path"));
+        assert!(required.iter().any(|field| field == "edits"));
+    }
+
+    #[tokio::test]
+    async fn edit_tool_rejects_legacy_top_level_replace_fields() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-edit-legacy-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("notes.txt"), "alpha\n").expect("write file");
+
+        let req = tool_call_request(
+            "edit",
+            json!({
+                "path": "notes.txt",
+                "old_string": "alpha",
+                "new_string": "ALPHA",
+            }),
+        );
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+
+        assert_no_text_content(&response);
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(result_text(&response), "Missing required parameter: edits");
+        assert_eq!(
+            std::fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
+            "alpha\n"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
     }
 
     #[tokio::test]
@@ -4097,18 +4329,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_file_replaces_unique_match_and_reports_changed_file() {
+    async fn edit_file_applies_atomic_batch_and_reports_changed_file() {
         let workspace_root =
             std::env::temp_dir().join(format!("catdesk-mcp-edit-file-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&workspace_root).expect("create workspace");
-        std::fs::write(workspace_root.join("notes.txt"), "alpha\nbeta\n").expect("write file");
+        std::fs::write(workspace_root.join("notes.txt"), "alpha\nbeta\ngamma\n")
+            .expect("write file");
 
         let req = tool_call_request(
             "edit",
             json!({
                 "path": "notes.txt",
-                "old_string": "beta\n",
-                "new_string": "beta\ngamma\n",
+                "edits": [
+                    {
+                        "type": "replace",
+                        "old_string": "alpha",
+                        "new_string": "ALPHA",
+                    },
+                    {
+                        "type": "range",
+                        "start_line": 2,
+                        "end_line": 3,
+                        "old_text": "beta\ngamma\n",
+                        "new_text": "BETA\nGAMMA\n",
+                    }
+                ],
             }),
         );
         let workspace_root_str = workspace_root.to_string_lossy().into_owned();
@@ -4127,7 +4372,7 @@ mod tests {
         assert_no_text_content(&response);
         assert_eq!(
             std::fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
-            "alpha\nbeta\ngamma\n"
+            "ALPHA\nBETA\nGAMMA\n"
         );
         let structured = response
             .result
@@ -4139,8 +4384,18 @@ mod tests {
             Some("edit")
         );
         assert_eq!(
-            structured.get("replaceAll").and_then(Value::as_bool),
-            Some(false)
+            structured.get("operationCount").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            structured.get("appliedOperations").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            structured
+                .get("replacedOccurrences")
+                .and_then(Value::as_u64),
+            Some(2)
         );
 
         let widget_payload = response
@@ -4157,7 +4412,26 @@ mod tests {
             widget_payload.get("path").and_then(Value::as_str),
             Some("notes.txt")
         );
-        assert!(widget_payload.get("bytesWritten").is_none());
+        assert_eq!(
+            widget_payload.get("bytesWritten").and_then(Value::as_u64),
+            Some(17)
+        );
+        assert_eq!(
+            widget_payload.get("operationCount").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            widget_payload
+                .get("appliedOperations")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            widget_payload
+                .get("replacedOccurrences")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
         assert_eq!(
             widget_payload.get("hasChanges").and_then(Value::as_bool),
             Some(true)
@@ -4187,8 +4461,11 @@ mod tests {
             "edit",
             json!({
                 "path": "notes.txt",
-                "old_string": "same",
-                "new_string": "diff",
+                "edits": [{
+                    "type": "replace",
+                    "old_string": "same",
+                    "new_string": "diff",
+                }],
             }),
         );
         let workspace_root_str = workspace_root.to_string_lossy().into_owned();

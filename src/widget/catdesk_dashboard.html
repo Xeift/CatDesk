@@ -2973,6 +2973,9 @@
             readFileLineCount: 0,
             changeFilePath: "",
             changeBytesWritten: 0,
+            changeOperationCount: 0,
+            changeAppliedOperations: 0,
+            changeReplacedOccurrences: 0,
             searchPattern: "",
             searchPath: "",
             searchBackend: "",
@@ -3284,16 +3287,37 @@
           ) {
             var changeFilePath = readNonEmptyString(data.path);
             var changeBytesWritten =
-              toolName === "write"
+              toolName === "write" || toolName === "edit"
                 ? readNonNegativeInteger(data.bytesWritten)
                 : 0;
-            if (changeFilePath === null || changeBytesWritten === null) {
+            var changeOperationCount =
+              toolName === "edit"
+                ? readNonNegativeInteger(data.operationCount)
+                : 0;
+            var changeAppliedOperations =
+              toolName === "edit"
+                ? readNonNegativeInteger(data.appliedOperations)
+                : 0;
+            var changeReplacedOccurrences =
+              toolName === "edit"
+                ? readNonNegativeInteger(data.replacedOccurrences)
+                : 0;
+            if (
+              changeFilePath === null ||
+              changeBytesWritten === null ||
+              changeOperationCount === null ||
+              changeAppliedOperations === null ||
+              changeReplacedOccurrences === null
+            ) {
               return invalidPayload(
                 toolName + " widget payload is missing required fields.",
               );
             }
             next.changeFilePath = changeFilePath;
             next.changeBytesWritten = changeBytesWritten;
+            next.changeOperationCount = changeOperationCount;
+            next.changeAppliedOperations = changeAppliedOperations;
+            next.changeReplacedOccurrences = changeReplacedOccurrences;
             return validPayload(next);
           }
 
@@ -3790,6 +3814,17 @@
               { added: 0, removed: 0 },
             );
           }
+          var editMetaHtml =
+            current.toolName === "edit"
+              ? '<span class="change-meta-item status-label">' +
+                esc(
+                  current.changeOperationCount +
+                    " ops · " +
+                    current.changeReplacedOccurrences +
+                    " replacements",
+                ) +
+                "</span>"
+              : "";
           var summaryHtml =
             '<div class="change-panel">' +
             '<div class="change-target">' +
@@ -3810,6 +3845,7 @@
             "</div>" +
             '<div class="change-meta" aria-label="file change metadata">' +
             renderChangeMeta(metaFile) +
+            editMetaHtml +
             "</div>" +
             "</div>";
           if (!files.length || current.showDetailMode === "disable") {

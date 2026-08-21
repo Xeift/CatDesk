@@ -184,7 +184,7 @@ CatDesk's local tools in `multi-tools` mode are:
 | `read`                | Read  | Reads a text file from the workspace                                       |
 | `search`              | Read  | Searches workspace text with `rg`, `grep`, or built-in search              |
 | `write`               | Write | Creates or overwrites a file                                               |
-| `edit`                | Write | Replaces exact text inside a file                                          |
+| `edit`                | Write | Applies guarded replace/range edits atomically                             |
 | `delete`              | Write | Deletes a file or directory                                                |
 | `run_command`         | Shell | Runs a short shell command and waits for completion                        |
 | `start_command`       | Job   | Starts a long-running shell command and immediately returns a job ID       |

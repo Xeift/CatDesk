@@ -1148,18 +1148,91 @@ pub fn move_path(
     ))
 }
 
+#[derive(Clone, Debug)]
+pub enum EditOperation {
+    Replace {
+        old_string: String,
+        new_string: String,
+        replace_all: bool,
+    },
+    Range {
+        start_line: usize,
+        end_line: usize,
+        old_text: String,
+        new_text: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditFileOutput {
+    pub path: String,
+    pub operation_count: usize,
+    pub applied_operations: usize,
+    pub replaced_occurrences: usize,
+    pub bytes_written: usize,
+}
+
+impl EditFileOutput {
+    pub fn render_text(&self) -> String {
+        format!(
+            "applied {} edit operation(s) to {} ({} replacement occurrence(s), {} bytes)",
+            self.applied_operations, self.path, self.replaced_occurrences, self.bytes_written
+        )
+    }
+}
+
+fn line_range_byte_bounds(
+    content: &str,
+    start_line: usize,
+    end_line: usize,
+) -> Result<(usize, usize), String> {
+    if start_line == 0 || end_line == 0 {
+        return Err("range line numbers are 1-based and must be at least 1".into());
+    }
+    if start_line > end_line {
+        return Err(format!(
+            "range start_line ({start_line}) must not exceed end_line ({end_line})"
+        ));
+    }
+
+    let mut starts = if content.is_empty() {
+        Vec::new()
+    } else {
+        vec![0_usize]
+    };
+    for (index, byte) in content.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(index + 1);
+        }
+    }
+    if content.ends_with('\n') {
+        starts.pop();
+    }
+
+    let line_count = starts.len();
+    if start_line > line_count || end_line > line_count {
+        return Err(format!(
+            "range {start_line}-{end_line} exceeds file line count {line_count}"
+        ));
+    }
+
+    let start = starts[start_line - 1];
+    let end = if end_line < line_count {
+        starts[end_line]
+    } else {
+        content.len()
+    };
+    Ok((start, end))
+}
+
 pub fn edit_file(
     workspace_root: &str,
     path: &str,
-    old_string: &str,
-    new_string: &str,
-    replace_all: bool,
-) -> Result<String, String> {
-    if old_string.is_empty() {
-        return Err("old_string must not be empty".into());
-    }
-    if old_string == new_string {
-        return Err("old_string and new_string must be different".into());
+    operations: &[EditOperation],
+) -> Result<EditFileOutput, String> {
+    if operations.is_empty() {
+        return Err("edits must contain at least one operation".into());
     }
 
     let root = workspace_root_path(workspace_root)?;
@@ -1171,35 +1244,96 @@ pub fn edit_file(
         return Err(format!("Not a file: {}", target.display()));
     }
 
-    let content = fs::read_to_string(&target).map_err(|e| e.to_string())?;
-    let replaced_count = content.matches(old_string).count();
+    let original_content = fs::read_to_string(&target).map_err(|e| e.to_string())?;
+    let mut content = original_content.clone();
+    let mut replaced_occurrences = 0_usize;
 
-    if replaced_count == 0 {
+    for (index, operation) in operations.iter().enumerate() {
+        let operation_number = index + 1;
+        match operation {
+            EditOperation::Replace {
+                old_string,
+                new_string,
+                replace_all,
+            } => {
+                if old_string.is_empty() {
+                    return Err(format!(
+                        "edit operation {operation_number}: old_string must not be empty"
+                    ));
+                }
+                if old_string == new_string {
+                    return Err(format!(
+                        "edit operation {operation_number}: old_string and new_string must be different"
+                    ));
+                }
+
+                let matched = content.matches(old_string).count();
+                if matched == 0 {
+                    return Err(format!(
+                        "edit operation {operation_number}: old_string not found in {}",
+                        to_workspace_relative(&root, &target)
+                    ));
+                }
+                if matched > 1 && !replace_all {
+                    return Err(format!(
+                        "edit operation {operation_number}: old_string matched {} occurrences in {}. Set replace_all=true to replace every occurrence, or provide more context to make old_string unique.",
+                        matched,
+                        to_workspace_relative(&root, &target)
+                    ));
+                }
+
+                content = if *replace_all {
+                    content.replace(old_string, new_string)
+                } else {
+                    content.replacen(old_string, new_string, 1)
+                };
+                replaced_occurrences = replaced_occurrences.saturating_add(matched);
+            }
+            EditOperation::Range {
+                start_line,
+                end_line,
+                old_text,
+                new_text,
+            } => {
+                if old_text == new_text {
+                    return Err(format!(
+                        "edit operation {operation_number}: old_text and new_text must be different"
+                    ));
+                }
+                let (start, end) = line_range_byte_bounds(&content, *start_line, *end_line)
+                    .map_err(|error| format!("edit operation {operation_number}: {error}"))?;
+                let selected = &content[start..end];
+                if selected != old_text {
+                    return Err(format!(
+                        "edit operation {operation_number}: old_text does not match lines {}-{} in {}",
+                        start_line,
+                        end_line,
+                        to_workspace_relative(&root, &target)
+                    ));
+                }
+
+                content.replace_range(start..end, new_text);
+                replaced_occurrences = replaced_occurrences.saturating_add(1);
+            }
+        }
+    }
+
+    let current_content = fs::read_to_string(&target).map_err(|e| e.to_string())?;
+    if current_content != original_content {
         return Err(format!(
-            "old_string not found in {}",
+            "file changed during edit; refusing to overwrite {}",
             to_workspace_relative(&root, &target)
         ));
     }
-    if replaced_count > 1 && !replace_all {
-        return Err(format!(
-            "old_string matched {} occurrences in {}. Set replace_all=true to replace every occurrence, or provide more context to make old_string unique.",
-            replaced_count,
-            to_workspace_relative(&root, &target)
-        ));
-    }
 
-    let replaced_content = if replace_all {
-        content.replace(old_string, new_string)
-    } else {
-        content.replacen(old_string, new_string, 1)
-    };
-
-    fs::write(&target, replaced_content).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "edited {} occurrence(s) in {}",
-        replaced_count,
-        to_workspace_relative(&root, &target)
-    ))
+    fs::write(&target, &content).map_err(|e| e.to_string())?;
+    Ok(EditFileOutput {
+        path: to_workspace_relative(&root, &target),
+        operation_count: operations.len(),
+        applied_operations: operations.len(),
+        replaced_occurrences,
+        bytes_written: content.len(),
+    })
 }
 
 #[cfg(test)]
@@ -1346,6 +1480,107 @@ mod tests {
                 .map(|entry| (entry.path.as_str(), entry.line, entry.text.as_str()))
                 .collect::<Vec<_>>(),
             vec![("src/a.rs", 1, "alpha1")]
+        );
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn edit_file_applies_replace_and_range_operations_in_one_atomic_batch() {
+        let workspace_root = test_workspace("edit-batch");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+        fs::write(workspace_root.join("notes.txt"), "alpha\nbeta\ngamma\n").expect("write file");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+
+        let output = edit_file(
+            &workspace_root_str,
+            "notes.txt",
+            &[
+                EditOperation::Replace {
+                    old_string: "alpha".into(),
+                    new_string: "ALPHA".into(),
+                    replace_all: false,
+                },
+                EditOperation::Range {
+                    start_line: 2,
+                    end_line: 3,
+                    old_text: "beta\ngamma\n".into(),
+                    new_text: "BETA\nGAMMA\n".into(),
+                },
+            ],
+        )
+        .expect("edit batch");
+
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
+            "ALPHA\nBETA\nGAMMA\n"
+        );
+        assert_eq!(output.path, "notes.txt");
+        assert_eq!(output.operation_count, 2);
+        assert_eq!(output.applied_operations, 2);
+        assert_eq!(output.replaced_occurrences, 2);
+        assert_eq!(output.bytes_written, "ALPHA\nBETA\nGAMMA\n".len());
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn edit_file_does_not_write_partial_results_when_later_operation_fails() {
+        let workspace_root = test_workspace("edit-atomic-failure");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+        fs::write(workspace_root.join("notes.txt"), "alpha\nbeta\n").expect("write file");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+
+        let error = edit_file(
+            &workspace_root_str,
+            "notes.txt",
+            &[
+                EditOperation::Replace {
+                    old_string: "alpha".into(),
+                    new_string: "ALPHA".into(),
+                    replace_all: false,
+                },
+                EditOperation::Replace {
+                    old_string: "missing".into(),
+                    new_string: "present".into(),
+                    replace_all: false,
+                },
+            ],
+        )
+        .expect_err("second operation should fail");
+
+        assert!(error.contains("edit operation 2"));
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
+            "alpha\nbeta\n"
+        );
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn edit_file_range_requires_exact_guard_text() {
+        let workspace_root = test_workspace("edit-range-guard");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+        fs::write(workspace_root.join("notes.txt"), "alpha\nbeta\ngamma\n").expect("write file");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+
+        let error = edit_file(
+            &workspace_root_str,
+            "notes.txt",
+            &[EditOperation::Range {
+                start_line: 2,
+                end_line: 2,
+                old_text: "wrong\n".into(),
+                new_text: "BETA\n".into(),
+            }],
+        )
+        .expect_err("guard should reject stale range");
+
+        assert!(error.contains("old_text does not match lines 2-2"));
+        assert_eq!(
+            fs::read_to_string(workspace_root.join("notes.txt")).expect("read file"),
+            "alpha\nbeta\ngamma\n"
         );
 
         let _ = fs::remove_dir_all(workspace_root);
