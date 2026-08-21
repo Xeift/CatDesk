@@ -813,19 +813,26 @@
       .instruction-path-stat {
         width: 100%;
         display: grid;
-        grid-template-columns: 14px 74px minmax(0, 1fr);
+        grid-template-columns: 15px 88px minmax(0, 1fr);
         align-items: center;
         column-gap: 6px;
       }
 
       .instruction-path-stat.has-action {
-        grid-template-columns: 14px 74px auto;
+        grid-template-columns: 15px 88px auto;
         justify-content: start;
       }
 
+      .instruction-path-stat > .listing-kind,
+      .instruction-path-stat > .listing-kind svg {
+        width: 15px;
+        height: 15px;
+      }
+
       .instruction-path-label {
-        color: var(--text-3);
-        font-size: 11px;
+        color: var(--text-2);
+        font-size: 13px;
+        font-weight: 500;
         line-height: 1.2;
         text-align: left;
         white-space: nowrap;
