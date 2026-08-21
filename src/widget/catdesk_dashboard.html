@@ -2131,16 +2131,69 @@
         min-height: 124px;
         overflow: hidden;
         transition:
-          border-color 120ms ease,
-          background 120ms ease,
-          box-shadow 120ms ease;
+          border-color 240ms ease,
+          background 280ms ease,
+          box-shadow 240ms ease;
+      }
+
+      .token-side-hover::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        opacity: 0;
+        background-image:
+          linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.72),
+            rgba(255, 255, 255, 0.98) 46%,
+            rgba(255, 255, 255, 0.38)
+          ),
+          radial-gradient(
+            ellipse at 0 50%,
+            rgba(255, 255, 255, 0.08) 0%,
+            rgba(255, 255, 255, 0.03) 34%,
+            transparent 74%
+          ),
+          linear-gradient(
+            112deg,
+            transparent 28%,
+            rgba(255, 255, 255, 0.025) 40%,
+            rgba(255, 255, 255, 0.18) 48%,
+            rgba(255, 255, 255, 0.48) 50%,
+            rgba(255, 255, 255, 0.08) 54%,
+            transparent 66%
+          ),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.04), transparent 84%);
+        background-position: top left, top left, -38% 0, top left;
+        background-size: 0 1px, 0 100%, 24% 100%, 0 100%;
+        background-repeat: no-repeat;
+        transition:
+          opacity 130ms ease,
+          background-size 320ms cubic-bezier(0.16, 1, 0.3, 1),
+          background-position 520ms cubic-bezier(0.16, 1, 0.3, 1);
       }
 
       .token-side-hover:hover,
       .token-side-hover:focus-within {
-        border-color: rgba(255, 255, 255, 0.26);
+        border-color: rgba(255, 255, 255, 0.2);
         background: var(--panel-2);
-        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+        box-shadow:
+          inset 0 0 0 1px rgba(255, 255, 255, 0.035),
+          inset 0 0 28px rgba(255, 255, 255, 0.035);
+      }
+
+      .token-side-hover:hover::after,
+      .token-side-hover:focus-within::after {
+        opacity: 1;
+        background-position: top left, top left, 138% 0, top left;
+        background-size: 100% 1px, 100% 100%, 24% 100%, 100% 100%;
+      }
+
+      .token-side-hover > * {
+        position: relative;
+        z-index: 1;
       }
 
       .token-face {
@@ -2204,13 +2257,6 @@
 
       .token-side-footer.token-side-hover {
         min-height: 30px;
-      }
-
-      .token-side-footer.token-side-hover:hover::before,
-      .token-side-footer.token-side-hover:focus-within::before {
-        left: 0;
-        right: 0;
-        background: rgba(255, 255, 255, 0.26);
       }
 
       .token-side-footer .token-face {
