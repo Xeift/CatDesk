@@ -424,6 +424,10 @@
         border-bottom: 1px solid var(--line);
       }
 
+      .change-files {
+        border-top: 1px solid var(--line);
+      }
+
       .change-panel {
         display: flex;
         align-items: center;
@@ -3766,18 +3770,31 @@
         }
 
         function renderFileChangePanel(current) {
-          var file =
-            current.changedFiles.length > 0 ? current.changedFiles[0] : null;
+          var files = current.changedFiles;
+          var file = files.length === 1 ? files[0] : null;
           var filePath = file && file.path ? file.path : current.changeFilePath;
-          var fileName = fileNameFromPath(filePath);
-          var bodyHtml = file
-            ? '<div class="diff-wrap">' + renderFileBody(file) + "</div>"
-            : "";
+          var fileName = file
+            ? fileNameFromPath(filePath)
+            : files.length > 1
+              ? files.length + " files"
+              : fileNameFromPath(filePath);
+          var fullName = files.length > 1 ? fileName : filePath;
+          var metaFile = file;
+          if (files.length > 1) {
+            metaFile = files.reduce(
+              function (summary, entry) {
+                summary.added += entry.added;
+                summary.removed += entry.removed;
+                return summary;
+              },
+              { added: 0, removed: 0 },
+            );
+          }
           var summaryHtml =
             '<div class="change-panel">' +
             '<div class="change-target">' +
             '<span class="change-icon">' +
-            summaryIconSvg("file") +
+            summaryIconSvg(files.length > 1 ? "files" : "file") +
             "</span>" +
             '<span class="change-label">' +
             esc(current.toolName) +
@@ -3787,26 +3804,39 @@
             esc(fileName) +
             "</span>" +
             '<span class="change-name change-name-full" tabindex="0">' +
-            esc(filePath) +
+            esc(fullName) +
             "</span>" +
             "</span>" +
             "</div>" +
             '<div class="change-meta" aria-label="file change metadata">' +
-            renderChangeMeta(file) +
+            renderChangeMeta(metaFile) +
             "</div>" +
             "</div>";
-          if (!file || current.showDetailMode === "disable") {
+          if (!files.length || current.showDetailMode === "disable") {
             return summaryHtml;
           }
+          if (file) {
+            return (
+              '<details class="change-card"' +
+              (current.showDetailMode === "expanded" ? " open" : "") +
+              ">" +
+              "<summary>" +
+              summaryHtml +
+              "</summary>" +
+              '<div class="diff-wrap">' +
+              renderFileBody(file) +
+              "</div>" +
+              "</details>"
+            );
+          }
           return (
-            '<details class="change-card"' +
-            (current.showDetailMode === "expanded" ? " open" : "") +
-            ">" +
-            "<summary>" +
             summaryHtml +
-            "</summary>" +
-            bodyHtml +
-            "</details>"
+            '<div class="change-files">' +
+            renderFileList(files, {
+              emptyText: "No file changes in this tool call.",
+              showDetailMode: current.showDetailMode,
+            }) +
+            "</div>"
           );
         }
 

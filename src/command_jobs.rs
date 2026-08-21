@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, Notify, RwLock, watch};
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
+use crate::change_tracking::{ChangeSession, FileChange};
 use crate::process_runner;
 
 pub const DEFAULT_JOB_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
@@ -112,13 +113,24 @@ struct CommandJob {
     cwd: PathBuf,
     started_at: Instant,
     timeout_ms: u64,
+    change_session: Option<ChangeSession>,
     runtime: Mutex<JobRuntime>,
     changed: Notify,
     cancel_tx: watch::Sender<bool>,
 }
 
 impl CommandJob {
+    #[cfg(test)]
     fn new(command: String, cwd: PathBuf, timeout_ms: u64) -> (Arc<Self>, watch::Receiver<bool>) {
+        Self::new_with_change_session(command, cwd, timeout_ms, None)
+    }
+
+    fn new_with_change_session(
+        command: String,
+        cwd: PathBuf,
+        timeout_ms: u64,
+        change_session: Option<ChangeSession>,
+    ) -> (Arc<Self>, watch::Receiver<bool>) {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         (
             Arc::new(Self {
@@ -127,6 +139,7 @@ impl CommandJob {
                 cwd,
                 started_at: Instant::now(),
                 timeout_ms,
+                change_session,
                 runtime: Mutex::new(JobRuntime::default()),
                 changed: Notify::new(),
                 cancel_tx,
@@ -253,12 +266,25 @@ impl CommandJobManager {
         }
     }
 
+    #[cfg(test)]
     pub async fn start(
         &self,
         command: String,
         cwd: PathBuf,
         timeout_ms: u64,
         request_key: Option<String>,
+    ) -> Result<StartCommandResult, String> {
+        self.start_with_change_session(command, cwd, timeout_ms, request_key, None)
+            .await
+    }
+
+    pub async fn start_with_change_session(
+        &self,
+        command: String,
+        cwd: PathBuf,
+        timeout_ms: u64,
+        request_key: Option<String>,
+        change_session: Option<ChangeSession>,
     ) -> Result<StartCommandResult, String> {
         let _start_guard = self.start_lock.lock().await;
         if self.shutting_down.load(Ordering::Acquire) {
@@ -315,7 +341,8 @@ impl CommandJobManager {
             ));
         }
 
-        let (job, cancel_rx) = CommandJob::new(command, cwd, timeout_ms);
+        let (job, cancel_rx) =
+            CommandJob::new_with_change_session(command, cwd, timeout_ms, change_session);
         let job_id = job.id.clone();
         {
             let mut manager = self.inner.write().await;
@@ -357,6 +384,16 @@ impl CommandJobManager {
 
         let _ = timeout(Duration::from_millis(wait_ms), &mut notified).await;
         Ok(job.snapshot(after).await)
+    }
+
+    pub async fn current_changes(&self, job_id: &str) -> Result<Vec<FileChange>, String> {
+        self.cleanup().await;
+        let job = self.get_job(job_id).await?;
+        Ok(job
+            .change_session
+            .as_ref()
+            .map(ChangeSession::changes)
+            .unwrap_or_default())
     }
 
     pub async fn cancel(&self, job_id: &str) -> Result<CommandJobSnapshot, String> {

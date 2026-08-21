@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -8,6 +7,7 @@ use std::sync::Arc;
 use tiktoken_rs::o200k_base_singleton;
 use tokio::sync::Mutex;
 
+use crate::change_tracking::{ChangeScope, ChangeSession, ChangeTarget, FileChange};
 use crate::command;
 use crate::command_jobs::{
     CommandJobManager, CommandJobSnapshot, CommandJobState, DEFAULT_JOB_TIMEOUT_MS,
@@ -33,12 +33,7 @@ const WIDGET_RESOURCE_URI_PLACEHOLDER: &str = "__catdeskWidgetResourceUriPlaceho
 const INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER: &str =
     "__catdeskInitialTokenStatsLayoutPlaceholder__";
 const INITIAL_TOOL_NAME_PLACEHOLDER: &str = "__catdeskInitialToolNamePlaceholder__";
-const MAX_DIFF_FILES: usize = 16;
-const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
-const MAX_WATCHED_FILES: usize = 512;
-const MAX_FILE_CAPTURE_BYTES: usize = 128 * 1024;
-const MAX_TEXT_CAPTURE_LINES: usize = 420;
 
 // ── JSON-RPC types ──────────────────────────────────────────
 
@@ -105,40 +100,10 @@ impl TokenUsage {
     }
 }
 
-#[derive(Clone, Default)]
-struct FileDiffEntry {
-    path: String,
-    status: String,
-    added: u64,
-    removed: u64,
-    diff: String,
-}
-
-#[derive(Clone, Default)]
-struct WatchedSnapshot {
-    files: HashMap<String, FileSnapshot>,
-}
-
-#[derive(Clone)]
-struct FileSnapshot {
-    digest: u64,
-    size_bytes: usize,
-    is_binary: bool,
-    is_directory: bool,
-    text: String,
-    text_truncated: bool,
-}
-
-#[derive(Clone)]
-struct WatchTarget {
-    path: PathBuf,
-    recursive: bool,
-}
-
 #[derive(Clone)]
 struct AutoWidgetContext {
     is_error: bool,
-    turn_files: Vec<FileDiffEntry>,
+    turn_files: Vec<FileChange>,
 }
 
 // ── Handler ─────────────────────────────────────────────────
@@ -757,8 +722,10 @@ async fn handle_tools_call(
         .unwrap_or("")
         .to_string();
 
-    let watch_targets = collect_watch_targets(req, workspace_root);
-    let before_snapshot = collect_watched_snapshot(&watch_targets, workspace_root);
+    let change_session = ChangeSession::begin(
+        Path::new(workspace_root),
+        change_scope_for_request(req, workspace_root),
+    );
 
     let mut response = {
         // Local computer tools
@@ -836,8 +803,17 @@ async fn handle_tools_call(
         }
     };
 
-    let after_snapshot = collect_watched_snapshot(&watch_targets, workspace_root);
-    let turn_files = diff_changed_files(&before_snapshot, &after_snapshot);
+    let mut turn_files = change_session.changes();
+    if matches!(
+        tool_name.as_str(),
+        "start_command" | "poll_command" | "cancel_command"
+    ) {
+        if let Some(job_id) = command_job_id_from_response(&response) {
+            if let Ok(job_changes) = command_jobs.current_changes(job_id).await {
+                turn_files = job_changes;
+            }
+        }
+    }
     let is_error = response
         .result
         .as_ref()
@@ -960,6 +936,15 @@ fn command_job_output_text(snapshot: &CommandJobSnapshot) -> String {
     output
 }
 
+fn command_job_id_from_response(response: &JsonRpcResponse) -> Option<&str> {
+    response
+        .result
+        .as_ref()
+        .and_then(|result| result.get("structuredContent"))
+        .and_then(|structured| structured.get("jobId"))
+        .and_then(Value::as_str)
+}
+
 fn command_job_structured(tool_name: &str, snapshot: &CommandJobSnapshot) -> Value {
     let command_success = match snapshot.state {
         CommandJobState::Succeeded => Some(true),
@@ -1047,8 +1032,18 @@ async fn handle_start_command(
         timeout_ms.hash(&mut hasher);
         format!("start_command:{id}:{:016x}", hasher.finish())
     });
+    let change_session = ChangeSession::begin(
+        Path::new(workspace_root),
+        ChangeScope::single(ChangeTarget::discovered(cwd.clone(), true)),
+    );
     match command_jobs
-        .start(effective_command, cwd, timeout_ms, request_key)
+        .start_with_change_session(
+            effective_command,
+            cwd,
+            timeout_ms,
+            request_key,
+            Some(change_session),
+        )
         .await
     {
         Ok(started) => {
@@ -1374,6 +1369,22 @@ fn handle_run_command_move_path_intercept(
             );
             tool_error_response_with_structured(req, error, structured)
         }
+    }
+}
+
+fn to_relative(root: &Path, path: &Path) -> String {
+    let value = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    #[cfg(windows)]
+    {
+        value.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        value
     }
 }
 
@@ -2103,18 +2114,6 @@ fn truncate_for_widget(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn truncate_diff_for_widget(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_string();
-    }
-    let keep = max_chars.saturating_sub(96);
-    let mut out = String::with_capacity(max_chars + 64);
-    out.extend(text.chars().take(keep));
-    out.push_str("\n\n[diff truncated]\n");
-    out
-}
-
 fn summarize_tool_detail(raw_text: &str, is_error: bool) -> String {
     let first_line = raw_text
         .lines()
@@ -2128,23 +2127,7 @@ fn summarize_tool_detail(raw_text: &str, is_error: bool) -> String {
     truncate_for_widget(first_line, 220)
 }
 
-fn diff_line_stats(diff: &str) -> (u64, u64) {
-    let mut added: u64 = 0;
-    let mut removed: u64 = 0;
-    for line in diff.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            added = added.saturating_add(1);
-        } else if line.starts_with('-') {
-            removed = removed.saturating_add(1);
-        }
-    }
-    (added, removed)
-}
-
-fn file_entry_json(file: &FileDiffEntry) -> Value {
+fn file_entry_json(file: &FileChange) -> Value {
     json!({
         "path": file.path,
         "status": file.status,
@@ -2412,7 +2395,11 @@ fn build_run_command_widget_payload(
     Some(Value::Object(payload))
 }
 
-fn build_command_job_widget_payload(result: &Value, tool_name: &str) -> Option<Value> {
+fn build_command_job_widget_payload(
+    result: &Value,
+    tool_name: &str,
+    widget_context: Option<&AutoWidgetContext>,
+) -> Option<Value> {
     let structured = result_structured_content(result)?;
     let command = structured.get("command")?.clone();
     let state = structured.get("state")?.as_str()?;
@@ -2474,8 +2461,7 @@ fn build_command_job_widget_payload(result: &Value, tool_name: &str) -> Option<V
     if let Some(elapsed) = structured.get("elapsedMs") {
         payload.insert("elapsedMs".to_string(), elapsed.clone());
     }
-    payload.insert("changedFiles".to_string(), json!([]));
-    payload.insert("hasChanges".to_string(), json!(false));
+    attach_widget_changed_files(&mut payload, widget_context);
     Some(Value::Object(payload))
 }
 
@@ -2612,7 +2598,7 @@ fn build_auto_widget_payload(
             ),
         },
         "start_command" | "poll_command" | "cancel_command" => {
-            match build_command_job_widget_payload(result, &tool_name) {
+            match build_command_job_widget_payload(result, &tool_name, widget_context) {
                 Some(payload) => payload,
                 None if is_error => {
                     build_generic_widget_payload(req, result, widget_context, is_error)
@@ -2691,511 +2677,57 @@ fn enrich_tool_result(
     )
 }
 
-fn collect_watch_targets(req: &JsonRpcRequest, workspace_root: &str) -> Vec<WatchTarget> {
+fn change_scope_for_request(req: &JsonRpcRequest, workspace_root: &str) -> ChangeScope {
     let tool_name = tool_name_from_request(req);
     let arguments = tool_arguments(req);
-    let mut dedup: HashMap<PathBuf, bool> = HashMap::new();
 
-    let mut add_target = |path_opt: Option<&str>, recursive: bool| {
-        let Some(path_input) = path_opt else {
-            return;
-        };
-        let Ok(resolved) = command::resolve_workspace_path(workspace_root, Some(path_input)) else {
-            return;
-        };
-        let entry = dedup.entry(resolved).or_insert(false);
-        *entry |= recursive;
+    let resolve = |path: Option<&str>| {
+        path.and_then(|value| command::resolve_workspace_path(workspace_root, Some(value)).ok())
     };
 
     match tool_name.as_str() {
-        "write" | "edit" => {
-            add_target(arguments.get("path").and_then(Value::as_str), false);
-        }
-        "delete" => {
-            add_target(arguments.get("path").and_then(Value::as_str), true);
-        }
+        "write" | "edit" => resolve(arguments.get("path").and_then(Value::as_str))
+            .map(|path| ChangeScope::single(ChangeTarget::explicit(path, false)))
+            .unwrap_or_else(ChangeScope::none),
+        "delete" => resolve(arguments.get("path").and_then(Value::as_str))
+            .map(|path| ChangeScope::single(ChangeTarget::explicit(path, true)))
+            .unwrap_or_else(ChangeScope::none),
         "run_command" => {
             let command_text = arguments
                 .get("command")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if command::detect_list_files_intercept(command_text).is_none() {
-                if let Some(intercept) = command::detect_move_path_intercept(command_text) {
-                    if let Ok(cwd) = command::resolve_workspace_path(
-                        workspace_root,
-                        arguments.get("cwd").and_then(Value::as_str),
-                    ) {
-                        if let Ok(resolved) =
-                            resolve_intercepted_move_path(workspace_root, &cwd, &intercept)
-                        {
-                            let from = resolved.from.to_string_lossy().to_string();
-                            let to = resolved.to.to_string_lossy().to_string();
-                            add_target(Some(&from), true);
-                            add_target(Some(&to), true);
-                        }
-                    }
-                } else if let Ok(cwd) = command::resolve_workspace_path(
+            if command::detect_list_files_intercept(command_text).is_some() {
+                return ChangeScope::none();
+            }
+
+            if let Some(intercept) = command::detect_move_path_intercept(command_text) {
+                let Ok(cwd) = command::resolve_workspace_path(
                     workspace_root,
                     arguments.get("cwd").and_then(Value::as_str),
-                ) {
-                    let cwd = cwd.to_string_lossy().to_string();
-                    add_target(Some(&cwd), true);
-                }
+                ) else {
+                    return ChangeScope::none();
+                };
+                let Ok(resolved) = resolve_intercepted_move_path(workspace_root, &cwd, &intercept)
+                else {
+                    return ChangeScope::none();
+                };
+                return ChangeScope::many(vec![
+                    ChangeTarget::explicit(resolved.from, true),
+                    ChangeTarget::explicit(resolved.to, true),
+                ]);
             }
+
+            command::resolve_workspace_path(
+                workspace_root,
+                arguments.get("cwd").and_then(Value::as_str),
+            )
+            .ok()
+            .map(|cwd| ChangeScope::single(ChangeTarget::discovered(cwd, true)))
+            .unwrap_or_else(ChangeScope::none)
         }
-        _ => {}
+        _ => ChangeScope::none(),
     }
-
-    dedup
-        .into_iter()
-        .map(|(path, recursive)| WatchTarget { path, recursive })
-        .collect()
-}
-
-fn collect_watched_snapshot(targets: &[WatchTarget], workspace_root: &str) -> WatchedSnapshot {
-    let root = Path::new(workspace_root)
-        .canonicalize()
-        .map(command::normalize_windows_verbatim_path)
-        .unwrap_or_else(|_| PathBuf::from(workspace_root));
-    let mut files: HashMap<String, FileSnapshot> = HashMap::new();
-    let mut remaining = MAX_WATCHED_FILES;
-
-    for target in targets {
-        if remaining == 0 {
-            break;
-        }
-        collect_target_files(&root, target, &mut files, &mut remaining);
-    }
-
-    WatchedSnapshot { files }
-}
-
-fn collect_target_files(
-    root: &Path,
-    target: &WatchTarget,
-    files: &mut HashMap<String, FileSnapshot>,
-    remaining: &mut usize,
-) {
-    if *remaining == 0 {
-        return;
-    }
-    if !target.path.exists() {
-        return;
-    }
-    if target.path.is_file() {
-        if let Some(snapshot) = capture_file(&target.path) {
-            let rel = to_relative(root, &target.path);
-            files.entry(rel).or_insert(snapshot);
-            *remaining = remaining.saturating_sub(1);
-        }
-        return;
-    }
-    if target.path.is_dir() {
-        capture_directory(root, &target.path, files, remaining);
-        collect_dir_files(root, &target.path, target.recursive, files, remaining);
-    }
-}
-
-fn directory_key_from_relative(rel: &str) -> String {
-    if rel.is_empty() || rel == "." {
-        "./".to_string()
-    } else if rel.ends_with('/') {
-        rel.to_string()
-    } else {
-        format!("{rel}/")
-    }
-}
-
-fn capture_directory(
-    root: &Path,
-    path: &Path,
-    files: &mut HashMap<String, FileSnapshot>,
-    remaining: &mut usize,
-) {
-    if *remaining == 0 || !path.is_dir() {
-        return;
-    }
-    let rel = directory_key_from_relative(&to_relative(root, path));
-    if let std::collections::hash_map::Entry::Vacant(v) = files.entry(rel) {
-        v.insert(FileSnapshot {
-            digest: 0,
-            size_bytes: 0,
-            is_binary: true,
-            is_directory: true,
-            text: String::new(),
-            text_truncated: false,
-        });
-        *remaining = remaining.saturating_sub(1);
-    }
-}
-
-fn collect_dir_files(
-    root: &Path,
-    start: &Path,
-    recursive: bool,
-    files: &mut HashMap<String, FileSnapshot>,
-    remaining: &mut usize,
-) {
-    let mut stack = vec![start.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if *remaining == 0 {
-                return;
-            }
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_file() {
-                if let Some(snapshot) = capture_file(&path) {
-                    let rel = to_relative(root, &path);
-                    if let std::collections::hash_map::Entry::Vacant(v) = files.entry(rel) {
-                        v.insert(snapshot);
-                        *remaining = remaining.saturating_sub(1);
-                    }
-                }
-            } else if file_type.is_dir() {
-                capture_directory(root, &path, files, remaining);
-                if recursive {
-                    stack.push(path);
-                }
-            }
-        }
-        if !recursive {
-            break;
-        }
-    }
-}
-
-fn to_relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .map(tool_path_string)
-        .unwrap_or_else(|_| tool_path_string(path))
-}
-
-fn tool_path_string(path: &Path) -> String {
-    let path = path.display().to_string();
-    #[cfg(windows)]
-    {
-        path.replace('\\', "/")
-    }
-    #[cfg(not(windows))]
-    {
-        path
-    }
-}
-
-fn capture_file(path: &Path) -> Option<FileSnapshot> {
-    let data = std::fs::read(path).ok()?;
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    let digest = hasher.finish();
-
-    let preview = &data[..data.len().min(MAX_FILE_CAPTURE_BYTES)];
-    let is_binary = preview.iter().any(|b| *b == 0);
-    let mut text = String::new();
-    let mut text_truncated = data.len() > MAX_FILE_CAPTURE_BYTES;
-
-    if !is_binary {
-        text = String::from_utf8_lossy(preview).to_string();
-        let line_count = text.lines().count();
-        if line_count > MAX_TEXT_CAPTURE_LINES {
-            text = text
-                .lines()
-                .take(MAX_TEXT_CAPTURE_LINES)
-                .collect::<Vec<_>>()
-                .join("\n");
-            text_truncated = true;
-        }
-    }
-
-    Some(FileSnapshot {
-        digest,
-        size_bytes: data.len(),
-        is_binary,
-        is_directory: false,
-        text,
-        text_truncated,
-    })
-}
-
-fn snapshot_equal(a: &FileSnapshot, b: &FileSnapshot) -> bool {
-    a.digest == b.digest
-        && a.size_bytes == b.size_bytes
-        && a.is_binary == b.is_binary
-        && a.is_directory == b.is_directory
-}
-
-fn build_entry_from_states(
-    path: &str,
-    before: Option<&FileSnapshot>,
-    after: Option<&FileSnapshot>,
-) -> Option<FileDiffEntry> {
-    match (before, after) {
-        (None, None) => None,
-        (Some(b), Some(a)) if snapshot_equal(b, a) => None,
-        (None, Some(a)) if a.is_directory => Some(FileDiffEntry {
-            path: path.to_string(),
-            status: "added".into(),
-            added: 1,
-            removed: 0,
-            diff: format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+<directory>\n"),
-        }),
-        (Some(b), None) if b.is_directory => Some(FileDiffEntry {
-            path: path.to_string(),
-            status: "deleted".into(),
-            added: 0,
-            removed: 1,
-            diff: format!("--- a/{path}\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-<directory>\n"),
-        }),
-        (Some(b), Some(a)) if b.is_directory || a.is_directory => {
-            if b.is_directory && a.is_directory {
-                return None;
-            }
-            let before_marker = if b.is_directory {
-                "<directory>"
-            } else if b.is_binary {
-                "<binary file>"
-            } else {
-                "<file>"
-            };
-            let after_marker = if a.is_directory {
-                "<directory>"
-            } else if a.is_binary {
-                "<binary file>"
-            } else {
-                "<file>"
-            };
-            Some(FileDiffEntry {
-                path: path.to_string(),
-                status: "modified".into(),
-                added: 1,
-                removed: 1,
-                diff: format!(
-                    "--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n-{before_marker}\n+{after_marker}\n"
-                ),
-            })
-        }
-        (None, Some(a)) => {
-            let diff =
-                truncate_diff_for_widget(&build_added_diff(path, a), MAX_DIFF_CHARS_PER_FILE);
-            let (added, removed) = diff_line_stats(&diff);
-            Some(FileDiffEntry {
-                path: path.to_string(),
-                status: "added".into(),
-                added,
-                removed,
-                diff,
-            })
-        }
-        (Some(b), None) => {
-            let diff =
-                truncate_diff_for_widget(&build_deleted_diff(path, b), MAX_DIFF_CHARS_PER_FILE);
-            let (added, removed) = diff_line_stats(&diff);
-            Some(FileDiffEntry {
-                path: path.to_string(),
-                status: "deleted".into(),
-                added,
-                removed,
-                diff,
-            })
-        }
-        (Some(b), Some(a)) => {
-            let diff =
-                truncate_diff_for_widget(&build_modified_diff(path, b, a), MAX_DIFF_CHARS_PER_FILE);
-            let (added, removed) = diff_line_stats(&diff);
-            Some(FileDiffEntry {
-                path: path.to_string(),
-                status: "modified".into(),
-                added,
-                removed,
-                diff,
-            })
-        }
-    }
-}
-
-fn append_prefixed_lines(out: &mut String, prefix: char, text: &str) {
-    if text.is_empty() {
-        out.push(prefix);
-        out.push('\n');
-        return;
-    }
-    for line in text.lines() {
-        out.push(prefix);
-        out.push_str(line);
-        out.push('\n');
-    }
-}
-
-enum LineDiffOp<'a> {
-    Keep(&'a str),
-    Delete(&'a str),
-    Insert(&'a str),
-}
-
-fn diff_lines<'a>(before: &'a [&'a str], after: &'a [&'a str]) -> Vec<LineDiffOp<'a>> {
-    let n = before.len();
-    let m = after.len();
-    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
-
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i][j] = if before[i] == after[j] {
-                lcs[i + 1][j + 1] + 1
-            } else {
-                lcs[i + 1][j].max(lcs[i][j + 1])
-            };
-        }
-    }
-
-    let mut ops: Vec<LineDiffOp<'a>> = Vec::with_capacity(n + m);
-    let mut i = 0usize;
-    let mut j = 0usize;
-
-    while i < n && j < m {
-        if before[i] == after[j] {
-            ops.push(LineDiffOp::Keep(before[i]));
-            i += 1;
-            j += 1;
-        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            ops.push(LineDiffOp::Delete(before[i]));
-            i += 1;
-        } else {
-            ops.push(LineDiffOp::Insert(after[j]));
-            j += 1;
-        }
-    }
-
-    while i < n {
-        ops.push(LineDiffOp::Delete(before[i]));
-        i += 1;
-    }
-    while j < m {
-        ops.push(LineDiffOp::Insert(after[j]));
-        j += 1;
-    }
-
-    ops
-}
-
-fn build_added_diff(path: &str, after: &FileSnapshot) -> String {
-    if after.is_binary {
-        return format!(
-            "--- /dev/null\n+++ b/{path}\nBinary file added ({} bytes)\n",
-            after.size_bytes
-        );
-    }
-    let mut diff = String::new();
-    let lines = after.text.lines().count().max(1);
-    diff.push_str(&format!(
-        "--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{lines} @@\n"
-    ));
-    append_prefixed_lines(&mut diff, '+', &after.text);
-    if after.text_truncated {
-        diff.push_str("\n[file content preview truncated]\n");
-    }
-    diff
-}
-
-fn build_deleted_diff(path: &str, before: &FileSnapshot) -> String {
-    if before.is_binary {
-        return format!(
-            "--- a/{path}\n+++ /dev/null\nBinary file deleted ({} bytes)\n",
-            before.size_bytes
-        );
-    }
-    let mut diff = String::new();
-    let lines = before.text.lines().count().max(1);
-    diff.push_str(&format!(
-        "--- a/{path}\n+++ /dev/null\n@@ -1,{lines} +0,0 @@\n"
-    ));
-    append_prefixed_lines(&mut diff, '-', &before.text);
-    if before.text_truncated {
-        diff.push_str("\n[file content preview truncated]\n");
-    }
-    diff
-}
-
-fn build_modified_diff(path: &str, before: &FileSnapshot, after: &FileSnapshot) -> String {
-    if before.is_binary || after.is_binary {
-        return format!(
-            "--- a/{path}\n+++ b/{path}\nBinary file changed ({} -> {} bytes)\n",
-            before.size_bytes, after.size_bytes
-        );
-    }
-    let before_lines: Vec<&str> = before.text.lines().collect();
-    let after_lines: Vec<&str> = after.text.lines().collect();
-    let mut ops = diff_lines(&before_lines, &after_lines);
-    let has_line_level_change = ops.iter().any(|op| !matches!(op, LineDiffOp::Keep(_)));
-
-    let mut diff = String::new();
-    let before_count = before_lines.len();
-    let after_count = after_lines.len();
-    let before_start = if before_count == 0 { 0 } else { 1 };
-    let after_start = if after_count == 0 { 0 } else { 1 };
-    diff.push_str(&format!(
-        "--- a/{path}\n+++ b/{path}\n@@ -{before_start},{before_count} +{after_start},{after_count} @@\n"
-    ));
-
-    if has_line_level_change {
-        for op in ops {
-            match op {
-                LineDiffOp::Keep(line) => {
-                    diff.push(' ');
-                    diff.push_str(line);
-                    diff.push('\n');
-                }
-                LineDiffOp::Delete(line) => {
-                    diff.push('-');
-                    diff.push_str(line);
-                    diff.push('\n');
-                }
-                LineDiffOp::Insert(line) => {
-                    diff.push('+');
-                    diff.push_str(line);
-                    diff.push('\n');
-                }
-            }
-        }
-    } else {
-        // Fallback for non line-level text differences (for example newline-only changes).
-        ops.clear();
-        append_prefixed_lines(&mut diff, '-', &before.text);
-        append_prefixed_lines(&mut diff, '+', &after.text);
-    }
-
-    if before.text_truncated || after.text_truncated {
-        diff.push_str("\n[file content preview truncated]\n");
-    }
-    diff
-}
-
-fn diff_changed_files(before: &WatchedSnapshot, after: &WatchedSnapshot) -> Vec<FileDiffEntry> {
-    let mut paths: Vec<String> = before
-        .files
-        .keys()
-        .chain(after.files.keys())
-        .cloned()
-        .collect();
-    paths.sort();
-    paths.dedup();
-
-    let mut changed: Vec<FileDiffEntry> = Vec::new();
-    for path in paths {
-        if let Some(entry) =
-            build_entry_from_states(&path, before.files.get(&path), after.files.get(&path))
-        {
-            changed.push(entry);
-        }
-    }
-    if changed.len() > MAX_DIFF_FILES {
-        changed.truncate(MAX_DIFF_FILES);
-    }
-    changed
 }
 
 fn is_local_destructive_tool(tool_name: &str) -> bool {
@@ -3791,7 +3323,7 @@ mod tests {
                     "success": true
                 }
             });
-            let payload = build_command_job_widget_payload(&result, tool_name)
+            let payload = build_command_job_widget_payload(&result, tool_name, None)
                 .unwrap_or_else(|| panic!("missing widget payload for {tool_name}/{state}"));
             assert_eq!(
                 payload.get("toolName").and_then(Value::as_str),
@@ -3840,7 +3372,7 @@ mod tests {
                 "success": true
             }
         });
-        let payload = build_command_job_widget_payload(&result, "poll_command")
+        let payload = build_command_job_widget_payload(&result, "poll_command", None)
             .expect("command job widget payload");
         let output = payload
             .get("output")
@@ -5494,6 +5026,140 @@ hello world"
                 Some(expected)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn run_command_change_tracking_excludes_vcs_admin_paths() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-vcs-diff-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(workspace_root.join(".git")).expect("create git metadata");
+        std::fs::write(workspace_root.join(".git/index"), "before\n").expect("write git index");
+        std::fs::write(workspace_root.join("visible.txt"), "before\n").expect("write visible file");
+        let command = if cfg!(windows) {
+            "Set-Content -Path .git/index -Value after; Set-Content -Path visible.txt -Value after"
+        } else {
+            "printf 'after\\n' > .git/index; printf 'after\\n' > visible.txt"
+        };
+        let req = tool_call_request("run_command", json!({ "command": command }));
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+        let changed_files = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .and_then(|payload| payload.get("changedFiles"))
+            .and_then(Value::as_array)
+            .expect("missing changed files");
+        let paths = changed_files
+            .iter()
+            .filter_map(|file| file.get("path").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"visible.txt"));
+        assert!(paths.iter().all(|path| !path.starts_with(".git/")));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn background_command_reports_cumulative_changes_without_vcs_admin_noise() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-job-diff-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(workspace_root.join(".git")).expect("create git metadata");
+        std::fs::write(workspace_root.join(".git/index"), "before\n").expect("write git index");
+        std::fs::write(workspace_root.join("visible.txt"), "before\n").expect("write visible file");
+        let command_jobs = CommandJobManager::new();
+        let command = if cfg!(windows) {
+            "Set-Content -Path visible.txt -Value after; Set-Content -Path .git/index -Value after; Start-Sleep -Milliseconds 100"
+        } else {
+            "printf 'after\\n' > visible.txt; printf 'after\\n' > .git/index; sleep 0.1"
+        };
+        let start_req = tool_call_request("start_command", json!({ "command": command }));
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let start_response = handle_tools_call(
+            &start_req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &command_jobs,
+            &None,
+        )
+        .await;
+        let job_id = start_response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .and_then(|structured| structured.get("jobId"))
+            .and_then(Value::as_str)
+            .expect("missing job id")
+            .to_string();
+
+        let mut terminal = None;
+        let mut cursor = 0u64;
+        for _ in 0..20 {
+            let poll_req = tool_call_request(
+                "poll_command",
+                json!({ "job_id": job_id, "after": cursor, "wait_ms": 250 }),
+            );
+            let response = handle_tools_call(
+                &poll_req,
+                &workspace_root_str,
+                1,
+                Mode::Both,
+                ToolMode::MultiTools,
+                false,
+                &command_jobs,
+                &None,
+            )
+            .await;
+            let structured = response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("structuredContent"))
+                .expect("missing poll structured content");
+            cursor = structured
+                .get("nextCursor")
+                .and_then(Value::as_u64)
+                .unwrap_or(cursor);
+            if structured.get("state").and_then(Value::as_str) == Some("succeeded")
+                && structured.get("hasMoreOutput").and_then(Value::as_bool) != Some(true)
+            {
+                terminal = Some(response);
+                break;
+            }
+        }
+        let terminal = terminal.expect("background command did not finish");
+        let widget_payload = terminal
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        assert_eq!(
+            widget_payload.get("hasChanges").and_then(Value::as_bool),
+            Some(true)
+        );
+        let paths = widget_payload
+            .get("changedFiles")
+            .and_then(Value::as_array)
+            .expect("missing changed files")
+            .iter()
+            .filter_map(|file| file.get("path").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"visible.txt"));
+        assert!(paths.iter().all(|path| !path.starts_with(".git/")));
+        let _ = std::fs::remove_dir_all(workspace_root);
     }
 
     #[test]
