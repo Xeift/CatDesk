@@ -248,12 +248,13 @@
         border-radius: 0;
         background: var(--bg);
         max-height: 230px;
-        overflow: auto;
+        overflow-x: hidden;
+        overflow-y: auto;
       }
 
       .dline {
         display: grid;
-        grid-template-columns: 14px 46px 1fr;
+        grid-template-columns: 14px 46px minmax(0, 1fr);
         align-items: baseline;
         column-gap: 6px;
         padding: 1px 8px;
@@ -300,7 +301,9 @@
       }
 
       .code {
-        overflow-x: auto;
+        min-width: 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
       }
 
       .empty {
