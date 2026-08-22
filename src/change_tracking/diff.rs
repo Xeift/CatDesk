@@ -1,6 +1,8 @@
 use super::snapshot::{FileSnapshot, WorkspaceSnapshot, snapshots_equal};
 use super::{MAX_DIFF_CHARS_PER_FILE, MAX_DIFF_FILES};
 
+const DIFF_CONTEXT_LINES: usize = 3;
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FileChange {
     pub(crate) path: String,
@@ -50,8 +52,9 @@ fn build_change(
 }
 
 fn build_added_change(path: &str, after: &FileSnapshot) -> Option<FileChange> {
-    let diff = truncate_diff(&build_added_diff(path, after));
-    let (added, removed) = diff_line_stats(&diff);
+    let full_diff = build_added_diff(path, after);
+    let (added, removed) = diff_line_stats(&full_diff);
+    let diff = truncate_diff(&full_diff);
     Some(FileChange {
         path: path.to_string(),
         status: "added".into(),
@@ -62,8 +65,9 @@ fn build_added_change(path: &str, after: &FileSnapshot) -> Option<FileChange> {
 }
 
 fn build_deleted_change(path: &str, before: &FileSnapshot) -> Option<FileChange> {
-    let diff = truncate_diff(&build_deleted_diff(path, before));
-    let (added, removed) = diff_line_stats(&diff);
+    let full_diff = build_deleted_diff(path, before);
+    let (added, removed) = diff_line_stats(&full_diff);
+    let diff = truncate_diff(&full_diff);
     Some(FileChange {
         path: path.to_string(),
         status: "deleted".into(),
@@ -78,8 +82,9 @@ fn build_modified_change(
     before: &FileSnapshot,
     after: &FileSnapshot,
 ) -> Option<FileChange> {
-    let diff = truncate_diff(&build_modified_diff(path, before, after));
-    let (added, removed) = diff_line_stats(&diff);
+    let full_diff = build_modified_diff(path, before, after);
+    let (added, removed) = diff_line_stats(&full_diff);
+    let diff = truncate_diff(&full_diff);
     Some(FileChange {
         path: path.to_string(),
         status: "modified".into(),
@@ -161,24 +166,19 @@ fn build_modified_diff(path: &str, before: &FileSnapshot, after: &FileSnapshot) 
     let before_lines = before.text.lines().collect::<Vec<_>>();
     let after_lines = after.text.lines().collect::<Vec<_>>();
     let ops = diff_lines(&before_lines, &after_lines);
-    let has_line_level_change = ops.iter().any(|op| !matches!(op, LineDiffOp::Keep(_)));
-    let before_count = before_lines.len();
-    let after_count = after_lines.len();
-    let before_start = usize::from(before_count > 0);
-    let after_start = usize::from(after_count > 0);
-    let mut diff = format!(
-        "--- a/{path}\n+++ b/{path}\n@@ -{before_start},{before_count} +{after_start},{after_count} @@\n"
-    );
+    let has_line_level_change = ops.iter().any(LineDiffOp::is_change);
+    let mut diff = format!("--- a/{path}\n+++ b/{path}\n");
 
     if has_line_level_change {
-        for op in ops {
-            match op {
-                LineDiffOp::Keep(line) => append_line(&mut diff, ' ', line),
-                LineDiffOp::Delete(line) => append_line(&mut diff, '-', line),
-                LineDiffOp::Insert(line) => append_line(&mut diff, '+', line),
-            }
-        }
+        append_context_hunks(&mut diff, &ops);
     } else {
+        let before_count = before_lines.len();
+        let after_count = after_lines.len();
+        let before_start = usize::from(before_count > 0);
+        let after_start = usize::from(after_count > 0);
+        diff.push_str(&format!(
+            "@@ -{before_start},{before_count} +{after_start},{after_count} @@\n"
+        ));
         append_prefixed_lines(&mut diff, '-', &before.text);
         append_prefixed_lines(&mut diff, '+', &after.text);
     }
@@ -227,6 +227,98 @@ enum LineDiffOp<'a> {
     Keep(&'a str),
     Delete(&'a str),
     Insert(&'a str),
+}
+
+impl LineDiffOp<'_> {
+    fn is_change(&self) -> bool {
+        !matches!(self, Self::Keep(_))
+    }
+
+    fn consumes_old(&self) -> bool {
+        !matches!(self, Self::Insert(_))
+    }
+
+    fn consumes_new(&self) -> bool {
+        !matches!(self, Self::Delete(_))
+    }
+
+    fn prefix(&self) -> char {
+        match self {
+            Self::Keep(_) => ' ',
+            Self::Delete(_) => '-',
+            Self::Insert(_) => '+',
+        }
+    }
+
+    fn line(&self) -> &str {
+        match self {
+            Self::Keep(line) | Self::Delete(line) | Self::Insert(line) => line,
+        }
+    }
+}
+
+fn append_context_hunks(out: &mut String, ops: &[LineDiffOp<'_>]) {
+    let mut old_lines = Vec::with_capacity(ops.len() + 1);
+    let mut new_lines = Vec::with_capacity(ops.len() + 1);
+    let (mut old_line, mut new_line) = (1usize, 1usize);
+
+    for op in ops {
+        old_lines.push(old_line);
+        new_lines.push(new_line);
+        if op.consumes_old() {
+            old_line += 1;
+        }
+        if op.consumes_new() {
+            new_line += 1;
+        }
+    }
+    old_lines.push(old_line);
+    new_lines.push(new_line);
+
+    let mut hunks = Vec::<(usize, usize)>::new();
+    for change_idx in ops
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, op)| op.is_change().then_some(idx))
+    {
+        let start = change_idx.saturating_sub(DIFF_CONTEXT_LINES);
+        let end = (change_idx + DIFF_CONTEXT_LINES + 1).min(ops.len());
+        if let Some((_, last_end)) = hunks.last_mut()
+            && start <= *last_end
+        {
+            *last_end = (*last_end).max(end);
+        } else {
+            hunks.push((start, end));
+        }
+    }
+
+    for (start, end) in hunks {
+        let old_count = ops[start..end]
+            .iter()
+            .filter(|op| op.consumes_old())
+            .count();
+        let new_count = ops[start..end]
+            .iter()
+            .filter(|op| op.consumes_new())
+            .count();
+        let old_start = if old_count == 0 {
+            old_lines[start].saturating_sub(1)
+        } else {
+            old_lines[start]
+        };
+        let new_start = if new_count == 0 {
+            new_lines[start].saturating_sub(1)
+        } else {
+            new_lines[start]
+        };
+
+        out.push_str(&format!(
+            "@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
+        ));
+        for op in &ops[start..end] {
+            append_line(out, op.prefix(), op.line());
+        }
+    }
 }
 
 fn diff_lines<'a>(before: &'a [&'a str], after: &'a [&'a str]) -> Vec<LineDiffOp<'a>> {
@@ -294,4 +386,92 @@ fn truncate_diff(text: &str) -> String {
     let mut out = text.chars().take(keep).collect::<String>();
     out.push_str("\n\n[diff truncated]\n");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_snapshot(text: String) -> FileSnapshot {
+        FileSnapshot {
+            digest: text.len() as u64,
+            size_bytes: text.len(),
+            is_binary: false,
+            is_directory: false,
+            is_symlink: false,
+            text,
+            text_truncated: false,
+        }
+    }
+
+    fn numbered_lines(count: usize) -> String {
+        (1..=count)
+            .map(|line| format!("line {line:03}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn modified_diff_limits_single_change_to_three_lines_of_context() {
+        let before = text_snapshot(numbered_lines(40));
+        let mut after_lines = numbered_lines(40)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        after_lines[24] = "changed line 025".to_string();
+        let after = text_snapshot(after_lines.join("\n"));
+
+        let diff = build_modified_diff("sample.py", &before, &after);
+
+        assert!(diff.contains("@@ -22,7 +22,7 @@"));
+        assert!(diff.contains(" line 022"));
+        assert!(diff.contains("-line 025"));
+        assert!(diff.contains("+changed line 025"));
+        assert!(diff.contains(" line 028"));
+        assert!(!diff.contains(" line 021"));
+        assert!(!diff.contains(" line 029"));
+    }
+
+    #[test]
+    fn modified_diff_splits_distant_changes_into_multiple_hunks() {
+        let before = text_snapshot(numbered_lines(100));
+        let mut after_lines = numbered_lines(100)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        after_lines[24] = "changed line 025".to_string();
+        after_lines[74] = "changed line 075".to_string();
+        let after = text_snapshot(after_lines.join("\n"));
+
+        let diff = build_modified_diff("sample.py", &before, &after);
+
+        assert_eq!(
+            diff.lines().filter(|line| line.starts_with("@@")).count(),
+            2
+        );
+        assert!(diff.contains("@@ -22,7 +22,7 @@"));
+        assert!(diff.contains("@@ -72,7 +72,7 @@"));
+        assert!(!diff.contains(" line 050"));
+    }
+
+    #[test]
+    fn modified_diff_merges_nearby_change_context() {
+        let before = text_snapshot(numbered_lines(30));
+        let mut after_lines = numbered_lines(30)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        after_lines[9] = "changed line 010".to_string();
+        after_lines[14] = "changed line 015".to_string();
+        let after = text_snapshot(after_lines.join("\n"));
+
+        let diff = build_modified_diff("sample.py", &before, &after);
+
+        assert_eq!(
+            diff.lines().filter(|line| line.starts_with("@@")).count(),
+            1
+        );
+        assert!(diff.contains("-line 010"));
+        assert!(diff.contains("+changed line 015"));
+    }
 }

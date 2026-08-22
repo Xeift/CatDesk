@@ -280,6 +280,11 @@
         color: var(--text);
         background: rgba(255, 133, 131, 0.14);
       }
+      .dline.gap {
+        color: var(--text-3);
+        background: var(--panel);
+        font-style: italic;
+      }
 
       .ln {
         text-align: right;
@@ -3466,6 +3471,7 @@
           var rows = [];
           var oldLine = 0;
           var newLine = 0;
+          var seenHunk = false;
 
           for (var i = 0; i < lines.length; i += 1) {
             var line = lines[i];
@@ -3477,8 +3483,27 @@
             if (line.indexOf("@@") === 0) {
               var parsed = parseHunkHeader(line);
               if (parsed) {
+                if (seenHunk) {
+                  var omittedOld = Math.max(0, parsed.oldLine - oldLine);
+                  var omittedNew = Math.max(0, parsed.newLine - newLine);
+                  var omitted = Math.max(omittedOld, omittedNew);
+                  if (omitted > 0) {
+                    rows.push({
+                      cls: "gap",
+                      op: "",
+                      lineNum: "",
+                      text:
+                        "⋯ " +
+                        omitted +
+                        " unchanged line" +
+                        (omitted === 1 ? "" : "s") +
+                        " ⋯",
+                    });
+                  }
+                }
                 oldLine = parsed.oldLine;
                 newLine = parsed.newLine;
+                seenHunk = true;
               }
               continue;
             }
@@ -6679,7 +6704,9 @@
         }
 
         function autoScrollToFirstChange() {
-          var openFile = document.querySelector("details.file[open]");
+          var openFile = document.querySelector(
+            "details.change-card[open], details.file[open]",
+          );
           if (!openFile) return;
 
           var diff = openFile.querySelector(".diff");
@@ -6688,8 +6715,10 @@
           var firstChange = diff.querySelector(".dline.add, .dline.del");
           if (!firstChange) return;
 
-          var targetTop =
-            firstChange.offsetTop - Math.floor(diff.clientHeight * 0.35);
+          var diffRect = diff.getBoundingClientRect();
+          var changeRect = firstChange.getBoundingClientRect();
+          var relativeTop = changeRect.top - diffRect.top + diff.scrollTop;
+          var targetTop = relativeTop - Math.floor(diff.clientHeight * 0.35);
           diff.scrollTop = targetTop > 0 ? targetTop : 0;
         }
 
