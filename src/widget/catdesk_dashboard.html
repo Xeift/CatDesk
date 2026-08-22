@@ -252,6 +252,95 @@
         overflow-y: auto;
       }
 
+      .diff-nav-row {
+        position: sticky;
+        top: 0;
+        z-index: 6;
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        min-height: 34px;
+        padding: 4px 6px 3px;
+        background: linear-gradient(
+          180deg,
+          rgba(33, 33, 33, 0.99) 0%,
+          rgba(33, 33, 33, 0.94) 74%,
+          rgba(33, 33, 33, 0) 100%
+        );
+        pointer-events: none;
+      }
+
+      .diff-nav {
+        pointer-events: auto;
+        display: inline-flex;
+        align-items: center;
+        height: 28px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 7px;
+        background: rgba(42, 42, 44, 0.92);
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+        backdrop-filter: blur(10px);
+      }
+
+      .diff-nav-count {
+        min-width: 42px;
+        padding: 0 9px;
+        color: var(--text-2);
+        font-size: 10px;
+        line-height: 1;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0.02em;
+        user-select: none;
+      }
+
+      .diff-nav-divider {
+        width: 1px;
+        height: 16px;
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .diff-nav-button {
+        width: 28px;
+        height: 28px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--text-3);
+        cursor: pointer;
+        transition:
+          color 120ms ease,
+          background 120ms ease;
+      }
+
+      .diff-nav-button svg {
+        width: 16px;
+        height: 16px;
+        display: block;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .diff-nav-button:not(:disabled):hover,
+      .diff-nav-button:not(:disabled):focus-visible {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.07);
+        outline: none;
+      }
+
+      .diff-nav-button:disabled {
+        color: var(--text-3);
+        cursor: default;
+        opacity: 0.3;
+      }
+
       .dline {
         display: grid;
         grid-template-columns: 14px 46px minmax(0, 1fr);
@@ -3472,6 +3561,8 @@
           var oldLine = 0;
           var newLine = 0;
           var seenHunk = false;
+          var changeGroup = -1;
+          var inChangeGroup = false;
 
           for (var i = 0; i < lines.length; i += 1) {
             var line = lines[i];
@@ -3498,73 +3589,137 @@
                         " unchanged line" +
                         (omitted === 1 ? "" : "s") +
                         " ⋯",
+                      changeGroup: -1,
                     });
                   }
                 }
                 oldLine = parsed.oldLine;
                 newLine = parsed.newLine;
                 seenHunk = true;
+                inChangeGroup = false;
               }
               continue;
             }
 
             if (line.indexOf("+") === 0) {
+              if (!inChangeGroup) {
+                changeGroup += 1;
+                inChangeGroup = true;
+              }
               rows.push({
                 cls: "add",
                 op: "+",
                 lineNum: String(newLine > 0 ? newLine : ""),
                 text: line.slice(1),
+                changeGroup: changeGroup,
               });
               if (newLine > 0) newLine += 1;
               continue;
             }
 
             if (line.indexOf("-") === 0) {
+              if (!inChangeGroup) {
+                changeGroup += 1;
+                inChangeGroup = true;
+              }
               rows.push({
                 cls: "del",
                 op: "-",
                 lineNum: String(oldLine > 0 ? oldLine : ""),
                 text: line.slice(1),
+                changeGroup: changeGroup,
               });
               if (oldLine > 0) oldLine += 1;
               continue;
             }
 
             if (line.indexOf(" ") === 0) {
+              inChangeGroup = false;
               rows.push({
                 cls: "",
                 op: "",
                 lineNum: String(newLine > 0 ? newLine : ""),
                 text: line.slice(1),
+                changeGroup: -1,
               });
               if (oldLine > 0) oldLine += 1;
               if (newLine > 0) newLine += 1;
               continue;
             }
 
+            inChangeGroup = false;
             rows.push({
               cls: classifyDiffLine(line),
               op: "",
               lineNum: "",
               text: line,
+              changeGroup: -1,
             });
           }
 
           return rows;
         }
 
+        function diffNavChevronSvg(direction) {
+          var path =
+            direction === "previous"
+              ? "M3.2 8.9 6.55 5.55Q7 5.1 7.45 5.55L10.8 8.9"
+              : "M3.2 5.1 6.55 8.45Q7 8.9 7.45 8.45L10.8 5.1";
+          return (
+            '<svg viewBox="0 0 14 14" aria-hidden="true" focusable="false">' +
+            '<path d="' +
+            path +
+            '"></path>' +
+            "</svg>"
+          );
+        }
+
+        function renderDiffNavigator(changeGroupCount) {
+          if (changeGroupCount <= 1) return "";
+          return (
+            '<div class="diff-nav-row">' +
+            '<div class="diff-nav" data-diff-nav data-current-index="0">' +
+            '<span class="diff-nav-count" data-diff-nav-count>1/' +
+            esc(changeGroupCount) +
+            "</span>" +
+            '<span class="diff-nav-divider" aria-hidden="true"></span>' +
+            '<button type="button" class="diff-nav-button" data-diff-nav-previous aria-label="Previous change" title="Previous change" disabled>' +
+            diffNavChevronSvg("previous") +
+            "</button>" +
+            '<button type="button" class="diff-nav-button" data-diff-nav-next aria-label="Next change" title="Next change">' +
+            diffNavChevronSvg("next") +
+            "</button>" +
+            "</div>" +
+            "</div>"
+          );
+        }
+
         function renderDiffLines(diffText) {
           var rows = diffRows(diffText);
           if (!rows.length)
             return '<div class="empty">No diff preview available.</div>';
+          var changeGroupCount = rows.reduce(function (count, row) {
+            return row.changeGroup >= 0
+              ? Math.max(count, row.changeGroup + 1)
+              : count;
+          }, 0);
           return (
-            '<div class="diff">' +
+            '<div class="diff" data-change-group-count="' +
+            esc(changeGroupCount) +
+            '">' +
+            renderDiffNavigator(changeGroupCount) +
             rows
               .map(function (row) {
+                var changeGroupAttr =
+                  row.changeGroup >= 0
+                    ? ' data-change-group="' + esc(row.changeGroup) + '"'
+                    : "";
                 return (
                   '<div class="dline' +
                   (row.cls ? " " + row.cls : "") +
-                  '">' +
+                  '"' +
+                  changeGroupAttr +
+                  ">" +
                   '<span class="op">' +
                   esc(row.op || "") +
                   "</span>" +
@@ -6703,23 +6858,137 @@
           tokenRollState.rafId = window.requestAnimationFrame(tick);
         }
 
-        function autoScrollToFirstChange() {
-          var openFile = document.querySelector(
-            "details.change-card[open], details.file[open]",
+        function diffChangeTargets(diff) {
+          if (!diff) return [];
+          var targets = [];
+          Array.prototype.forEach.call(
+            diff.querySelectorAll("[data-change-group]"),
+            function (node) {
+              var index = parseInt(node.getAttribute("data-change-group"), 10);
+              if (!Number.isInteger(index) || index < 0 || targets[index]) return;
+              targets[index] = node;
+            },
           );
-          if (!openFile) return;
+          return targets.filter(function (node) {
+            return !!node;
+          });
+        }
 
-          var diff = openFile.querySelector(".diff");
-          if (!diff) return;
+        function syncDiffNavigator(diff, index) {
+          var nav = diff && diff.querySelector("[data-diff-nav]");
+          if (!nav) return;
+          var targets = diffChangeTargets(diff);
+          if (!targets.length) return;
+          var nextIndex = Math.max(0, Math.min(index, targets.length - 1));
+          var countNode = nav.querySelector("[data-diff-nav-count]");
+          var previousButton = nav.querySelector("[data-diff-nav-previous]");
+          var nextButton = nav.querySelector("[data-diff-nav-next]");
+          nav.setAttribute("data-current-index", String(nextIndex));
+          if (countNode) {
+            countNode.textContent = String(nextIndex + 1) + "/" + targets.length;
+          }
+          if (previousButton) previousButton.disabled = nextIndex <= 0;
+          if (nextButton) nextButton.disabled = nextIndex >= targets.length - 1;
+        }
 
-          var firstChange = diff.querySelector(".dline.add, .dline.del");
-          if (!firstChange) return;
-
+        function scrollDiffToChange(diff, index, behavior) {
+          var targets = diffChangeTargets(diff);
+          if (!targets.length) return;
+          var nextIndex = Math.max(0, Math.min(index, targets.length - 1));
+          var target = targets[nextIndex];
+          var navRow = diff.querySelector(".diff-nav-row");
+          var navHeight = navRow ? navRow.offsetHeight : 0;
           var diffRect = diff.getBoundingClientRect();
-          var changeRect = firstChange.getBoundingClientRect();
-          var relativeTop = changeRect.top - diffRect.top + diff.scrollTop;
-          var targetTop = relativeTop - Math.floor(diff.clientHeight * 0.35);
-          diff.scrollTop = targetTop > 0 ? targetTop : 0;
+          var targetRect = target.getBoundingClientRect();
+          var relativeTop = targetRect.top - diffRect.top + diff.scrollTop;
+          var usableHeight = Math.max(1, diff.clientHeight - navHeight);
+          var targetTop = Math.max(
+            0,
+            relativeTop - navHeight - Math.floor(usableHeight * 0.3),
+          );
+          if (behavior === "smooth" && typeof diff.scrollTo === "function") {
+            diff.scrollTo({ top: targetTop, behavior: "smooth" });
+          } else {
+            diff.scrollTop = targetTop;
+          }
+          syncDiffNavigator(diff, nextIndex);
+        }
+
+        function nearestDiffChangeIndex(diff) {
+          var targets = diffChangeTargets(diff);
+          if (!targets.length) return 0;
+          var navRow = diff.querySelector(".diff-nav-row");
+          var navHeight = navRow ? navRow.offsetHeight : 0;
+          var diffRect = diff.getBoundingClientRect();
+          var usableHeight = Math.max(1, diff.clientHeight - navHeight);
+          var anchor = diffRect.top + navHeight + usableHeight * 0.3;
+          var nearestIndex = 0;
+          var nearestDistance = Number.POSITIVE_INFINITY;
+          targets.forEach(function (target, index) {
+            var distance = Math.abs(target.getBoundingClientRect().top - anchor);
+            if (distance < nearestDistance) {
+              nearestDistance = distance;
+              nearestIndex = index;
+            }
+          });
+          return nearestIndex;
+        }
+
+        function bindDiffNavigators(root) {
+          if (!root) return;
+          Array.prototype.forEach.call(
+            root.querySelectorAll(".diff[data-change-group-count]"),
+            function (diff) {
+              var nav = diff.querySelector("[data-diff-nav]");
+              if (!nav) return;
+              var previousButton = nav.querySelector("[data-diff-nav-previous]");
+              var nextButton = nav.querySelector("[data-diff-nav-next]");
+              if (!previousButton || !nextButton) return;
+
+              function currentIndex() {
+                var value = parseInt(nav.getAttribute("data-current-index"), 10);
+                return Number.isInteger(value) && value >= 0 ? value : 0;
+              }
+
+              previousButton.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                scrollDiffToChange(diff, currentIndex() - 1, "smooth");
+              });
+              nextButton.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                scrollDiffToChange(diff, currentIndex() + 1, "smooth");
+              });
+
+              var scrollFrame = 0;
+              diff.addEventListener(
+                "scroll",
+                function () {
+                  if (scrollFrame) return;
+                  scrollFrame = window.requestAnimationFrame(function () {
+                    scrollFrame = 0;
+                    syncDiffNavigator(diff, nearestDiffChangeIndex(diff));
+                  });
+                },
+                { passive: true },
+              );
+              syncDiffNavigator(diff, 0);
+            },
+          );
+        }
+
+        function autoScrollToFirstChange() {
+          Array.prototype.forEach.call(
+            document.querySelectorAll(
+              "details.change-card[open], details.file[open]",
+            ),
+            function (openFile) {
+              var diff = openFile.querySelector(".diff");
+              if (!diff) return;
+              scrollDiffToChange(diff, 0, "auto");
+            },
+          );
         }
 
         function render() {
@@ -6878,6 +7147,7 @@
           bindAgentsPathFans(root);
           bindTokenLayoutFans(root);
           bindShowDetailFans(root);
+          bindDiffNavigators(root);
 
           playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
           if (fromLoading && !shouldAnimateLiveTokenFace(view)) {
