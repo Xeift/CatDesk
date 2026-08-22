@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Verify release versions
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Verify tag, npm, and Cargo versions match
+        run: |
+          npm_version="$(node -p "require('./package.json').version")"
+          cargo_version="$(cargo +stable metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "catdesk") | .version')"
+
+          test -n "${cargo_version}"
+          test "${npm_version}" = "${cargo_version}"
+          test "${GITHUB_REF_NAME}" = "v${npm_version}"
+
   build:
     name: Build ${{ matrix.asset }}
+    needs: verify
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -61,11 +81,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Verify tag matches package version
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          test "${GITHUB_REF_NAME}" = "v${version}"
 
       - uses: actions/download-artifact@v4
         with:
