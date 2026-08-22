@@ -406,7 +406,104 @@
       }
 
       .loading {
-        padding: 18px 12px;
+        min-height: 48px;
+        padding: 14px 12px;
+        display: flex;
+        align-items: center;
+      }
+
+      .waiting-line {
+        position: relative;
+        display: inline-grid;
+        max-width: 100%;
+        align-items: center;
+      }
+
+      .waiting-line-base,
+      .waiting-line-light {
+        grid-area: 1 / 1;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.44em;
+        min-width: 0;
+        white-space: nowrap;
+      }
+
+      .waiting-line-light {
+        color: rgba(255, 255, 255, 0.96);
+        opacity: 0;
+        pointer-events: none;
+        -webkit-mask-image: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(0, 0, 0, 0.18) 18%,
+          #000 46%,
+          #000 54%,
+          rgba(0, 0, 0, 0.18) 82%,
+          transparent 100%
+        );
+        mask-image: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(0, 0, 0, 0.18) 18%,
+          #000 46%,
+          #000 54%,
+          rgba(0, 0, 0, 0.18) 82%,
+          transparent 100%
+        );
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 26px 100%;
+        mask-size: 26px 100%;
+        -webkit-mask-position: -26px 0;
+        mask-position: -26px 0;
+        filter: drop-shadow(0 0 0.9px rgba(255, 255, 255, 0.42));
+        will-change: mask-position, opacity;
+      }
+
+      .waiting-mascot {
+        width: 1.34em;
+        height: 1.34em;
+        flex: 0 0 1.34em;
+        display: grid;
+        place-items: center;
+        transform: translateY(-0.055em);
+      }
+
+      .waiting-mascot-canvas {
+        width: 1.34em;
+        height: 1.34em;
+        display: block;
+        color: currentColor;
+      }
+
+      .waiting-copy {
+        min-width: 0;
+        white-space: nowrap;
+      }
+
+      .waiting-tool {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.04em 0.4em;
+        border: 1px solid rgba(255, 255, 255, 0.11);
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.035);
+        font-size: 0.92em;
+        font-style: normal;
+        line-height: 1.25;
+        letter-spacing: 0.01em;
+        transform: translateY(-0.015em);
+      }
+
+      .waiting-line-base .waiting-tool {
+        color: var(--text-2);
+      }
+
+      .waiting-line-light .waiting-tool {
+        color: inherit;
+        border-color: rgba(255, 255, 255, 0.52);
+        background: rgba(255, 255, 255, 0.08);
       }
 
       .command-panel {
@@ -2688,6 +2785,9 @@
         var instructionMascotState = {
           timerId: 0,
         };
+        var waitingMascotState = {
+          frameId: 0,
+        };
 
         var binagotchyBrowserBindingsBound = false;
         var agentsFanBindingsBound = false;
@@ -2700,6 +2800,7 @@
         var INITIAL_TOKEN_STATS_LAYOUT =
           "__catdeskInitialTokenStatsLayoutPlaceholder__";
         var INITIAL_TOOL_NAME = "__catdeskInitialToolNamePlaceholder__";
+        var INITIAL_MASCOT_OUTLINE = __catdeskInitialMascotOutlinePlaceholder__;
         var WIDGET_PAYLOAD_META_KEY = "catdesk/widgetPayload";
         var TOKEN_STATS_LAYOUT_STORAGE_KEY = "catdesk.tokenStatsLayout";
         var tokenStatsLayoutSetting = initialTokenStatsLayout();
@@ -4325,11 +4426,19 @@
           );
         }
 
+        function stopWaitingMascotAnimation() {
+          if (waitingMascotState.frameId) {
+            window.cancelAnimationFrame(waitingMascotState.frameId);
+            waitingMascotState.frameId = 0;
+          }
+        }
+
         function stopInstructionMascotAnimation() {
           if (instructionMascotState.timerId) {
             window.clearTimeout(instructionMascotState.timerId);
             instructionMascotState.timerId = 0;
           }
+          stopWaitingMascotAnimation();
         }
 
         function mascotPaletteIndex(symbol) {
@@ -4386,6 +4495,178 @@
             }
           }
           return html.join("");
+        }
+
+        function renderWaitingMascot(outline, variant) {
+          if (!outline || !Array.isArray(outline.points) || outline.points.length < 2) return "";
+          var dataAttribute =
+            variant === "light" ? "data-waiting-mascot-light" : "data-waiting-mascot-base";
+          return (
+            '<span class="waiting-mascot" aria-hidden="true">' +
+            '<canvas class="waiting-mascot-canvas" ' + dataAttribute + '></canvas>' +
+            "</span>"
+          );
+        }
+
+        function drawWaitingMascot(canvas, outline, light) {
+          var cssWidth = canvas.clientWidth || 17;
+          var cssHeight = canvas.clientHeight || 17;
+          var dpr = Math.min(window.devicePixelRatio || 1, 2);
+          var pixelWidth = Math.max(1, Math.round(cssWidth * dpr));
+          var pixelHeight = Math.max(1, Math.round(cssHeight * dpr));
+          if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+          }
+          var ctx = canvas.getContext("2d");
+          if (!ctx) return;
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+          var points = outline.points.map(function (point) {
+            return { x: point[0], y: point[1] };
+          });
+          var minX = outline.width;
+          var minY = outline.height;
+          var maxX = 0;
+          var maxY = 0;
+          points.forEach(function (point) {
+            minX = Math.min(minX, point.x);
+            minY = Math.min(minY, point.y);
+            maxX = Math.max(maxX, point.x);
+            maxY = Math.max(maxY, point.y);
+          });
+          var spanX = Math.max(1, maxX - minX + 1);
+          var spanY = Math.max(1, maxY - minY + 1);
+          var padding = 0.65;
+          var scale = Math.min(
+            (cssWidth - padding * 2) / spanX,
+            (cssHeight - padding * 2) / spanY,
+          );
+          var originX = (cssWidth - spanX * scale) / 2 - minX * scale;
+          var originY = (cssHeight - spanY * scale) / 2 - minY * scale;
+          var color = window.getComputedStyle(canvas).color || "rgb(255, 255, 255)";
+
+          function mapped(point) {
+            return {
+              x: originX + (point.x + 0.5) * scale,
+              y: originY + (point.y + 0.5) * scale,
+            };
+          }
+
+          function isLocalPair(a, b) {
+            return Math.abs(a.x - b.x) <= 2 && Math.abs(a.y - b.y) <= 2;
+          }
+
+          ctx.save();
+          ctx.globalAlpha = light ? 1 : 0.9;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = light ? 1.02 : 0.86;
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          ctx.beginPath();
+          for (var i = 0; i < points.length; i += 1) {
+            var point = mapped(points[i]);
+            if (i === 0 || !isLocalPair(points[i - 1], points[i])) {
+              ctx.moveTo(point.x, point.y);
+            } else {
+              ctx.lineTo(point.x, point.y);
+            }
+          }
+          if (isLocalPair(points[points.length - 1], points[0])) {
+            var firstPoint = mapped(points[0]);
+            ctx.lineTo(firstPoint.x, firstPoint.y);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        function startWaitingMascotAnimation(root, outline) {
+          if (!root || !outline || !Array.isArray(outline.points)) return;
+          var line = root.querySelector("[data-waiting-line]");
+          var lightLayer = root.querySelector("[data-waiting-line-light]");
+          var baseCanvas = root.querySelector("[data-waiting-mascot-base]");
+          var lightCanvas = root.querySelector("[data-waiting-mascot-light]");
+          if (
+            !line ||
+            !lightLayer ||
+            !baseCanvas ||
+            !lightCanvas ||
+            outline.points.length < 2
+          ) {
+            return;
+          }
+          stopInstructionMascotAnimation();
+          drawWaitingMascot(baseCanvas, outline, false);
+          drawWaitingMascot(lightCanvas, outline, true);
+
+          var bandWidth = 26;
+
+          function hideLight() {
+            lightLayer.style.opacity = "0";
+            lightLayer.style.webkitMaskPosition = -bandWidth + "px 0";
+            lightLayer.style.maskPosition = -bandWidth + "px 0";
+          }
+
+          function setSweep(progress, intensity) {
+            var width = Math.max(1, line.offsetWidth);
+            var p = Math.max(0, Math.min(1, progress));
+            var x = -bandWidth + p * (width + bandWidth);
+            lightLayer.style.opacity = String(Math.max(0, Math.min(1, intensity)));
+            lightLayer.style.webkitMaskPosition = x.toFixed(2) + "px 0";
+            lightLayer.style.maskPosition = x.toFixed(2) + "px 0";
+          }
+
+          var reducedMotion =
+            window.matchMedia &&
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          if (reducedMotion) {
+            hideLight();
+            return;
+          }
+
+          var startedAt = performance.now();
+          var sweepStartedAt = startedAt + 320;
+          var sweepMs = 1650;
+          var idleMs = 720;
+          var intensity = 0.9;
+
+          function scheduleNextSweep(now) {
+            sweepStartedAt = now;
+            sweepMs = 1650 * (0.92 + Math.random() * 0.16);
+            idleMs = 500 + Math.random() * 400;
+            intensity = 0.86 + Math.random() * 0.08;
+          }
+
+          function tick(now) {
+            if (!document.documentElement.contains(line)) {
+              waitingMascotState.frameId = 0;
+              return;
+            }
+
+            if (now < sweepStartedAt) {
+              hideLight();
+              waitingMascotState.frameId = window.requestAnimationFrame(tick);
+              return;
+            }
+
+            var elapsed = now - sweepStartedAt;
+            if (elapsed <= sweepMs) {
+              var warmup = Math.min(1, Math.max(0, (now - startedAt) / 360));
+              var energy = warmup * warmup * (3 - 2 * warmup);
+              setSweep(elapsed / sweepMs, intensity * energy);
+            } else if (elapsed <= sweepMs + idleMs) {
+              hideLight();
+            } else {
+              scheduleNextSweep(now);
+              setSweep(0, intensity);
+            }
+
+            waitingMascotState.frameId = window.requestAnimationFrame(tick);
+          }
+
+          hideLight();
+          waitingMascotState.frameId = window.requestAnimationFrame(tick);
         }
 
         function renderInstructionHero(current) {
@@ -7200,7 +7481,7 @@
           window.requestAnimationFrame(autoScrollToFirstChange);
         }
 
-        function renderLoading(text) {
+        function renderLoading(toolName) {
           var root = document.getElementById("root");
           if (!root) return;
           stopTokenRollAnimation();
@@ -7208,12 +7489,34 @@
           tokenRollState.signature = "";
           var tokenStatsLayout = currentLoadingTokenStatsLayout();
           var tokenPanelHtml = renderLoadingTokenPanel(tokenStatsLayout);
+          var loadingMascotOutline = INITIAL_MASCOT_OUTLINE;
+          var loadingMascotBaseHtml = renderWaitingMascot(loadingMascotOutline, "base");
+          var loadingMascotLightHtml = renderWaitingMascot(loadingMascotOutline, "light");
+          var hasToolName = typeof toolName === "string" && toolName.length > 0;
+          var waitingCopyHtml = hasToolName
+            ? 'Waiting for <span class="waiting-tool">' +
+              esc(toolName) +
+              "</span> tool output..."
+            : "Waiting for tool output...";
           var mainContentHtml =
             '<div class="main-stack">' +
             '<section class="section">' +
             '<div class="section-body">' +
             '<div class="empty loading">' +
-            esc(text) +
+            '<span class="waiting-line" data-waiting-line>' +
+            '<span class="waiting-line-base">' +
+            loadingMascotBaseHtml +
+            '<span class="waiting-copy">' +
+            waitingCopyHtml +
+            "</span>" +
+            "</span>" +
+            '<span class="waiting-line-light" data-waiting-line-light aria-hidden="true">' +
+            loadingMascotLightHtml +
+            '<span class="waiting-copy">' +
+            waitingCopyHtml +
+            "</span>" +
+            "</span>" +
+            "</span>" +
             "</div>" +
             "</div>" +
             "</section>" +
@@ -7229,6 +7532,7 @@
           root.innerHTML =
             '<section class="root">' + contentHtml + "</section>";
           playLoadingTokenAnimation(root);
+          startWaitingMascotAnimation(root, loadingMascotOutline);
         }
 
         function renderPayloadError(title, detail, diagnostics) {
@@ -7359,11 +7663,7 @@
           { passive: true },
         );
 
-        renderLoading(
-          INITIAL_TOOL_NAME
-            ? "Waiting for " + INITIAL_TOOL_NAME + " output..."
-            : "Waiting for tool output...",
-        );
+        renderLoading(INITIAL_TOOL_NAME);
         var initialToolResponseMetadata = currentToolResponseMetadata();
         if (hasPureMetaPayload(initialToolResponseMetadata)) {
           applyPayload(initialToolResponseMetadata);

@@ -33,6 +33,7 @@ const WIDGET_RESOURCE_URI_PLACEHOLDER: &str = "__catdeskWidgetResourceUriPlaceho
 const INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER: &str =
     "__catdeskInitialTokenStatsLayoutPlaceholder__";
 const INITIAL_TOOL_NAME_PLACEHOLDER: &str = "__catdeskInitialToolNamePlaceholder__";
+const INITIAL_MASCOT_OUTLINE_PLACEHOLDER: &str = "__catdeskInitialMascotOutlinePlaceholder__";
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
 const CATDESK_INSTRUCTION_REQUIRED_MESSAGE: &str =
     "Call catdesk_instruction successfully before using any other CatDesk tool.";
@@ -170,7 +171,7 @@ pub async fn handle_request(
             }
         }
         "resources/list" => Some(handle_resources_list(req, public_base_url)),
-        "resources/read" => Some(handle_resources_read(req, public_base_url)),
+        "resources/read" => Some(handle_resources_read(req, public_base_url, mascot_seed)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
         _ => Some(JsonRpcResponse::error(
             req.id.clone(),
@@ -264,7 +265,10 @@ fn initial_tool_name_from_resource_uri(resource_uri: &str) -> &str {
     query_param_value(resource_uri, "toolName").unwrap_or_default()
 }
 
-fn render_widget_html(resource_uri: &str) -> String {
+fn render_widget_html(resource_uri: &str, mascot_seed: u64) -> String {
+    let initial_mascot_outline =
+        serde_json::to_string(&mascot::build_widget_mascot_outline(mascot_seed))
+            .unwrap_or_else(|_| "{}".to_string());
     CATDESK_WIDGET_HTML
         .replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
         .replace(
@@ -275,16 +279,21 @@ fn render_widget_html(resource_uri: &str) -> String {
             INITIAL_TOOL_NAME_PLACEHOLDER,
             initial_tool_name_from_resource_uri(resource_uri),
         )
+        .replace(INITIAL_MASCOT_OUTLINE_PLACEHOLDER, &initial_mascot_outline)
 }
 
-fn handle_resources_read(req: &JsonRpcRequest, public_base_url: Option<&str>) -> JsonRpcResponse {
+fn handle_resources_read(
+    req: &JsonRpcRequest,
+    public_base_url: Option<&str>,
+    mascot_seed: u64,
+) -> JsonRpcResponse {
     let uri = req
         .params
         .get("uri")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let text = if uri == UI_TEMPLATE_URI || uri.starts_with(&format!("{UI_TEMPLATE_URI}?")) {
-        render_widget_html(uri)
+        render_widget_html(uri, mascot_seed)
     } else {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
     };
@@ -5339,6 +5348,7 @@ hello world"
         let resource_resp = handle_resources_read(
             &resources_read_request(UI_TEMPLATE_URI),
             Some("https://example.ngrok.app"),
+            1,
         );
         let ui_meta = resource_resp
             .result
@@ -5367,6 +5377,8 @@ hello world"
         assert!(!text.contains(INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER));
         assert!(text.contains("var INITIAL_TOOL_NAME = \"\";"));
         assert!(!text.contains(INITIAL_TOOL_NAME_PLACEHOLDER));
+        assert!(text.contains("var INITIAL_MASCOT_OUTLINE = {"));
+        assert!(!text.contains(INITIAL_MASCOT_OUTLINE_PLACEHOLDER));
         assert_eq!(
             ui_meta
                 .get("csp")

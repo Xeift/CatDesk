@@ -73,6 +73,14 @@ pub struct WidgetMascot {
     pub sequence: Vec<WidgetMascotSequenceStep>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WidgetMascotOutline {
+    pub width: u32,
+    pub height: u32,
+    pub points: Vec<[u32; 2]>,
+}
+
 #[derive(Clone)]
 pub struct TuiMascotCell {
     pub glyph: char,
@@ -142,6 +150,149 @@ pub fn build_widget_mascot(seed: u64) -> WidgetMascot {
     let (frames, sequence, spirit_hero_background) = mascot_widget_source(seed);
     let cropped = crop_frames(&frames);
     build_widget_mascot_from_frames(&cropped, sequence, spirit_hero_background)
+}
+
+pub fn build_widget_mascot_outline(_seed: u64) -> WidgetMascotOutline {
+    const WAITING_OUTLINE_SEED: u64 = 1;
+    let frame = binagotchy_gen::create_character(
+        Some(WAITING_OUTLINE_SEED),
+        MASCOT_CANVAS,
+        MASCOT_UPSCALE,
+        "normal",
+        "none",
+        0.0,
+        openness_value(10),
+        1,
+    )
+    .0;
+    let cropped = crop_frames(&[frame]);
+    let Some(frame) = cropped.first() else {
+        return WidgetMascotOutline {
+            width: 0,
+            height: 0,
+            points: Vec::new(),
+        };
+    };
+    let (width, height) = frame.dimensions();
+    if width == 0 || height == 0 {
+        return WidgetMascotOutline {
+            width,
+            height,
+            points: Vec::new(),
+        };
+    }
+
+    let width_usize = width as usize;
+    let height_usize = height as usize;
+    let mut occupied = vec![vec![false; width_usize]; height_usize];
+    for (y, row) in occupied.iter_mut().enumerate() {
+        for (x, cell) in row.iter_mut().enumerate() {
+            *cell = frame.get_pixel(x as u32, y as u32)[3] > 0;
+        }
+    }
+
+    let mut boundary = vec![vec![false; width_usize]; height_usize];
+    let mut boundary_count = 0usize;
+    for y in 0..height_usize {
+        for x in 0..width_usize {
+            if !occupied[y][x] {
+                continue;
+            }
+            let exposed = x == 0
+                || y == 0
+                || x + 1 == width_usize
+                || y + 1 == height_usize
+                || !occupied[y][x - 1]
+                || !occupied[y][x + 1]
+                || !occupied[y - 1][x]
+                || !occupied[y + 1][x];
+            if exposed {
+                boundary[y][x] = true;
+                boundary_count += 1;
+            }
+        }
+    }
+    if boundary_count == 0 {
+        return WidgetMascotOutline {
+            width,
+            height,
+            points: Vec::new(),
+        };
+    }
+
+    let center_x = width_usize / 2;
+    let start = (0..height_usize)
+        .flat_map(|y| (0..width_usize).map(move |x| (x, y)))
+        .filter(|&(x, y)| boundary[y][x])
+        .min_by_key(|&(x, y)| (y, x.abs_diff(center_x), x))
+        .expect("non-empty widget mascot boundary must have a start pixel");
+
+    const OFFSETS: [(isize, isize); 8] = [
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+    ];
+    let mut visited = vec![vec![false; width_usize]; height_usize];
+    let mut points = Vec::with_capacity(boundary_count);
+    let mut current = start;
+
+    while points.len() < boundary_count {
+        let (x, y) = current;
+        if !visited[y][x] {
+            visited[y][x] = true;
+            points.push([x as u32, y as u32]);
+        }
+
+        let adjacent = OFFSETS.into_iter().find_map(|(dx, dy)| {
+            let next_x = x as isize + dx;
+            let next_y = y as isize + dy;
+            if next_x < 0
+                || next_y < 0
+                || next_x >= width_usize as isize
+                || next_y >= height_usize as isize
+            {
+                return None;
+            }
+            let next = (next_x as usize, next_y as usize);
+            (boundary[next.1][next.0] && !visited[next.1][next.0]).then_some(next)
+        });
+        if let Some(next) = adjacent {
+            current = next;
+            continue;
+        }
+
+        let mut nearest = None;
+        let mut nearest_distance = usize::MAX;
+        for next_y in 0..height_usize {
+            for next_x in 0..width_usize {
+                if !boundary[next_y][next_x] || visited[next_y][next_x] {
+                    continue;
+                }
+                let dx = x.abs_diff(next_x);
+                let dy = y.abs_diff(next_y);
+                let distance = dx * dx + dy * dy;
+                if distance < nearest_distance {
+                    nearest = Some((next_x, next_y));
+                    nearest_distance = distance;
+                }
+            }
+        }
+        let Some(next) = nearest else {
+            break;
+        };
+        current = next;
+    }
+
+    WidgetMascotOutline {
+        width,
+        height,
+        points,
+    }
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -1328,10 +1479,24 @@ fn build_tui_cell(top: image::Rgba<u8>, bottom: image::Rgba<u8>) -> TuiMascotCel
 mod tests {
     use super::{
         WIDGET_MASCOT_ALPHABET, archive_startup_mascot_to_root, build_widget_mascot,
-        mascot_headwear_preference, mascot_use_spirit, openness_value,
+        build_widget_mascot_outline, mascot_headwear_preference, mascot_use_spirit, openness_value,
         save_archived_binagotchy_folder_from_roots,
     };
     use crate::binagotchy_gen;
+
+    #[test]
+    fn widget_mascot_outline_is_non_empty_and_in_bounds() {
+        let outline = build_widget_mascot_outline(1);
+        assert!(outline.width > 0);
+        assert!(outline.height > 0);
+        assert!(outline.points.len() > 16);
+        assert!(
+            outline
+                .points
+                .iter()
+                .all(|[x, y]| *x < outline.width && *y < outline.height)
+        );
+    }
 
     #[test]
     fn widget_mascot_palette_fits_alphabet() {
