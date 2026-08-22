@@ -10,6 +10,7 @@ mod mcp;
 mod ngrok;
 mod process_runner;
 mod server;
+mod startup;
 mod state;
 mod theme;
 mod workspace_tools;
@@ -1040,6 +1041,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout().execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
+
+    let (startup_theme, startup_mascot) = {
+        let app = state.lock().await;
+        (app.current_theme(), app.mascot.clone())
+    };
+    startup::run_startup_intro(&mut terminal, startup_theme, &startup_mascot).await?;
 
     let result = run_app(&mut terminal, state.clone()).await;
 
