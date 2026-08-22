@@ -133,6 +133,41 @@ fn request_tool_name(req: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn request_tool_arguments(req: &Value) -> Option<&serde_json::Map<String, Value>> {
+    req.get("params")
+        .and_then(|v| v.get("arguments"))
+        .and_then(Value::as_object)
+}
+
+fn flow_file_name(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    let trimmed = trimmed.trim_end_matches(|c| c == '/' || c == '\\');
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+fn flow_argument_summary(tool: &str, arguments: &serde_json::Map<String, Value>) -> Option<String> {
+    let (key, file_name_only) = match tool {
+        "run_command" | "start_command" => ("command", false),
+        "poll_command" | "cancel_command" => ("job_id", false),
+        "read" | "write" | "edit" | "delete" => ("path", true),
+        "search" => ("pattern", false),
+        _ => return None,
+    };
+    let value = arguments.get(key)?.as_str()?;
+    if file_name_only {
+        return flow_file_name(value);
+    }
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!compact.is_empty()).then_some(compact)
+}
+
 fn request_resource_uri(req: &Value) -> Option<&str> {
     req.get("params")
         .and_then(|v| v.get("uri"))
@@ -168,6 +203,11 @@ fn request_flow_label(req: &Value) -> String {
         .unwrap_or("<invalid-method>");
     if method == "tools/call" {
         let tool = request_tool_name(req).unwrap_or_else(|| "?".into());
+        if let Some(summary) = request_tool_arguments(req)
+            .and_then(|arguments| flow_argument_summary(&tool, arguments))
+        {
+            return format!("tools/call:{tool} › {summary}");
+        }
         return format!("tools/call:{tool}");
     }
     if method == "resources/read" {
@@ -769,6 +809,72 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::{Mutex, mpsc::unbounded_channel};
+
+    #[test]
+    fn tool_flow_label_includes_selected_argument_summary() {
+        let run_command = json!({
+            "method": "tools/call",
+            "params": {
+                "name": "run_command",
+                "arguments": { "command": "cargo   build\n--release" }
+            }
+        });
+        assert_eq!(
+            request_flow_label(&run_command),
+            "tools/call:run_command › cargo build --release"
+        );
+
+        let read = json!({
+            "method": "tools/call",
+            "params": {
+                "name": "read",
+                "arguments": { "path": "src/widget/catdesk_dashboard.html" }
+            }
+        });
+        assert_eq!(
+            request_flow_label(&read),
+            "tools/call:read › catdesk_dashboard.html"
+        );
+
+        let edit = json!({
+            "method": "tools/call",
+            "params": {
+                "name": "edit",
+                "arguments": { "path": "src\\widget\\catdesk_dashboard.html" }
+            }
+        });
+        assert_eq!(
+            request_flow_label(&edit),
+            "tools/call:edit › catdesk_dashboard.html"
+        );
+
+        let search = json!({
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": { "pattern": "FLOW_ANIM_CELLS" }
+            }
+        });
+        assert_eq!(
+            request_flow_label(&search),
+            "tools/call:search › FLOW_ANIM_CELLS"
+        );
+    }
+
+    #[test]
+    fn tool_flow_label_keeps_plain_name_for_unlisted_arguments() {
+        let instruction = json!({
+            "method": "tools/call",
+            "params": {
+                "name": "catdesk_instruction",
+                "arguments": {}
+            }
+        });
+        assert_eq!(
+            request_flow_label(&instruction),
+            "tools/call:catdesk_instruction"
+        );
+    }
 
     #[test]
     fn summarize_initialize_response_includes_protocol_version() {

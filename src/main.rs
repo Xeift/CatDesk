@@ -229,7 +229,7 @@ fn flow_lane_spans(
     };
 
     if lit_count == 0 || direction.is_none() {
-        return vec![Span::styled("-".repeat(CELLS), unlit), Span::raw(" ")];
+        return vec![Span::styled("─".repeat(CELLS), unlit), Span::raw(" ")];
     }
 
     let direction = direction.unwrap_or(FlowDirection::Forward);
@@ -240,7 +240,7 @@ fn flow_lane_spans(
             FlowDirection::Backward => i >= CELLS.saturating_sub(lit_count),
         };
         let style = if lit_here { lit } else { unlit };
-        spans.push(Span::styled("-".to_string(), style));
+        spans.push(Span::styled("─".to_string(), style));
     }
     spans.push(Span::raw(" "));
     spans
@@ -728,7 +728,7 @@ fn flow_bootstrap_status_lines(
     } else {
         "Initialize connector in progress"
     };
-    let call_text = trim_line(&format!("call {action_label}"), FLOW_ROW_CELLS);
+    let call_text = trim_line(&action_label, FLOW_ROW_CELLS);
     let call_offset = flow_call_offset(&call_text);
 
     let mut lines = vec![
@@ -4288,7 +4288,7 @@ fn draw_ui(
                 .take(visible_flow_slots)
             {
                 let latest_action = latest_flow_action(flow);
-                let call_text = trim_line(&format!("call {latest_action}"), FLOW_ROW_CELLS);
+                let call_text = trim_line(&latest_action, FLOW_ROW_CELLS);
                 let call_offset = flow_call_offset(&call_text);
                 status_lines.push(Line::from(vec![
                     Span::styled("    ", Style::default().fg(palette.muted_fg)),
