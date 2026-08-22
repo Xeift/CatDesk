@@ -34,6 +34,10 @@ const INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER: &str =
     "__catdeskInitialTokenStatsLayoutPlaceholder__";
 const INITIAL_TOOL_NAME_PLACEHOLDER: &str = "__catdeskInitialToolNamePlaceholder__";
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
+const CATDESK_INSTRUCTION_REQUIRED_MESSAGE: &str =
+    "Call catdesk_instruction successfully before using any other CatDesk tool.";
+const CATDESK_INSTRUCTION_REQUIRED_WIDGET_MESSAGE: &str = "ChatGPT didn’t call catdesk_instruction. CatDesk is asking it to call it now. You can ignore this message. It will retry automatically.";
+const CATDESK_INSTRUCTION_REQUIRED_CODE: &str = "CATDESK_INSTRUCTION_REQUIRED";
 
 // ── JSON-RPC types ──────────────────────────────────────────
 
@@ -116,6 +120,7 @@ pub async fn handle_request(
     mode: Mode,
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
+    catdesk_instruction_called: bool,
     command_jobs: &CommandJobManager,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> Option<JsonRpcResponse> {
@@ -144,19 +149,26 @@ pub async fn handle_request(
         }
         m if m.starts_with("notifications/") => None,
         "tools/list" => Some(handle_tools_list(req, mode, tool_mode, devtools).await),
-        "tools/call" => Some(
-            handle_tools_call(
-                req,
-                workspace_root,
-                mascot_seed,
-                mode,
-                tool_mode,
-                set_catdesk_as_co_author,
-                command_jobs,
-                devtools,
-            )
-            .await,
-        ),
+        "tools/call" => {
+            let tool_name = tool_name_from_request(req);
+            if tool_name != "catdesk_instruction" && !catdesk_instruction_called {
+                Some(catdesk_instruction_required_response(req))
+            } else {
+                Some(
+                    handle_tools_call(
+                        req,
+                        workspace_root,
+                        mascot_seed,
+                        mode,
+                        tool_mode,
+                        set_catdesk_as_co_author,
+                        command_jobs,
+                        devtools,
+                    )
+                    .await,
+                )
+            }
+        }
         "resources/list" => Some(handle_resources_list(req, public_base_url)),
         "resources/read" => Some(handle_resources_read(req, public_base_url)),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
@@ -507,6 +519,19 @@ fn ensure_local_tool_output_schema(tool: &mut Value) {
     tool_obj.insert("outputSchema".to_string(), schema);
 }
 
+fn catdesk_instruction_tool_descriptor() -> Value {
+    json!({
+        "name": "catdesk_instruction",
+        "title": "Get usage instructions",
+        "description": "Read CatDesk operating guidance. You must call this tool successfully once after CatDesk starts before calling any other CatDesk tool.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        },
+        "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
+    })
+}
+
 async fn handle_tools_list(
     req: &JsonRpcRequest,
     mode: Mode,
@@ -595,16 +620,7 @@ async fn handle_tools_list(
             }));
         }
 
-        tools.push(json!({
-            "name": "catdesk_instruction",
-            "title": "Get usage instructions",
-            "description": "Read CatDesk operating guidance. Call this first if you are unsure which tool to use. Prefer dedicated tools over run_command whenever possible.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            },
-            "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
-        }));
+        tools.push(catdesk_instruction_tool_descriptor());
         tools.push(json!({
             "name": "read",
             "title": "Read file",
@@ -719,6 +735,10 @@ async fn handle_tools_list(
         }
     }
 
+    if !mode.computer_enabled() && mode.browser_enabled() {
+        tools.push(catdesk_instruction_tool_descriptor());
+    }
+
     // Browser tools — get from devtools bridge
     if mode.browser_enabled() {
         if let Some(bridge) = devtools {
@@ -765,8 +785,10 @@ async fn handle_tools_call(
     );
 
     let mut response = {
+        if tool_name == "catdesk_instruction" {
+            handle_catdesk_instruction(req, workspace_root, mascot_seed, mode, tool_mode)
         // Local computer tools
-        if mode.computer_enabled() {
+        } else if mode.computer_enabled() {
             if matches!(
                 tool_name.as_str(),
                 "run_command" | "start_command" | "poll_command" | "cancel_command"
@@ -796,13 +818,6 @@ async fn handle_tools_call(
                 }
             } else {
                 match tool_name.as_str() {
-                    "catdesk_instruction" => handle_catdesk_instruction(
-                        req,
-                        workspace_root,
-                        mascot_seed,
-                        mode,
-                        tool_mode,
-                    ),
                     "read" => handle_read_file(req, workspace_root),
                     "search" => handle_search_text(req, workspace_root),
                     _ => {
@@ -1531,6 +1546,46 @@ fn tool_error_response_with_structured(
 
 fn tool_error_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse {
     tool_response(req, text, None, true)
+}
+
+fn catdesk_instruction_required_widget_payload(req: &JsonRpcRequest) -> Value {
+    let tool_name = tool_name_from_request(req);
+    let mut payload = base_widget_payload("tool_call", &tool_name, "failed", Some(&tool_name));
+    payload.insert("payloadKind".to_string(), json!("instruction_required"));
+    payload.insert(
+        "detail".to_string(),
+        json!(CATDESK_INSTRUCTION_REQUIRED_WIDGET_MESSAGE),
+    );
+    payload.insert("changedFiles".to_string(), json!([]));
+    payload.insert("hasChanges".to_string(), json!(false));
+    Value::Object(payload)
+}
+
+fn catdesk_instruction_required_response(req: &JsonRpcRequest) -> JsonRpcResponse {
+    let tool_name = tool_name_from_request(req);
+    let structured = json!({
+        "toolName": tool_name,
+        "message": CATDESK_INSTRUCTION_REQUIRED_MESSAGE,
+        "success": false,
+        "errorCode": CATDESK_INSTRUCTION_REQUIRED_CODE,
+    });
+    let mut response = tool_success_response_with_structured(
+        req,
+        CATDESK_INSTRUCTION_REQUIRED_MESSAGE.into(),
+        structured,
+    );
+    if let Some(result) = response.result.as_mut() {
+        attach_widget_payload_meta(result, catdesk_instruction_required_widget_payload(req));
+    }
+    if let Some(result) = response.result.take() {
+        response.result = Some(enrich_tool_result(req, result, None));
+    }
+    if let Some(result) = response.result.as_mut() {
+        let turn_token_usage = estimate_turn_token_usage(req, &tool_name, result);
+        attach_turn_token_usage(result, &turn_token_usage);
+        attach_tool_call_count(result, 1);
+    }
+    response
 }
 
 fn read_only_blocked_response(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse {
@@ -3858,6 +3913,193 @@ mod tests {
                 "output template should include initial tool name for {name}: {output_template}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn browser_only_tools_list_exposes_required_catdesk_instruction() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+
+        let response = handle_tools_list(&req, Mode::Browser, ToolMode::MultiTools, &None).await;
+        let tools = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools");
+        assert_eq!(tools.len(), 1);
+        let instruction = &tools[0];
+        assert_eq!(
+            instruction.get("name").and_then(Value::as_str),
+            Some("catdesk_instruction")
+        );
+        assert!(
+            instruction
+                .get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| description.contains("must call this tool successfully"))
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_request_requires_instruction_before_other_tools() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-instruction-gate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("notes.txt"), "hello\n").expect("write file");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request("read", json!({ "path": "notes.txt" }));
+
+        let blocked = handle_request(
+            &req,
+            &workspace_root_str,
+            1,
+            None,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await
+        .expect("blocked tool response");
+        assert_eq!(
+            blocked
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            None
+        );
+        let blocked_structured = blocked
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("missing blocked structured content");
+        assert_eq!(
+            blocked_structured.get("success").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            blocked_structured.get("errorCode").and_then(Value::as_str),
+            Some(CATDESK_INSTRUCTION_REQUIRED_CODE)
+        );
+        assert_eq!(
+            blocked_structured.get("message").and_then(Value::as_str),
+            Some(CATDESK_INSTRUCTION_REQUIRED_MESSAGE)
+        );
+        assert!(result_text(&blocked).contains("Call catdesk_instruction successfully"));
+        let blocked_widget = blocked
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing instruction-required widget payload");
+        assert_eq!(
+            blocked_widget.get("payloadKind").and_then(Value::as_str),
+            Some("instruction_required")
+        );
+        assert_eq!(
+            blocked_widget.get("title").and_then(Value::as_str),
+            Some("read")
+        );
+        assert_eq!(
+            blocked_widget.get("state").and_then(Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
+            blocked_widget.get("toolName").and_then(Value::as_str),
+            Some("read")
+        );
+        assert_eq!(
+            blocked_widget.get("title").and_then(Value::as_str),
+            Some("read")
+        );
+        assert!(blocked_widget.get("call").is_none());
+        assert_eq!(
+            blocked_widget.get("detail").and_then(Value::as_str),
+            Some(CATDESK_INSTRUCTION_REQUIRED_WIDGET_MESSAGE)
+        );
+        assert_eq!(
+            blocked_widget.get("hasChanges").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let allowed = handle_request(
+            &req,
+            &workspace_root_str,
+            1,
+            None,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            true,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await
+        .expect("allowed tool response");
+        assert_eq!(
+            allowed
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            None
+        );
+        assert_eq!(result_text(&allowed), "hello\n");
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn instruction_required_widget_uses_dedicated_detail_renderer() {
+        assert!(CATDESK_WIDGET_HTML.contains("payloadKind === \"instruction_required\""));
+        assert!(CATDESK_WIDGET_HTML.contains("renderInstructionRequiredPanel(view)"));
+        assert!(CATDESK_WIDGET_HTML.contains("esc(current.toolName)"));
+        assert!(CATDESK_WIDGET_HTML.contains("instruction-required-message"));
+        assert!(
+            CATDESK_WIDGET_HTML.contains("!isInstructionRequired && (view.call || view.detail)")
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_only_mode_can_call_catdesk_instruction() {
+        let workspace_root = std::env::temp_dir().join(format!(
+            "catdesk-mcp-browser-instruction-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request("catdesk_instruction", json!({}));
+
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Browser,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            None
+        );
+        assert!(result_text(&response).contains("CatDesk usage instructions"));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
     }
 
     #[tokio::test]

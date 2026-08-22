@@ -8,7 +8,10 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::command_jobs::CommandJobManager;
@@ -29,6 +32,7 @@ struct ServerState {
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
     command_jobs: CommandJobManager,
     ui_events: UnboundedSender<ServerUiEvent>,
+    catdesk_instruction_called: Arc<AtomicBool>,
 }
 
 /// Build the axum router.
@@ -44,6 +48,7 @@ pub fn router(
         devtools,
         command_jobs,
         ui_events,
+        catdesk_instruction_called: Arc::new(AtomicBool::new(false)),
     };
     let secret_prefix = mcp_path
         .strip_suffix("/mcp")
@@ -1181,6 +1186,7 @@ mod tests {
             devtools: None,
             command_jobs: command_jobs.clone(),
             ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
         };
         let command = if cfg!(windows) {
             "Start-Sleep -Milliseconds 250; Write-Output http-job-done"
@@ -1276,6 +1282,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catdesk_instruction_unlocks_tools_until_process_restart() {
+        let workspace_root = unique_temp_path("catdesk-instruction-gate-workspace");
+        let config_root = unique_temp_path("catdesk-instruction-gate-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+        std::fs::write(workspace_root.join("hello.txt"), "hello world\n").expect("write file");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let instruction_called = Arc::new(AtomicBool::new(false));
+        let server_state = ServerState {
+            app: app_state,
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: instruction_called.clone(),
+        };
+
+        let blocked_response = post_mcp(
+            State(server_state.clone()),
+            tool_call_body("read", json!({ "path": "hello.txt" })),
+        )
+        .await;
+        assert_eq!(blocked_response.status(), StatusCode::OK);
+        let blocked_body = to_bytes(blocked_response.into_body(), usize::MAX)
+            .await
+            .expect("read blocked response body");
+        let blocked_payload: Value =
+            serde_json::from_slice(&blocked_body).expect("parse blocked response");
+        assert_eq!(
+            blocked_payload
+                .get("result")
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            None
+        );
+        assert_eq!(
+            blocked_payload
+                .get("result")
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("success"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            blocked_payload
+                .get("result")
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("errorCode"))
+                .and_then(Value::as_str),
+            Some("CATDESK_INSTRUCTION_REQUIRED")
+        );
+        assert!(!instruction_called.load(Ordering::Acquire));
+
+        let instruction_response = post_mcp(
+            State(server_state.clone()),
+            tool_call_body("catdesk_instruction", json!({})),
+        )
+        .await;
+        assert_eq!(instruction_response.status(), StatusCode::OK);
+        let instruction_body = to_bytes(instruction_response.into_body(), usize::MAX)
+            .await
+            .expect("read instruction response body");
+        let instruction_payload: Value =
+            serde_json::from_slice(&instruction_body).expect("parse instruction response");
+        assert_ne!(
+            instruction_payload
+                .get("result")
+                .and_then(|result| result.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(instruction_called.load(Ordering::Acquire));
+
+        let allowed_response = post_mcp(
+            State(server_state),
+            tool_call_body("read", json!({ "path": "hello.txt" })),
+        )
+        .await;
+        assert_eq!(allowed_response.status(), StatusCode::OK);
+        let allowed_body = to_bytes(allowed_response.into_body(), usize::MAX)
+            .await
+            .expect("read allowed response body");
+        let allowed_payload: Value =
+            serde_json::from_slice(&allowed_body).expect("parse allowed response");
+        assert_eq!(
+            allowed_payload
+                .get("result")
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("text"))
+                .and_then(Value::as_str),
+            Some("hello world\n")
+        );
+
+        let _ = std::fs::remove_file(workspace_root.join("hello.txt"));
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
+    #[tokio::test]
     async fn post_mcp_accumulates_usage_from_widget_payload_meta() {
         let workspace_root = unique_temp_path("catdesk-post-mcp-workspace");
         let config_root = unique_temp_path("catdesk-post-mcp-config");
@@ -1297,6 +1411,7 @@ mod tests {
             devtools: None,
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
         };
 
         let response = post_mcp(
@@ -1444,6 +1559,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
         mode,
         tool_mode,
         set_catdesk_as_co_author,
+        s.catdesk_instruction_called.load(Ordering::Acquire),
         &s.command_jobs,
         &s.devtools,
     )
@@ -1451,6 +1567,14 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
     {
         let mut resp = resp;
         if req.method == "tools/call" {
+            if req.params.get("name").and_then(Value::as_str) == Some("catdesk_instruction")
+                && resp.error.is_none()
+                && resp.result.as_ref().is_some_and(|result| {
+                    result.get("isError").and_then(Value::as_bool) != Some(true)
+                })
+            {
+                s.catdesk_instruction_called.store(true, Ordering::Release);
+            }
             let turn_token_usage = extract_turn_token_usage(resp.result.as_ref());
             let usage_totals = {
                 let mut app = s.app.lock().await;

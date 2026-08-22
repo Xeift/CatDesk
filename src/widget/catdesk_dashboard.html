@@ -423,6 +423,12 @@
         padding: 8px 12px 10px;
       }
 
+      .instruction-required-message {
+        color: var(--text-2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
       .command-card {
         border: 0;
         background: transparent;
@@ -3188,6 +3194,15 @@
           }
           next.call = call;
           next.detail = detail;
+
+          if (data.payloadKind === "instruction_required") {
+            if (!next.detail) {
+              return invalidPayload(
+                "Instruction-required panels must include detail.",
+              );
+            }
+            return validPayload(next);
+          }
 
           if (data.payloadKind === "widget_payload_error") {
             if (!next.call || !next.detail) {
@@ -6485,6 +6500,20 @@
           );
         }
 
+        function renderInstructionRequiredPanel(current) {
+          if (!current || !current.detail) return "";
+          return (
+            '<div class="detail-panel">' +
+            '<div class="panel-head"><div class="panel-title">' +
+            esc(current.toolName) +
+            "</div></div>" +
+            '<div class="instruction-required-message">' +
+            esc(current.detail) +
+            "</div>" +
+            "</div>"
+          );
+        }
+
         function renderToolDetailPanel(current) {
           if (!current || (!current.call && !current.detail)) return "";
           var callHtml = current.call
@@ -6999,6 +7028,9 @@
           var isCatDeskInstruction =
             view.panelMode === "tool_call" &&
             view.toolName === "catdesk_instruction";
+          var isInstructionRequired =
+            view.panelMode === "tool_call" &&
+            view.payloadKind === "instruction_required";
           var isRunCommand =
             view.panelMode === "tool_call" &&
             (view.toolName === "run_command" ||
@@ -7026,8 +7058,17 @@
               "</div>" +
               "</section>";
           }
+          var instructionRequiredSectionHtml = "";
+          if (isInstructionRequired) {
+            instructionRequiredSectionHtml =
+              '<section class="section">' +
+              '<div class="section-body">' +
+              renderInstructionRequiredPanel(view) +
+              "</div>" +
+              "</section>";
+          }
           var commandSectionHtml = "";
-          if (isRunCommand) {
+          if (isRunCommand && !isInstructionRequired) {
             commandSectionHtml =
               '<section class="section">' +
               '<div class="section-body">' +
@@ -7036,7 +7077,7 @@
               "</section>";
           }
           var searchSectionHtml = "";
-          if (isSearchText) {
+          if (isSearchText && !isInstructionRequired) {
             searchSectionHtml =
               '<section class="section">' +
               '<div class="section-body">' +
@@ -7045,7 +7086,7 @@
               "</section>";
           }
           var readFileSectionHtml = "";
-          if (isReadFile) {
+          if (isReadFile && !isInstructionRequired) {
             readFileSectionHtml =
               '<section class="section">' +
               '<div class="section-body">' +
@@ -7054,7 +7095,7 @@
               "</section>";
           }
           var fileChangeSectionHtml = "";
-          if (isFileChange) {
+          if (isFileChange && !isInstructionRequired) {
             fileChangeSectionHtml =
               '<section class="section">' +
               '<div class="section-body">' +
@@ -7063,7 +7104,7 @@
               "</section>";
           }
           var listSectionHtml = "";
-          if (isListFiles) {
+          if (isListFiles && !isInstructionRequired) {
             listSectionHtml =
               '<section class="section">' +
               '<div class="section-body">' +
@@ -7072,7 +7113,7 @@
               "</section>";
           }
           var detailSectionHtml = "";
-          if (view.call || view.detail) {
+          if (!isInstructionRequired && (view.call || view.detail)) {
             detailSectionHtml =
               '<section class="section">' +
               '<div class="section-body">' +
@@ -7082,13 +7123,14 @@
           }
           var filesSectionHtml = "";
           if (
-            (!isCatDeskInstruction &&
+            !isInstructionRequired &&
+            ((!isCatDeskInstruction &&
               !isRunCommand &&
               !isSearchText &&
               !isReadFile &&
               !isFileChange &&
               !isListFiles) ||
-            (view.hasChanges && !isFileChange)
+              (view.hasChanges && !isFileChange))
           ) {
             filesSectionHtml =
               '<section class="section">' +
@@ -7103,6 +7145,7 @@
           var tokenPanelHtml = renderTurnToken(view);
           var mainContentHtml =
             instructionSectionHtml +
+            instructionRequiredSectionHtml +
             commandSectionHtml +
             searchSectionHtml +
             readFileSectionHtml +
