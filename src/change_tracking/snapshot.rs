@@ -6,7 +6,7 @@ use std::path::Path;
 use ignore::WalkBuilder;
 
 use super::ignore::is_vcs_admin_path;
-use super::{ChangeTarget, MAX_FILE_CAPTURE_BYTES, MAX_TEXT_CAPTURE_LINES, MAX_WATCHED_ENTRIES};
+use super::{ChangeTarget, MAX_FILE_CAPTURE_BYTES, MAX_WATCHED_ENTRIES};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct WorkspaceSnapshot {
@@ -213,18 +213,10 @@ fn capture_entry(path: &Path) -> Option<FileSnapshot> {
     let preview = &data[..data.len().min(MAX_FILE_CAPTURE_BYTES)];
     let is_binary = preview.iter().any(|byte| *byte == 0);
     let mut text = String::new();
-    let mut text_truncated = data.len() > MAX_FILE_CAPTURE_BYTES;
+    let text_truncated = data.len() > MAX_FILE_CAPTURE_BYTES;
 
     if !is_binary {
         text = String::from_utf8_lossy(preview).into_owned();
-        if text.lines().count() > MAX_TEXT_CAPTURE_LINES {
-            text = text
-                .lines()
-                .take(MAX_TEXT_CAPTURE_LINES)
-                .collect::<Vec<_>>()
-                .join("\n");
-            text_truncated = true;
-        }
     }
 
     Some(FileSnapshot {

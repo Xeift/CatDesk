@@ -1,3 +1,5 @@
+use similar::{Algorithm, TextDiff};
+
 use super::snapshot::{FileSnapshot, WorkspaceSnapshot, snapshots_equal};
 use super::{MAX_DIFF_CHARS_PER_FILE, MAX_DIFF_FILES};
 
@@ -163,25 +165,16 @@ fn build_modified_diff(path: &str, before: &FileSnapshot, after: &FileSnapshot) 
         );
     }
 
-    let before_lines = before.text.lines().collect::<Vec<_>>();
-    let after_lines = after.text.lines().collect::<Vec<_>>();
-    let ops = diff_lines(&before_lines, &after_lines);
-    let has_line_level_change = ops.iter().any(LineDiffOp::is_change);
-    let mut diff = format!("--- a/{path}\n+++ b/{path}\n");
-
-    if has_line_level_change {
-        append_context_hunks(&mut diff, &ops);
-    } else {
-        let before_count = before_lines.len();
-        let after_count = after_lines.len();
-        let before_start = usize::from(before_count > 0);
-        let after_start = usize::from(after_count > 0);
-        diff.push_str(&format!(
-            "@@ -{before_start},{before_count} +{after_start},{after_count} @@\n"
-        ));
-        append_prefixed_lines(&mut diff, '-', &before.text);
-        append_prefixed_lines(&mut diff, '+', &after.text);
-    }
+    let old_path = format!("a/{path}");
+    let new_path = format!("b/{path}");
+    let text_diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .diff_lines(&before.text, &after.text);
+    let mut diff = text_diff
+        .unified_diff()
+        .context_radius(DIFF_CONTEXT_LINES)
+        .header(&old_path, &new_path)
+        .to_string();
 
     if before.text_truncated || after.text_truncated {
         diff.push_str("\n[file content preview truncated]\n");
@@ -221,145 +214,6 @@ fn append_prefixed_lines(out: &mut String, prefix: char, text: &str) {
     for line in text.lines() {
         append_line(out, prefix, line);
     }
-}
-
-enum LineDiffOp<'a> {
-    Keep(&'a str),
-    Delete(&'a str),
-    Insert(&'a str),
-}
-
-impl LineDiffOp<'_> {
-    fn is_change(&self) -> bool {
-        !matches!(self, Self::Keep(_))
-    }
-
-    fn consumes_old(&self) -> bool {
-        !matches!(self, Self::Insert(_))
-    }
-
-    fn consumes_new(&self) -> bool {
-        !matches!(self, Self::Delete(_))
-    }
-
-    fn prefix(&self) -> char {
-        match self {
-            Self::Keep(_) => ' ',
-            Self::Delete(_) => '-',
-            Self::Insert(_) => '+',
-        }
-    }
-
-    fn line(&self) -> &str {
-        match self {
-            Self::Keep(line) | Self::Delete(line) | Self::Insert(line) => line,
-        }
-    }
-}
-
-fn append_context_hunks(out: &mut String, ops: &[LineDiffOp<'_>]) {
-    let mut old_lines = Vec::with_capacity(ops.len() + 1);
-    let mut new_lines = Vec::with_capacity(ops.len() + 1);
-    let (mut old_line, mut new_line) = (1usize, 1usize);
-
-    for op in ops {
-        old_lines.push(old_line);
-        new_lines.push(new_line);
-        if op.consumes_old() {
-            old_line += 1;
-        }
-        if op.consumes_new() {
-            new_line += 1;
-        }
-    }
-    old_lines.push(old_line);
-    new_lines.push(new_line);
-
-    let mut hunks = Vec::<(usize, usize)>::new();
-    for change_idx in ops
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, op)| op.is_change().then_some(idx))
-    {
-        let start = change_idx.saturating_sub(DIFF_CONTEXT_LINES);
-        let end = (change_idx + DIFF_CONTEXT_LINES + 1).min(ops.len());
-        if let Some((_, last_end)) = hunks.last_mut()
-            && start <= *last_end
-        {
-            *last_end = (*last_end).max(end);
-        } else {
-            hunks.push((start, end));
-        }
-    }
-
-    for (start, end) in hunks {
-        let old_count = ops[start..end]
-            .iter()
-            .filter(|op| op.consumes_old())
-            .count();
-        let new_count = ops[start..end]
-            .iter()
-            .filter(|op| op.consumes_new())
-            .count();
-        let old_start = if old_count == 0 {
-            old_lines[start].saturating_sub(1)
-        } else {
-            old_lines[start]
-        };
-        let new_start = if new_count == 0 {
-            new_lines[start].saturating_sub(1)
-        } else {
-            new_lines[start]
-        };
-
-        out.push_str(&format!(
-            "@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
-        ));
-        for op in &ops[start..end] {
-            append_line(out, op.prefix(), op.line());
-        }
-    }
-}
-
-fn diff_lines<'a>(before: &'a [&'a str], after: &'a [&'a str]) -> Vec<LineDiffOp<'a>> {
-    let n = before.len();
-    let m = after.len();
-    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
-
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i][j] = if before[i] == after[j] {
-                lcs[i + 1][j + 1] + 1
-            } else {
-                lcs[i + 1][j].max(lcs[i][j + 1])
-            };
-        }
-    }
-
-    let mut ops = Vec::with_capacity(n + m);
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < n && j < m {
-        if before[i] == after[j] {
-            ops.push(LineDiffOp::Keep(before[i]));
-            i += 1;
-            j += 1;
-        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            ops.push(LineDiffOp::Delete(before[i]));
-            i += 1;
-        } else {
-            ops.push(LineDiffOp::Insert(after[j]));
-            j += 1;
-        }
-    }
-    while i < n {
-        ops.push(LineDiffOp::Delete(before[i]));
-        i += 1;
-    }
-    while j < m {
-        ops.push(LineDiffOp::Insert(after[j]));
-        j += 1;
-    }
-    ops
 }
 
 fn diff_line_stats(diff: &str) -> (u64, u64) {

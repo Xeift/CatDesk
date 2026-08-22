@@ -10,7 +10,6 @@ const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
 const MAX_WATCHED_ENTRIES: usize = 512;
 const MAX_FILE_CAPTURE_BYTES: usize = 128 * 1024;
-const MAX_TEXT_CAPTURE_LINES: usize = 420;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ChangeTarget {
@@ -176,6 +175,38 @@ mod tests {
         let changes = session.changes();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, "target/result.txt");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changes_after_line_420_keep_exact_stats_and_context() {
+        let root = workspace("after-line-420");
+        let path = root.join("large.txt");
+        let before = (1..=900)
+            .map(|line| format!("line {line:03}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(&path, &before).expect("write original file");
+
+        let session = ChangeSession::begin(
+            &root,
+            ChangeScope::single(ChangeTarget::explicit(path.clone(), false)),
+        );
+        let mut after_lines = before.lines().map(str::to_string).collect::<Vec<_>>();
+        after_lines[699] = "changed line 700".to_string();
+        fs::write(&path, after_lines.join("\n") + "\n").expect("write changed file");
+
+        let changes = session.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].added, 1);
+        assert_eq!(changes[0].removed, 1);
+        assert!(changes[0].diff.contains("@@ -697,7 +697,7 @@"));
+        assert!(changes[0].diff.contains("-line 700"));
+        assert!(changes[0].diff.contains("+changed line 700"));
+        assert!(!changes[0].diff.contains("line 001"));
+        assert!(!changes[0].diff.contains("[file content preview truncated]"));
 
         let _ = fs::remove_dir_all(root);
     }
