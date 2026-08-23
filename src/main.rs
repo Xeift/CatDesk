@@ -31,9 +31,10 @@ use ratatui::{
 };
 use state::{
     AppState, FLOW_ANIM_CELLS, FLOW_BOOTSTRAP_PHASES, FlowAnimKind, FlowAnimSegment, FlowDirection,
-    FlowLane, GPT_5_6_AND_EARLIER_USAGE_BUCKET, Mode, ServerUiEvent, SharedState, ShowDetailMode,
-    ToolMode, UsageTotals, app_config_path, flow_anim_lit_count, load_ngrok_authtoken,
-    load_ngrok_domain, save_ngrok_authtoken, save_ngrok_domain,
+    FlowLane, GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, Mode, ServerUiEvent, SharedState,
+    ShowDetailMode, ToolMode, UsageTotals, app_config_path, flow_anim_lit_count,
+    load_ngrok_authtoken, load_ngrok_domain, save_ngrok_authtoken, save_ngrok_domain,
+    user_home_dir,
 };
 use std::collections::HashMap;
 use std::io::{Write, stdout};
@@ -310,7 +311,10 @@ fn mcp_url_reveal_seconds(remaining: Duration) -> u64 {
 }
 
 fn post_mcp_path(message: &str) -> Option<&str> {
-    let rest = message.strip_prefix("POST ")?;
+    let rest = message
+        .strip_prefix("POST ")
+        .or_else(|| message.strip_prefix("→ POST "))
+        .or_else(|| message.strip_prefix("← POST "))?;
     let (path, _) = rest.split_once(' ')?;
     let mut parts = path.split('/');
     let is_mcp_path = parts.next() == Some("")
@@ -359,6 +363,87 @@ fn secret_log_copy_value(message: &str) -> Option<String> {
         .or_else(|| message.strip_prefix("ngrok URL: "))
         .or_else(|| message.strip_prefix("Auto-saved ngrok static domain: "))
         .map(str::to_string)
+}
+
+fn wrap_log_message(message: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for logical_line in message.split('\n') {
+        if logical_line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        let chars = logical_line.chars().collect::<Vec<_>>();
+        let mut start = 0usize;
+        while start < chars.len() {
+            let remaining = chars.len() - start;
+            if remaining <= width {
+                wrapped.push(chars[start..].iter().collect());
+                break;
+            }
+            let end = start + width;
+            let split = if chars.get(end).is_some_and(|ch| ch.is_whitespace()) {
+                end
+            } else {
+                chars[start..end]
+                    .iter()
+                    .rposition(|ch| ch.is_whitespace())
+                    .filter(|offset| *offset > 0)
+                    .map(|offset| start + offset)
+                    .unwrap_or(end)
+            };
+            let line = chars[start..split]
+                .iter()
+                .collect::<String>()
+                .trim_end()
+                .to_string();
+            wrapped.push(line);
+            start = split;
+            while start < chars.len() && chars[start].is_whitespace() {
+                start += 1;
+            }
+        }
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped
+}
+
+fn export_logs_to_dir(
+    logs: &[LogEntry],
+    directory: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+
+    let now = time::OffsetDateTime::now_utc();
+    let stamp = now
+        .format(time::macros::format_description!(
+            "[year][month][day]-[hour][minute][second]"
+        ))
+        .map_err(std::io::Error::other)?;
+    let path = directory.join(format!("catdesk-{stamp}-{:03}Z.log", now.millisecond()));
+    let mut file = std::fs::File::create(&path)?;
+    for entry in logs {
+        let message = mask_secret_log_message(&entry.message, false);
+        writeln!(file, "{} {:5} {}", entry.time, entry.level, message)?;
+    }
+    file.flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(path)
+}
+
+fn export_logs(logs: &[LogEntry]) -> std::io::Result<std::path::PathBuf> {
+    export_logs_to_dir(logs, &user_home_dir()?.join(".catdesk").join("logs"))
 }
 
 fn mcp_url_reveal_bar_segments(remaining: Duration) -> (String, String) {
@@ -2132,8 +2217,9 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 #[cfg(test)]
 mod tests {
     use super::{
-        LogView, draw_chatgpt_connector_refresh_notice, draw_tui_header, key_is_clipboard_paste,
-        mask_mcp_path_in_log, normalize_ngrok_authtoken_input, text_input_key_is_cancel,
+        LogView, draw_chatgpt_connector_refresh_notice, draw_tui_header, export_logs_to_dir,
+        key_is_clipboard_paste, mask_mcp_path_in_log, normalize_ngrok_authtoken_input,
+        text_input_key_is_cancel, wrap_log_message,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
@@ -2185,6 +2271,12 @@ mod tests {
             "POST /▓▓▓▓▓▓▓▓/mcp flow=stateless [tools/list(id=1)]"
         );
         assert_eq!(mask_mcp_path_in_log(message, true), message);
+
+        let directional = "→ POST /secret-slug/mcp tools/list id=1";
+        assert_eq!(
+            mask_mcp_path_in_log(directional, false),
+            "→ POST /▓▓▓▓▓▓▓▓/mcp tools/list id=1"
+        );
     }
 
     #[test]
@@ -2194,19 +2286,54 @@ mod tests {
     }
 
     #[test]
-    fn log_view_maps_visible_rows_to_independent_log_ids() {
+    fn log_view_maps_wrapped_rows_back_to_the_same_log_id() {
         let view = LogView {
             max_scroll: 5,
             effective_scroll: 2,
             area: Rect::new(10, 20, 80, 5),
-            visible_log_ids: vec![41, 42, 43],
+            visible_log_ids: vec![41, 41, 42],
         };
 
         assert_eq!(view.log_id_at(11, 21), Some(41));
-        assert_eq!(view.log_id_at(11, 22), Some(42));
-        assert_eq!(view.log_id_at(11, 23), Some(43));
+        assert_eq!(view.log_id_at(11, 22), Some(41));
+        assert_eq!(view.log_id_at(11, 23), Some(42));
         assert_eq!(view.log_id_at(11, 20), None);
         assert_eq!(view.log_id_at(10, 21), None);
+    }
+
+    #[test]
+    fn long_log_messages_wrap_without_losing_text() {
+        let lines = wrap_log_message("alpha beta gamma delta", 10);
+        assert_eq!(lines, vec!["alpha beta", "gamma", "delta"]);
+        assert_eq!(lines.join(" "), "alpha beta gamma delta");
+
+        let hard_wrapped = wrap_log_message("abcdefghijkl", 5);
+        assert_eq!(hard_wrapped, vec!["abcde", "fghij", "kl"]);
+    }
+
+    #[test]
+    fn exported_logs_are_plain_text_and_mask_secrets() {
+        let root = std::env::temp_dir().join(format!(
+            "catdesk-log-export-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let logs = vec![super::state::LogEntry {
+            id: 1,
+            time: "12:34:56".into(),
+            level: "INFO",
+            message: "MCP Server URL: https://example.ngrok.app/secret/mcp".into(),
+        }];
+
+        let path = export_logs_to_dir(&logs, &root).expect("export logs");
+        let text = std::fs::read_to_string(&path).expect("read exported logs");
+        assert!(text.contains("12:34:56 INFO"));
+        assert!(text.contains(super::MCP_URL_MASK));
+        assert!(!text.contains("https://example.ngrok.app/secret/mcp"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3743,6 +3870,26 @@ async fn run_tui(
                     selection.clear();
                     match key.code {
                         KeyCode::Char('q') => break,
+                        KeyCode::Char('e') => {
+                            let export_result = {
+                                let app = state.lock().await;
+                                export_logs(&app.logs)
+                            };
+                            let mut app = state.lock().await;
+                            match export_result {
+                                Ok(path) => {
+                                    app.log(
+                                        "INFO",
+                                        format!("Exported logs to {}", path.to_string_lossy()),
+                                    );
+                                    toast = Some(("Logs exported", (2, 2), Instant::now()));
+                                }
+                                Err(error) => {
+                                    app.log("ERROR", format!("Failed to export logs: {error}"));
+                                    toast = Some(("Log export failed", (2, 2), Instant::now()));
+                                }
+                            }
+                        }
                         KeyCode::Up => {
                             if log_follow_tail {
                                 log_follow_tail = false;
@@ -4519,12 +4666,12 @@ fn draw_ui(
     let key_spans = vec![
         Span::styled("  [q]", Style::default().fg(palette.danger_fg)),
         Span::raw(" Quit  "),
-        Span::styled("[Up/Down]", Style::default().fg(palette.key_fg)),
-        Span::raw(" Scroll logs  "),
-        Span::styled("[Wheel]", Style::default().fg(palette.key_fg)),
-        Span::raw(" Scroll logs  "),
+        Span::styled("[Up/Down/Wheel]", Style::default().fg(palette.key_fg)),
+        Span::raw(" Scroll  "),
         Span::styled("[End]", Style::default().fg(palette.key_fg)),
-        Span::raw(" Follow latest"),
+        Span::raw(" Latest  "),
+        Span::styled("[e]", Style::default().fg(palette.key_fg)),
+        Span::raw(" Export logs"),
     ];
     let keys = Paragraph::new(Line::from(key_spans)).block(
         Block::default()
@@ -4536,44 +4683,54 @@ fn draw_ui(
     f.render_widget(keys, chunks[2]);
 
     // ── Logs ──
-    let log_items: Vec<ListItem> = app
-        .logs
-        .iter()
-        .map(|entry| {
-            let color = match entry.level {
-                "ERROR" => palette.danger_fg,
-                "WARN" => palette.warning_fg,
-                _ => palette.muted_fg,
+    const LOG_PREFIX_WIDTH: usize = 16;
+    let log_content_width = chunks[3].width.saturating_sub(2) as usize;
+    let message_width = log_content_width.saturating_sub(LOG_PREFIX_WIDTH).max(1);
+    let mut log_rows: Vec<(u64, ListItem<'static>)> = Vec::new();
+    for entry in &app.logs {
+        let color = match entry.level {
+            "ERROR" => palette.danger_fg,
+            "WARN" => palette.warning_fg,
+            _ => palette.muted_fg,
+        };
+        let message = mask_secret_log_message(
+            &entry.message,
+            log_secret_revealed_until.contains_key(&entry.id),
+        );
+        let wrapped = wrap_log_message(&message, message_width);
+        for (index, line) in wrapped.into_iter().enumerate() {
+            let item = if index == 0 {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", entry.time),
+                        Style::default().fg(palette.muted_fg),
+                    ),
+                    Span::styled(format!("{:5} ", entry.level), Style::default().fg(color)),
+                    Span::styled(line, Style::default().fg(palette.primary_fg)),
+                ]))
+            } else {
+                ListItem::new(Line::from(vec![
+                    Span::raw(" ".repeat(LOG_PREFIX_WIDTH)),
+                    Span::styled(line, Style::default().fg(palette.primary_fg)),
+                ]))
             };
-            let message = mask_secret_log_message(
-                &entry.message,
-                log_secret_revealed_until.contains_key(&entry.id),
-            );
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", entry.time),
-                    Style::default().fg(palette.muted_fg),
-                ),
-                Span::styled(format!("{:5} ", entry.level), Style::default().fg(color)),
-                Span::styled(message, Style::default().fg(palette.primary_fg)),
-            ]))
-        })
-        .collect();
+            log_rows.push((entry.id, item));
+        }
+    }
 
     let visible_height = chunks[3].height.saturating_sub(2) as usize;
-    let total = log_items.len();
+    let total = log_rows.len();
     let max_scroll = total.saturating_sub(visible_height);
     let effective_scroll = if log_follow_tail {
         max_scroll
     } else {
         log_scroll.min(max_scroll)
     };
-    let visible_log_ids = app
-        .logs
+    let visible_log_ids = log_rows
         .iter()
         .skip(effective_scroll)
         .take(visible_height)
-        .map(|entry| entry.id)
+        .map(|(log_id, _)| *log_id)
         .collect();
     *log_view = Some(LogView {
         max_scroll,
@@ -4581,10 +4738,11 @@ fn draw_ui(
         area: chunks[3],
         visible_log_ids,
     });
-    let visible_items: Vec<ListItem> = log_items
+    let visible_items: Vec<ListItem> = log_rows
         .into_iter()
         .skip(effective_scroll)
         .take(visible_height)
+        .map(|(_, item)| item)
         .collect();
     let logs = List::new(visible_items).block(
         Block::default()

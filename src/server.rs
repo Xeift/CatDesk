@@ -24,7 +24,6 @@ use crate::state::{
 };
 
 const STATELESS_FLOW_ID: &str = "stateless";
-const STATELESS_FLOW_LABEL: &str = "stateless";
 
 #[derive(Clone)]
 struct ServerState {
@@ -221,39 +220,237 @@ fn request_flow_label(req: &Value) -> String {
     method.to_string()
 }
 
+fn truncate_log_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
+fn summarize_tool_arguments(arguments: &serde_json::Map<String, Value>) -> String {
+    let mut keys = arguments.keys().collect::<Vec<_>>();
+    keys.sort();
+    keys.into_iter()
+        .map(|key| {
+            let value = &arguments[key];
+            match (key.as_str(), value) {
+                (
+                    "content" | "old_string" | "new_string" | "old_text" | "new_text",
+                    Value::String(text),
+                ) => format!("{key}=<{} chars>", text.chars().count()),
+                ("edits", Value::Array(items)) => format!("edits=<{} items>", items.len()),
+                (_, Value::String(text)) => {
+                    let encoded = serde_json::to_string(text).unwrap_or_else(|_| "\"?\"".into());
+                    format!("{key}={}", truncate_log_text(&encoded, 240))
+                }
+                (_, Value::Array(items)) => format!("{key}=<{} items>", items.len()),
+                (_, Value::Object(object)) => format!("{key}=<{} fields>", object.len()),
+                _ => format!("{key}={value}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn summarize_request(req: &Value) -> String {
     let method = req
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or("<invalid-method>");
     let id = request_id(req);
-    if method == "tools/call" {
-        let tool = request_tool_name(req).unwrap_or_else(|| "?".into());
-        return format!("tools/call({tool},id={id})");
+    match method {
+        "initialize" => {
+            let protocol = req
+                .get("params")
+                .and_then(|params| params.get("protocolVersion"))
+                .and_then(Value::as_str);
+            let client_name = req
+                .get("params")
+                .and_then(|params| params.get("clientInfo"))
+                .and_then(|client| client.get("name"))
+                .and_then(Value::as_str);
+            let client_version = req
+                .get("params")
+                .and_then(|params| params.get("clientInfo"))
+                .and_then(|client| client.get("version"))
+                .and_then(Value::as_str);
+            let mut summary = format!("initialize id={id}");
+            if let Some(protocol) = protocol {
+                summary.push_str(&format!(" protocol={protocol}"));
+            }
+            if let Some(client_name) = client_name {
+                summary.push_str(&format!(" client={client_name}"));
+                if let Some(client_version) = client_version {
+                    summary.push('/');
+                    summary.push_str(client_version);
+                }
+            }
+            summary
+        }
+        "resources/read" => {
+            let uri = request_resource_uri(req).unwrap_or("?");
+            let tool = query_param_value(uri, "toolName").filter(|value| !value.is_empty());
+            match tool {
+                Some(tool) => format!("resources/read id={id} tool={tool} uri={uri}"),
+                None => format!("resources/read id={id} uri={uri}"),
+            }
+        }
+        "tools/call" => {
+            let tool = request_tool_name(req).unwrap_or_else(|| "?".into());
+            let arguments = request_tool_arguments(req)
+                .map(summarize_tool_arguments)
+                .unwrap_or_default();
+            if arguments.is_empty() {
+                format!("tools/call id={id} tool={tool}")
+            } else {
+                format!("tools/call id={id} tool={tool} args[{arguments}]")
+            }
+        }
+        _ if id == "-" => method.to_string(),
+        _ => format!("{method} id={id}"),
     }
-    format!("{method}(id={id})")
 }
 
-fn summarize_response(resp: &Value) -> String {
-    let id = resp.get("id").map_or("-".into(), |v| match v {
+fn response_id(resp: &Value) -> String {
+    resp.get("id").map_or("-".into(), |v| match v {
         Value::String(s) => s.clone(),
         _ => v.to_string(),
-    });
+    })
+}
+
+fn summarize_response(req: &Value, resp: &Value) -> String {
+    let method = req
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("<invalid-method>");
+    let id = response_id(resp);
     if let Some(err) = resp.get("error") {
         let code = err.get("code").and_then(Value::as_i64).unwrap_or(-32000);
         let msg = err
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("Unknown error");
-        return format!("id={id}:error({code} {msg})");
+        let context = match method {
+            "tools/call" => request_tool_name(req)
+                .map(|tool| format!(" tool={tool}"))
+                .unwrap_or_default(),
+            "resources/read" => request_resource_uri(req)
+                .map(|uri| {
+                    let tool = query_param_value(uri, "toolName")
+                        .filter(|value| !value.is_empty())
+                        .map(|tool| format!(" tool={tool}"))
+                        .unwrap_or_default();
+                    format!("{tool} uri={uri}")
+                })
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        return format!(
+            "{method} id={id}{context} error={code} message={}",
+            truncate_log_text(msg, 240)
+        );
     }
-    if let Some(result) = resp.get("result") {
-        if let Some(protocol_version) = result.get("protocolVersion").and_then(Value::as_str) {
-            return format!("id={id}:result protocolVersion={protocol_version}");
+    let Some(result) = resp.get("result") else {
+        return format!("{method} id={id} unknown");
+    };
+    match method {
+        "initialize" => {
+            let protocol = result
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let mut capabilities = result
+                .get("capabilities")
+                .and_then(Value::as_object)
+                .map(|object| object.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            capabilities.sort();
+            format!(
+                "initialize id={id} ok protocol={protocol} capabilities={}",
+                if capabilities.is_empty() {
+                    "-".to_string()
+                } else {
+                    capabilities.join(",")
+                }
+            )
         }
-        return format!("id={id}:result");
+        "tools/list" => {
+            let count = result
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!("tools/list id={id} ok tools={count}")
+        }
+        "resources/list" => {
+            let count = result
+                .get("resources")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!("resources/list id={id} ok resources={count}")
+        }
+        "resources/read" => {
+            let uri = request_resource_uri(req).unwrap_or("?");
+            let tool = query_param_value(uri, "toolName").filter(|value| !value.is_empty());
+            let contents = result
+                .get("contents")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            let chars = result
+                .get("contents")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.get("text").and_then(Value::as_str))
+                        .map(|text| text.chars().count())
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            match tool {
+                Some(tool) => format!(
+                    "resources/read id={id} ok tool={tool} contents={contents} textChars={chars}"
+                ),
+                None => format!("resources/read id={id} ok contents={contents} textChars={chars}"),
+            }
+        }
+        "tools/call" => {
+            let tool = request_tool_name(req).unwrap_or_else(|| "?".into());
+            let structured = result.get("structuredContent");
+            let success = structured
+                .and_then(|value| value.get("success"))
+                .and_then(Value::as_bool);
+            let error_code = structured
+                .and_then(|value| value.get("errorCode"))
+                .and_then(Value::as_str);
+            let is_error = result.get("isError").and_then(Value::as_bool) == Some(true);
+            let mut fields = structured
+                .and_then(Value::as_object)
+                .map(|object| object.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            fields.sort();
+            let mut summary = format!("tools/call id={id} tool={tool}");
+            if is_error {
+                summary.push_str(" toolError=true");
+            }
+            if let Some(success) = success {
+                summary.push_str(&format!(" success={success}"));
+            }
+            if let Some(error_code) = error_code {
+                summary.push_str(&format!(" errorCode={error_code}"));
+            }
+            if !fields.is_empty() {
+                summary.push_str(&format!(" fields={}", fields.join(",")));
+            }
+            summary
+        }
+        _ => format!("{method} id={id} ok"),
     }
-    format!("id={id}:unknown")
 }
 
 fn extract_turn_token_usage(result: Option<&Value>) -> Option<(u64, u64)> {
@@ -900,20 +1097,78 @@ mod tests {
     }
 
     #[test]
-    fn summarize_initialize_response_includes_protocol_version() {
-        let response = json!({
+    fn detailed_mcp_log_summaries_include_bootstrap_context() {
+        let initialize_request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "clientInfo": {"name": "ChatGPT", "version": "test"}
+            }
+        });
+        let initialize_response = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "result": {
                 "protocolVersion": "2025-11-25",
-                "capabilities": {}
+                "capabilities": {"tools": {}, "resources": {}}
             }
         });
-
         assert_eq!(
-            summarize_response(&response),
-            "id=1:result protocolVersion=2025-11-25"
+            summarize_request(&initialize_request),
+            "initialize id=1 protocol=2025-11-25 client=ChatGPT/test"
         );
+        assert_eq!(
+            summarize_response(&initialize_request, &initialize_response),
+            "initialize id=1 ok protocol=2025-11-25 capabilities=resources,tools"
+        );
+
+        let resource_request = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "resources/read",
+            "params": {
+                "uri": "ui://widget/catdesk-dashboard.html?toolName=run_command"
+            }
+        });
+        let resource_response = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "contents": [{"text": "hello", "mimeType": "text/html"}]
+            }
+        });
+        assert_eq!(
+            summarize_request(&resource_request),
+            "resources/read id=2 tool=run_command uri=ui://widget/catdesk-dashboard.html?toolName=run_command"
+        );
+        assert_eq!(
+            summarize_response(&resource_request, &resource_response),
+            "resources/read id=2 ok tool=run_command contents=1 textChars=5"
+        );
+    }
+
+    #[test]
+    fn tool_log_summary_omits_large_payload_text() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "write",
+                "arguments": {
+                    "path": "notes.txt",
+                    "content": "very large body",
+                    "create_dirs": true
+                }
+            }
+        });
+        let summary = summarize_request(&request);
+        assert!(summary.contains("tool=write"));
+        assert!(summary.contains("content=<15 chars>"));
+        assert!(summary.contains("path=\"notes.txt\""));
+        assert!(!summary.contains("very large body"));
     }
 
     fn unique_temp_path(prefix: &str) -> PathBuf {
@@ -1002,6 +1257,61 @@ mod tests {
         assert!(
             capabilities.get("resources").is_none(),
             "runtime MCP handling must use AppState show_detail_mode"
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
+    #[tokio::test]
+    async fn post_mcp_logs_request_before_response() {
+        let workspace_root = unique_temp_path("catdesk-log-order-workspace");
+        let config_root = unique_temp_path("catdesk-log-order-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let mcp_path = app.mcp_path();
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, mut ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: app_state,
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+        };
+
+        let response = post_mcp(
+            State(server_state),
+            mcp_request_body("initialize", json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut messages = Vec::new();
+        while let Ok(event) = ui_rx.try_recv() {
+            if let ServerUiEvent::Log { message, .. } = event {
+                messages.push(message);
+            }
+        }
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0],
+            format!("→ POST {mcp_path} initialize id=req-mcp")
+        );
+        assert_eq!(
+            messages[1],
+            format!(
+                "← POST {mcp_path} initialize id=req-mcp ok protocol=2025-11-25 capabilities=resources,tools"
+            )
         );
 
         let _ = std::fs::remove_file(config_path);
@@ -1820,6 +2130,14 @@ async fn post_mcp_inner(
     let body: Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
+            let _ = s.ui_events.send(ServerUiEvent::Log {
+                level: "ERROR",
+                message: format!(
+                    "← JSON-RPC parse error bytes={} message={}",
+                    body_bytes.len(),
+                    truncate_log_text(&e.to_string(), 240)
+                ),
+            });
             return jsonrpc_error_response(
                 StatusCode::BAD_REQUEST,
                 -32700,
@@ -1828,6 +2146,10 @@ async fn post_mcp_inner(
         }
     };
     if !body.is_object() {
+        let _ = s.ui_events.send(ServerUiEvent::Log {
+            level: "ERROR",
+            message: "← JSON-RPC invalid request: expected a single message object".into(),
+        });
         return jsonrpc_error_response(
             StatusCode::BAD_REQUEST,
             -32600,
@@ -1840,6 +2162,13 @@ async fn post_mcp_inner(
 
     let has_method = body.get("method").and_then(Value::as_str).is_some();
     if !has_method {
+        let kind = if body.get("result").is_some() {
+            "result"
+        } else if body.get("error").is_some() {
+            "error"
+        } else {
+            "unknown"
+        };
         let mcp_path = {
             let app = s.app.lock().await;
             app.mcp_path()
@@ -1847,7 +2176,8 @@ async fn post_mcp_inner(
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "INFO",
             message: format!(
-                "POST {mcp_path} flow={STATELESS_FLOW_LABEL} accepted non-request JSON-RPC message"
+                "→ POST {mcp_path} non-request JSON-RPC id={} kind={kind}",
+                request_id(&body)
             ),
         });
         return Response::builder()
@@ -1868,6 +2198,13 @@ async fn post_mcp_inner(
     let req: JsonRpcRequest = match serde_json::from_value(body.clone()) {
         Ok(r) => r,
         Err(e) => {
+            let _ = s.ui_events.send(ServerUiEvent::Log {
+                level: "ERROR",
+                message: format!(
+                    "← {request_summary} invalid-request message={}",
+                    truncate_log_text(&e.to_string(), 240)
+                ),
+            });
             return jsonrpc_error_response(
                 StatusCode::BAD_REQUEST,
                 -32600,
@@ -1900,6 +2237,11 @@ async fn post_mcp_inner(
             app.show_detail_mode,
         )
     };
+
+    let _ = s.ui_events.send(ServerUiEvent::Log {
+        level: "INFO",
+        message: format!("→ POST {mcp_path} {request_summary}"),
+    });
 
     let show_detail_mode = show_detail_mode.unwrap_or(app_show_detail_mode);
     let response = mcp::handle_request_with_show_detail_mode(
@@ -1955,33 +2297,19 @@ async fn post_mcp_inner(
         response_json = Some(serde_json::to_value(resp).unwrap());
     }
 
-    {
-        let app = s.app.lock().await;
-        let mcp_path = app.mcp_path();
-        drop(app);
-        if req.id.is_some() {
-            let _ = s.ui_events.send(ServerUiEvent::RecordFlow {
-                flow_id: STATELESS_FLOW_ID.to_string(),
-                events: vec![request_flow_event.clone()],
-                direction: FlowDirection::Backward,
-            });
-        }
+    if req.id.is_some() {
+        let _ = s.ui_events.send(ServerUiEvent::RecordFlow {
+            flow_id: STATELESS_FLOW_ID.to_string(),
+            events: vec![request_flow_event.clone()],
+            direction: FlowDirection::Backward,
+        });
+    }
+    if let Some(ref resp_json) = response_json {
+        let response_summary = summarize_response(&body, resp_json);
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "INFO",
-            message: format!(
-                "POST {mcp_path} flow={STATELESS_FLOW_LABEL} [{}]",
-                request_summary,
-            ),
+            message: format!("← POST {mcp_path} {response_summary}"),
         });
-        if let Some(ref resp_json) = response_json {
-            let response_summary = summarize_response(resp_json);
-            let _ = s.ui_events.send(ServerUiEvent::Log {
-                level: "INFO",
-                message: format!(
-                    "POST {mcp_path} flow={STATELESS_FLOW_LABEL} response [{response_summary}]"
-                ),
-            });
-        }
     }
 
     if req.id.is_none() {
