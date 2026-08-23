@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::hash_map::DefaultHasher;
@@ -26,10 +27,13 @@ const SERVER_VERSION: &str = "4.0.0";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const DEVTOOLS_PROTOCOL_VERSION: &str = "2025-03-26";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
+const WIDGET_RESOURCE_REVISION: u32 = 1;
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
+const REENABLE_WIDGET_PNG: &[u8] = include_bytes!("widget/assets/reenable_widget.png");
 const WIDGET_RESOURCE_URI_PLACEHOLDER: &str = "__catdeskWidgetResourceUriPlaceholder__";
+const REENABLE_WIDGET_IMAGE_PLACEHOLDER: &str = "__catdeskReenableWidgetImageDataUriPlaceholder__";
 const INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER: &str =
     "__catdeskInitialTokenStatsLayoutPlaceholder__";
 const INITIAL_TOOL_NAME_PLACEHOLDER: &str = "__catdeskInitialToolNamePlaceholder__";
@@ -238,12 +242,12 @@ fn current_widget_resource_uri_for_tool(tool_name: &str) -> String {
     let token_stats_layout = current_token_stats_layout();
     if tool_name.is_empty() {
         return format!(
-            "{UI_TEMPLATE_URI}?tokenStatsLayout={}",
+            "{UI_TEMPLATE_URI}?widgetRevision={WIDGET_RESOURCE_REVISION}&tokenStatsLayout={}",
             token_stats_layout.as_str()
         );
     }
     format!(
-        "{UI_TEMPLATE_URI}?tokenStatsLayout={}&toolName={}",
+        "{UI_TEMPLATE_URI}?widgetRevision={WIDGET_RESOURCE_REVISION}&tokenStatsLayout={}&toolName={}",
         token_stats_layout.as_str(),
         tool_name
     )
@@ -269,8 +273,13 @@ fn render_widget_html(resource_uri: &str, mascot_seed: u64) -> String {
     let initial_mascot_outline =
         serde_json::to_string(&mascot::build_widget_mascot_outline(mascot_seed))
             .unwrap_or_else(|_| "{}".to_string());
+    let reenable_widget_image = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(REENABLE_WIDGET_PNG)
+    );
     CATDESK_WIDGET_HTML
         .replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
+        .replace(REENABLE_WIDGET_IMAGE_PLACEHOLDER, &reenable_widget_image)
         .replace(
             INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER,
             current_token_stats_layout().as_str(),
@@ -1934,6 +1943,24 @@ fn handle_catdesk_instruction(
     mode: Mode,
     tool_mode: ToolMode,
 ) -> JsonRpcResponse {
+    handle_catdesk_instruction_with_show_detail_mode(
+        req,
+        workspace_root,
+        mascot_seed,
+        mode,
+        tool_mode,
+        current_show_detail_mode(),
+    )
+}
+
+fn handle_catdesk_instruction_with_show_detail_mode(
+    req: &JsonRpcRequest,
+    workspace_root: &str,
+    mascot_seed: u64,
+    mode: Mode,
+    tool_mode: ToolMode,
+    show_detail_mode: ShowDetailMode,
+) -> JsonRpcResponse {
     let instruction_text = match catdesk_instruction_text(workspace_root, mode, tool_mode) {
         Ok(value) => value,
         Err(error) => {
@@ -1952,6 +1979,11 @@ fn handle_catdesk_instruction(
             );
         }
     };
+    let mut response = tool_success_response_with_structured(req, instruction_text, structured);
+    if show_detail_mode == ShowDetailMode::Disable {
+        return response;
+    }
+
     let widget_payload =
         match catdesk_instruction_widget_payload(workspace_root, mascot_seed, mode, tool_mode) {
             Ok(value) => value,
@@ -1962,7 +1994,6 @@ fn handle_catdesk_instruction(
                 );
             }
         };
-    let mut response = tool_success_response_with_structured(req, instruction_text, structured);
     if let Some(result) = response.result.as_mut() {
         attach_widget_payload_meta(result, widget_payload);
     }
@@ -5095,6 +5126,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(workspace_root);
     }
 
+    #[test]
+    fn catdesk_instruction_disable_skips_dedicated_widget_payload() {
+        let workspace_root = std::env::temp_dir().join(format!(
+            "catdesk-mcp-instruction-disable-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let req = tool_call_request("catdesk_instruction", json!({}));
+
+        let response = handle_catdesk_instruction_with_show_detail_mode(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            ShowDetailMode::Disable,
+        );
+
+        assert!(result_text(&response).contains("CatDesk usage instructions"));
+        assert!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("_meta"))
+                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                .is_none(),
+            "Disable must skip the dedicated catdesk_instruction widget payload"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
     #[tokio::test]
     async fn read_tool_returns_structured_text_without_text_content() {
         let workspace_root =
@@ -5344,6 +5408,13 @@ hello world"
     }
 
     #[test]
+    fn widget_resource_uri_includes_revision_for_cache_busting() {
+        let uri = current_widget_resource_uri_for_tool("catdesk_instruction");
+        assert!(uri.contains("widgetRevision=1"));
+        assert!(uri.contains("toolName=catdesk_instruction"));
+    }
+
+    #[test]
     fn resources_read_includes_widget_csp_connect_domains() {
         let resource_resp = handle_resources_read(
             &resources_read_request(UI_TEMPLATE_URI),
@@ -5379,6 +5450,9 @@ hello world"
         assert!(!text.contains(INITIAL_TOOL_NAME_PLACEHOLDER));
         assert!(text.contains("var INITIAL_MASCOT_OUTLINE = {"));
         assert!(!text.contains(INITIAL_MASCOT_OUTLINE_PLACEHOLDER));
+        assert!(text.contains("Disable CatDesk widget?"));
+        assert!(text.contains("data:image/png;base64,"));
+        assert!(!text.contains(REENABLE_WIDGET_IMAGE_PLACEHOLDER));
         assert_eq!(
             ui_meta
                 .get("csp")

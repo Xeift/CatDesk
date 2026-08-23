@@ -1779,6 +1779,87 @@
         cursor: pointer;
       }
 
+      .show-detail-disable-confirm-root {
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        background: rgba(0, 0, 0, 0.58);
+        backdrop-filter: blur(3px);
+      }
+
+      .show-detail-disable-confirm-root.is-open {
+        display: flex;
+      }
+
+      .show-detail-disable-confirm {
+        width: min(100%, 520px);
+        display: grid;
+        gap: 12px;
+        padding: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        background: var(--panel);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.42);
+      }
+
+      .show-detail-disable-confirm-title {
+        margin: 0;
+        color: var(--text);
+        font-size: 14px;
+        font-weight: 650;
+      }
+
+      .show-detail-disable-confirm-message {
+        color: var(--text-2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .show-detail-disable-confirm-image {
+        width: 100%;
+        height: auto;
+        display: block;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .show-detail-disable-confirm-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .show-detail-disable-confirm-button {
+        min-width: 88px;
+        height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 12px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        background: rgba(26, 25, 25, 0.92);
+        color: var(--text-2);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .show-detail-disable-confirm-button.is-danger {
+        color: var(--text);
+        border-color: rgba(239, 68, 68, 0.45);
+        background: rgba(127, 29, 29, 0.38);
+      }
+
+      .show-detail-disable-confirm-button:hover,
+      .show-detail-disable-confirm-button:focus-visible {
+        outline: none;
+        filter: brightness(1.12);
+      }
+
       .instruction-hero {
         position: relative;
         overflow: hidden;
@@ -4856,6 +4937,22 @@
           );
         }
 
+        function renderShowDetailDisableConfirm() {
+          return (
+            '<div class="show-detail-disable-confirm-root" id="show-detail-disable-confirm" aria-hidden="true">' +
+            '<div class="show-detail-disable-confirm" role="alertdialog" aria-modal="true" aria-labelledby="show-detail-disable-confirm-title" aria-describedby="show-detail-disable-confirm-message">' +
+            '<h3 class="show-detail-disable-confirm-title" id="show-detail-disable-confirm-title">Disable CatDesk widget?</h3>' +
+            '<div class="show-detail-disable-confirm-message" id="show-detail-disable-confirm-message">If you disable the widget, you will no longer see CatDesk widgets in ChatGPT. You can enable them again at any time from CatDesk TUI settings.</div>' +
+            '<img class="show-detail-disable-confirm-image" src="__catdeskReenableWidgetImageDataUriPlaceholder__" alt="CatDesk TUI setting for re-enabling the widget">' +
+            '<div class="show-detail-disable-confirm-actions">' +
+            '<button type="button" class="show-detail-disable-confirm-button" data-cancel-show-detail-disable>Cancel</button>' +
+            '<button type="button" class="show-detail-disable-confirm-button is-danger" data-confirm-show-detail-disable>Disable widget</button>' +
+            "</div>" +
+            "</div>" +
+            "</div>"
+          );
+        }
+
         function renderCatDeskInstructionPanel(current) {
           var pathsHtml = "";
           if (
@@ -5294,6 +5391,7 @@
             renderInstructionHero(current) +
             pathsHtml +
             renderBinagotchyBrowser(current) +
+            renderShowDetailDisableConfirm() +
             "</div>"
           );
         }
@@ -6169,13 +6267,7 @@
           hintNode.setAttribute("aria-hidden", "false");
         }
 
-        function submitShowDetailMode(fanRoot, node) {
-          var mode = node.getAttribute("data-show-detail-option") || "";
-          var url =
-            fanRoot.getAttribute("data-show-detail-url") ||
-            view.showDetailModeUrl ||
-            "";
-          if (!mode || !url) return;
+        function postShowDetailMode(fanRoot, mode, url) {
           closeBinagotchyNotice();
           window
             .fetch(url, {
@@ -6219,6 +6311,69 @@
                 true,
               );
             });
+        }
+
+        function closeShowDetailDisableConfirm() {
+          var confirmRoot = document.getElementById("show-detail-disable-confirm");
+          if (!confirmRoot) return;
+          confirmRoot.classList.remove("is-open");
+          confirmRoot.setAttribute("aria-hidden", "true");
+          confirmRoot._showDetailFanRoot = null;
+          confirmRoot._showDetailUrl = "";
+        }
+
+        function openShowDetailDisableConfirm(fanRoot, url) {
+          var confirmRoot = document.getElementById("show-detail-disable-confirm");
+          if (!confirmRoot) return;
+          confirmRoot._showDetailFanRoot = fanRoot;
+          confirmRoot._showDetailUrl = url;
+          confirmRoot.classList.add("is-open");
+          confirmRoot.setAttribute("aria-hidden", "false");
+          var cancelButton = confirmRoot.querySelector("[data-cancel-show-detail-disable]");
+          if (cancelButton) cancelButton.focus();
+        }
+
+        function submitShowDetailMode(fanRoot, node) {
+          var mode = node.getAttribute("data-show-detail-option") || "";
+          var url =
+            fanRoot.getAttribute("data-show-detail-url") ||
+            view.showDetailModeUrl ||
+            "";
+          if (!mode || !url) return;
+          if (mode === "disable" && view && view.showDetailMode !== "disable") {
+            openShowDetailDisableConfirm(fanRoot, url);
+            return;
+          }
+          postShowDetailMode(fanRoot, mode, url);
+        }
+
+        function bindShowDetailDisableConfirm(root) {
+          if (!root) return;
+          var confirmRoot = root.querySelector("#show-detail-disable-confirm");
+          if (!confirmRoot) return;
+          var cancelButton = confirmRoot.querySelector("[data-cancel-show-detail-disable]");
+          var confirmButton = confirmRoot.querySelector("[data-confirm-show-detail-disable]");
+          if (cancelButton) {
+            cancelButton.addEventListener("click", function (event) {
+              event.preventDefault();
+              closeShowDetailDisableConfirm();
+            });
+          }
+          if (confirmButton) {
+            confirmButton.addEventListener("click", function (event) {
+              event.preventDefault();
+              var fanRoot = confirmRoot._showDetailFanRoot;
+              var url = confirmRoot._showDetailUrl || "";
+              closeShowDetailDisableConfirm();
+              if (fanRoot && url) postShowDetailMode(fanRoot, "disable", url);
+            });
+          }
+          confirmRoot.addEventListener("click", function (event) {
+            if (event.target === confirmRoot) closeShowDetailDisableConfirm();
+          });
+          confirmRoot.addEventListener("keydown", function (event) {
+            if (event.key === "Escape") closeShowDetailDisableConfirm();
+          });
         }
 
         function bindShowDetailFans(root) {
@@ -7471,6 +7626,7 @@
           bindAgentsPathFans(root);
           bindTokenLayoutFans(root);
           bindShowDetailFans(root);
+          bindShowDetailDisableConfirm(root);
           bindDiffNavigators(root);
 
           playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
