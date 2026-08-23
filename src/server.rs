@@ -595,7 +595,7 @@ async fn post_token_stats_layout(
 }
 
 async fn post_show_detail_mode(
-    State(_s): State<ServerState>,
+    State(s): State<ServerState>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response<Body> {
     let Some(mode_raw) = form.get("mode").map(String::as_str) else {
@@ -627,6 +627,8 @@ async fn post_show_detail_mode(
             .unwrap();
     }
 
+    sync_show_detail_mode_state(&s, mode).await;
+
     with_widget_action_cors(Response::builder())
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
@@ -638,6 +640,11 @@ async fn post_show_detail_mode(
             .to_string(),
         ))
         .unwrap()
+}
+
+async fn sync_show_detail_mode_state(s: &ServerState, mode: ShowDetailMode) {
+    let mut app = s.app.lock().await;
+    app.show_detail_mode = mode;
 }
 
 async fn options_agents_path_mode(State(_s): State<ServerState>) -> Response<Body> {
@@ -915,6 +922,41 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}-{unique}"))
+    }
+
+    #[tokio::test]
+    async fn show_detail_mode_sync_updates_app_state() {
+        let workspace_root = unique_temp_path("catdesk-show-detail-sync-workspace");
+        let config_root = unique_temp_path("catdesk-show-detail-sync-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: app_state.clone(),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+        };
+
+        sync_show_detail_mode_state(&server_state, ShowDetailMode::Disable).await;
+
+        let app = app_state.lock().await;
+        assert!(matches!(app.show_detail_mode, ShowDetailMode::Disable));
+        drop(app);
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
     }
 
     fn tool_call_body(name: &str, arguments: Value) -> Bytes {
