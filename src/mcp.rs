@@ -938,10 +938,12 @@ async fn handle_tools_call_with_show_detail_mode(
         .unwrap_or("")
         .to_string();
 
-    let change_session = ChangeSession::begin(
-        Path::new(workspace_root),
-        change_scope_for_request(req, workspace_root),
-    );
+    let change_session = (show_detail_mode != ShowDetailMode::Disable).then(|| {
+        ChangeSession::begin(
+            Path::new(workspace_root),
+            change_scope_for_request(req, workspace_root),
+        )
+    });
 
     let mut response = {
         if tool_name == "catdesk_instruction" {
@@ -970,6 +972,7 @@ async fn handle_tools_call_with_show_detail_mode(
                                 workspace_root,
                                 set_catdesk_as_co_author,
                                 command_jobs,
+                                show_detail_mode,
                             )
                             .await
                         }
@@ -1021,11 +1024,16 @@ async fn handle_tools_call_with_show_detail_mode(
         }
     };
 
-    let mut turn_files = change_session.changes();
-    if matches!(
-        tool_name.as_str(),
-        "start_command" | "poll_command" | "cancel_command"
-    ) {
+    let mut turn_files = change_session
+        .as_ref()
+        .map(ChangeSession::changes)
+        .unwrap_or_default();
+    if show_detail_mode != ShowDetailMode::Disable
+        && matches!(
+            tool_name.as_str(),
+            "start_command" | "poll_command" | "cancel_command"
+        )
+    {
         if let Some(job_id) = command_job_id_from_response(&response) {
             if let Ok(job_changes) = command_jobs.current_changes(job_id).await {
                 turn_files = job_changes;
@@ -1206,6 +1214,7 @@ async fn handle_start_command(
     workspace_root: &str,
     set_catdesk_as_co_author: bool,
     command_jobs: &CommandJobManager,
+    show_detail_mode: ShowDetailMode,
 ) -> JsonRpcResponse {
     let arguments = tool_arguments(req);
     let command_text = match required_string_argument(&arguments, "command") {
@@ -1262,17 +1271,19 @@ async fn handle_start_command(
         timeout_ms.hash(&mut hasher);
         format!("start_command:{id}:{:016x}", hasher.finish())
     });
-    let change_session = ChangeSession::begin(
-        Path::new(workspace_root),
-        ChangeScope::single(ChangeTarget::discovered(cwd.clone(), true)),
-    );
+    let change_session = (show_detail_mode != ShowDetailMode::Disable).then(|| {
+        ChangeSession::begin(
+            Path::new(workspace_root),
+            ChangeScope::single(ChangeTarget::discovered(cwd.clone(), true)),
+        )
+    });
     match command_jobs
         .start_with_change_session(
             effective_command,
             cwd,
             timeout_ms,
             request_key,
-            Some(change_session),
+            change_session,
         )
         .await
     {
@@ -6047,6 +6058,102 @@ hello world"
             .collect::<Vec<_>>();
         assert!(paths.contains(&"visible.txt"));
         assert!(paths.iter().all(|path| !path.starts_with(".git/")));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn disabled_show_detail_mode_skips_background_change_tracking() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-disable-job-diff-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("visible.txt"), "before\n").expect("write visible file");
+        let command_jobs = CommandJobManager::new();
+        let command = if cfg!(windows) {
+            "Set-Content -Path visible.txt -Value after; Start-Sleep -Milliseconds 100"
+        } else {
+            "printf 'after\\n' > visible.txt; sleep 0.1"
+        };
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let start_req = tool_call_request("start_command", json!({ "command": command }));
+        let start_response = handle_tools_call_with_show_detail_mode(
+            &start_req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &command_jobs,
+            &None,
+            ShowDetailMode::Disable,
+        )
+        .await;
+        let job_id = start_response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .and_then(|structured| structured.get("jobId"))
+            .and_then(Value::as_str)
+            .expect("missing job id")
+            .to_string();
+
+        let mut cursor = 0u64;
+        let mut completed = false;
+        for _ in 0..20 {
+            let poll_req = tool_call_request(
+                "poll_command",
+                json!({ "job_id": job_id, "after": cursor, "wait_ms": 250 }),
+            );
+            let response = handle_tools_call_with_show_detail_mode(
+                &poll_req,
+                &workspace_root_str,
+                1,
+                Mode::Both,
+                ToolMode::MultiTools,
+                false,
+                &command_jobs,
+                &None,
+                ShowDetailMode::Disable,
+            )
+            .await;
+            assert!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("_meta"))
+                    .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                    .is_none()
+            );
+            let structured = response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("structuredContent"))
+                .expect("missing poll structured content");
+            cursor = structured
+                .get("nextCursor")
+                .and_then(Value::as_u64)
+                .unwrap_or(cursor);
+            if structured.get("state").and_then(Value::as_str) == Some("succeeded")
+                && structured.get("hasMoreOutput").and_then(Value::as_bool) != Some(true)
+            {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "background command did not finish");
+        assert!(
+            std::fs::read_to_string(workspace_root.join("visible.txt"))
+                .expect("read visible file")
+                .contains("after")
+        );
+        assert!(
+            command_jobs
+                .current_changes(&job_id)
+                .await
+                .expect("read job changes")
+                .is_empty(),
+            "Disable must not retain a change session for background commands"
+        );
+
         let _ = std::fs::remove_dir_all(workspace_root);
     }
 
