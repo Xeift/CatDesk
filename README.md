@@ -67,6 +67,23 @@ I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 
 
 \*Let's say you sleep 6 hours a day and use CatDesk every day. In that case, you can send 3,000 / (24 - 6) / 7 = 23.8 messages per hour. Since thinking and tool calls take time, it is very difficult to use up your weekly 3,000 message limit.
 
+# Similar projects
+
+If you don't want to use CatDesk, here are some similar projects you can try:
+
+| Project | Description |
+| --- | --- |
+| [Desktop Commander](https://github.com/wonderwhy-er/DesktopCommanderMCP) | General-purpose MCP server for local filesystem, terminal, process management, editing, and automation. |
+| [DevSpace](https://github.com/Waishnav/devspace) | Self-hosted MCP server that brings a Codex-style coding workflow to ChatGPT and other MCP-capable hosts. |
+| [CodexPro](https://github.com/rebel0789/codexpro) | Local MCP coding tools for ChatGPT, scoped to explicitly allowed repositories. |
+| [ChatGPT Local Coder](https://github.com/hoangcoderr/chatgpt-local-coder) | Self-hosted MCP server that gives ChatGPT Web filesystem, shell, Git, patching, and project-context tools. |
+| [Local Coding Agent](https://github.com/LongNgn204/local-coding-agent) | Local MCP coding workspace for ChatGPT Web and other MCP clients. |
+| [Proxide](https://github.com/tt-a1i/proxide) | Agent-agnostic workspace bridge for using web-based models with local repositories through MCP or a browser fallback. |
+| [codex-mcp](https://github.com/mollehxh/codex-mcp) | Small MCP server exposing a Codex-like workspace interface over stdio or HTTP. |
+
+> [!NOTE]
+> I do not own or maintain any of the projects listed above. They are included here for informational purposes only.
+
 # Who needs this?
 
 - People who used up their Codex quota on the first few day after it reset (me🥺)
