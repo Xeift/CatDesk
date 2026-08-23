@@ -219,6 +219,24 @@ fn widget_resource_ui_meta(public_base_url: Option<&str>) -> Value {
 }
 
 fn handle_resources_list(req: &JsonRpcRequest, public_base_url: Option<&str>) -> JsonRpcResponse {
+    handle_resources_list_with_show_detail_mode(req, public_base_url, current_show_detail_mode())
+}
+
+fn handle_resources_list_with_show_detail_mode(
+    req: &JsonRpcRequest,
+    public_base_url: Option<&str>,
+    show_detail_mode: ShowDetailMode,
+) -> JsonRpcResponse {
+    if show_detail_mode == ShowDetailMode::Disable {
+        return JsonRpcResponse::success(
+            req.id.clone(),
+            json!({
+                "resources": [],
+                "nextCursor": null
+            }),
+        );
+    }
+
     let ui_meta = widget_resource_ui_meta(public_base_url);
     let resource_uri = current_widget_resource_uri();
     JsonRpcResponse::success(
@@ -310,11 +328,28 @@ fn handle_resources_read(
     public_base_url: Option<&str>,
     mascot_seed: u64,
 ) -> JsonRpcResponse {
+    handle_resources_read_with_show_detail_mode(
+        req,
+        public_base_url,
+        mascot_seed,
+        current_show_detail_mode(),
+    )
+}
+
+fn handle_resources_read_with_show_detail_mode(
+    req: &JsonRpcRequest,
+    public_base_url: Option<&str>,
+    mascot_seed: u64,
+    show_detail_mode: ShowDetailMode,
+) -> JsonRpcResponse {
     let uri = req
         .params
         .get("uri")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if show_detail_mode == ShowDetailMode::Disable {
+        return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
+    }
     let text = if uri == UI_TEMPLATE_URI || uri.starts_with(&format!("{UI_TEMPLATE_URI}?")) {
         render_widget_html(uri, mascot_seed)
     } else {
@@ -3292,6 +3327,15 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    fn resources_list_request() -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-resources")),
+            method: "resources/list".into(),
+            params: json!({}),
+        }
+    }
+
     fn resources_read_request(uri: &str) -> JsonRpcRequest {
         JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -5474,6 +5518,68 @@ hello world"
         let uri = current_widget_resource_uri_for_tool("catdesk_instruction");
         assert!(uri.contains("widgetRevision=2"));
         assert!(uri.contains("toolName=catdesk_instruction"));
+    }
+
+    #[test]
+    fn widget_resources_follow_show_detail_mode() {
+        for mode in [ShowDetailMode::Expanded, ShowDetailMode::Collapsed] {
+            let list_response = handle_resources_list_with_show_detail_mode(
+                &resources_list_request(),
+                Some("https://example.ngrok.app"),
+                mode,
+            );
+            assert_eq!(
+                list_response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("resources"))
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(1)
+            );
+
+            let read_response = handle_resources_read_with_show_detail_mode(
+                &resources_read_request(UI_TEMPLATE_URI),
+                Some("https://example.ngrok.app"),
+                1,
+                mode,
+            );
+            assert!(read_response.error.is_none());
+            assert!(read_response.result.is_some());
+        }
+
+        let list_response = handle_resources_list_with_show_detail_mode(
+            &resources_list_request(),
+            Some("https://example.ngrok.app"),
+            ShowDetailMode::Disable,
+        );
+        assert_eq!(
+            list_response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("resources"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+
+        let read_response = handle_resources_read_with_show_detail_mode(
+            &resources_read_request(UI_TEMPLATE_URI),
+            Some("https://example.ngrok.app"),
+            1,
+            ShowDetailMode::Disable,
+        );
+        assert!(read_response.result.is_none());
+        assert_eq!(
+            read_response.error.as_ref().map(|error| error.code),
+            Some(-32602)
+        );
+        assert!(
+            read_response
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("Unknown resource"))
+        );
     }
 
     #[test]
