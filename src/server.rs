@@ -147,24 +147,6 @@ fn modern_jsonrpc_error_response(
         .unwrap()
 }
 
-fn modern_request_protocol_version(body: &Value) -> Option<&str> {
-    body.get("params")
-        .and_then(Value::as_object)
-        .and_then(|params| params.get("_meta"))
-        .and_then(Value::as_object)
-        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
-        .and_then(Value::as_str)
-}
-
-fn is_modern_request(body: &Value, headers: &HeaderMap) -> bool {
-    body.get("method").and_then(Value::as_str) == Some("server/discover")
-        || modern_request_protocol_version(body).is_some()
-        || headers
-            .get("mcp-protocol-version")
-            .and_then(|value| value.to_str().ok())
-            == Some(mcp::MODERN_MCP_PROTOCOL_VERSION)
-}
-
 fn decode_mcp_name_header(value: &str) -> Result<String, String> {
     let Some(encoded) = value
         .strip_prefix("=?base64?")
@@ -532,34 +514,6 @@ fn summarize_request(req: &Value) -> String {
             }
             summary
         }
-        "initialize" => {
-            let protocol = req
-                .get("params")
-                .and_then(|params| params.get("protocolVersion"))
-                .and_then(Value::as_str);
-            let client_name = req
-                .get("params")
-                .and_then(|params| params.get("clientInfo"))
-                .and_then(|client| client.get("name"))
-                .and_then(Value::as_str);
-            let client_version = req
-                .get("params")
-                .and_then(|params| params.get("clientInfo"))
-                .and_then(|client| client.get("version"))
-                .and_then(Value::as_str);
-            let mut summary = format!("initialize id={id}");
-            if let Some(protocol) = protocol {
-                summary.push_str(&format!(" protocol={protocol}"));
-            }
-            if let Some(client_name) = client_name {
-                summary.push_str(&format!(" client={client_name}"));
-                if let Some(client_version) = client_version {
-                    summary.push('/');
-                    summary.push_str(client_version);
-                }
-            }
-            summary
-        }
         "resources/read" => {
             let uri = request_resource_uri(req).unwrap_or("?");
             let tool = query_param_value(uri, "toolName").filter(|value| !value.is_empty());
@@ -648,26 +602,6 @@ fn summarize_response(req: &Value, resp: &Value) -> String {
             format!(
                 "server/discover id={id} ok versions={} capabilities={}",
                 if versions.is_empty() { "-" } else { &versions },
-                if capabilities.is_empty() {
-                    "-".to_string()
-                } else {
-                    capabilities.join(",")
-                }
-            )
-        }
-        "initialize" => {
-            let protocol = result
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
-            let mut capabilities = result
-                .get("capabilities")
-                .and_then(Value::as_object)
-                .map(|object| object.keys().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            capabilities.sort();
-            format!(
-                "initialize id={id} ok protocol={protocol} capabilities={}",
                 if capabilities.is_empty() {
                     "-".to_string()
                 } else {
@@ -1396,30 +1330,42 @@ mod tests {
 
     #[test]
     fn detailed_mcp_log_summaries_include_bootstrap_context() {
-        let initialize_request = json!({
+        let discover_request = json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "initialize",
+            "method": "server/discover",
             "params": {
-                "protocolVersion": "2025-11-25",
-                "clientInfo": {"name": "ChatGPT", "version": "test"}
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": mcp::MODERN_MCP_PROTOCOL_VERSION,
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "ChatGPT",
+                        "version": "test"
+                    }
+                }
             }
         });
-        let initialize_response = json!({
+        let discover_response = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "result": {
-                "protocolVersion": "2025-11-25",
+                "supportedVersions": [mcp::MODERN_MCP_PROTOCOL_VERSION],
                 "capabilities": {"tools": {}, "resources": {}}
             }
         });
         assert_eq!(
-            summarize_request(&initialize_request),
-            "initialize id=1 protocol=2025-11-25 client=ChatGPT/test"
+            summarize_request(&discover_request),
+            format!(
+                "server/discover id=1 protocol={} client=ChatGPT/test",
+                mcp::MODERN_MCP_PROTOCOL_VERSION
+            )
         );
         assert_eq!(
-            summarize_response(&initialize_request, &initialize_response),
-            "initialize id=1 ok protocol=2025-11-25 capabilities=resources,tools"
+            summarize_response(&discover_request, &discover_response),
+            format!(
+                "server/discover id=1 ok versions={} capabilities=resources,tools",
+                mcp::MODERN_MCP_PROTOCOL_VERSION
+            )
         );
 
         let resource_request = json!({
@@ -1539,18 +1485,18 @@ mod tests {
 
         let response = post_mcp(
             State(server_state),
-            mcp_request_body("initialize", json!({})),
+            mcp_request_body("server/discover", json!({})),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("read initialize response");
-        let payload: Value = serde_json::from_slice(&body).expect("parse initialize response");
+            .expect("read discover response");
+        let payload: Value = serde_json::from_slice(&body).expect("parse discover response");
         let capabilities = payload
             .get("result")
             .and_then(|result| result.get("capabilities"))
-            .expect("missing initialize capabilities");
+            .expect("missing discover capabilities");
         assert!(capabilities.get("tools").is_some());
         assert!(
             capabilities.get("resources").is_none(),
@@ -1589,7 +1535,7 @@ mod tests {
 
         let response = post_mcp(
             State(server_state),
-            mcp_request_body("initialize", json!({})),
+            mcp_request_body("server/discover", json!({})),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1603,12 +1549,16 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(
             messages[0],
-            format!("→ POST {mcp_path} initialize id=req-mcp")
+            format!(
+                "→ POST {mcp_path} server/discover id=req-mcp protocol={} client=catdesk-test/1.0.0",
+                mcp::MODERN_MCP_PROTOCOL_VERSION
+            )
         );
         assert_eq!(
             messages[1],
             format!(
-                "← POST {mcp_path} initialize id=req-mcp ok protocol=2025-11-25 capabilities=resources,tools"
+                "← POST {mcp_path} server/discover id=req-mcp ok versions={} capabilities=resources,tools",
+                mcp::MODERN_MCP_PROTOCOL_VERSION
             )
         );
 
@@ -1618,21 +1568,16 @@ mod tests {
     }
 
     fn tool_call_body(name: &str, arguments: Value) -> Bytes {
-        Bytes::from(
-            serde_json::to_vec(&json!({
-                "jsonrpc": "2.0",
-                "id": "req-tool",
-                "method": "tools/call",
-                "params": {
-                    "name": name,
-                    "arguments": arguments,
-                }
-            }))
-            .expect("serialize tool call"),
+        mcp_request_body(
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": arguments,
+            }),
         )
     }
 
-    fn mcp_request_body(method: &str, params: Value) -> Bytes {
+    fn raw_mcp_request_body(method: &str, params: Value) -> Bytes {
         Bytes::from(
             serde_json::to_vec(&json!({
                 "jsonrpc": "2.0",
@@ -1644,7 +1589,7 @@ mod tests {
         )
     }
 
-    fn modern_mcp_request_body(method: &str, mut params: Value) -> Bytes {
+    fn mcp_request_body(method: &str, mut params: Value) -> Bytes {
         let params_obj = params
             .as_object_mut()
             .expect("modern test params must be an object");
@@ -1659,7 +1604,7 @@ mod tests {
                 }
             }),
         );
-        mcp_request_body(method, params)
+        raw_mcp_request_body(method, params)
     }
 
     fn modern_mcp_headers(method: &str, name: Option<&str>) -> HeaderMap {
@@ -1675,14 +1620,34 @@ mod tests {
         headers
     }
 
+    fn modern_mcp_headers_for_body(body: &Bytes) -> HeaderMap {
+        let request: Value = serde_json::from_slice(body).expect("parse MCP request body");
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .expect("missing MCP method");
+        let name = modern_request_name(&request).expect("invalid modern request name");
+        modern_mcp_headers(method, name)
+    }
+
+    async fn post_mcp(State(s): State<ServerState>, body: Bytes) -> Response<Body> {
+        let headers = modern_mcp_headers_for_body(&body);
+        post_mcp_inner(State(s), body, &headers, None).await
+    }
+
     async fn post_mcp_json_with_show_detail_mode(
         server_state: &ServerState,
         body: Bytes,
         show_detail_mode: ShowDetailMode,
     ) -> Value {
-        let response =
-            post_mcp_with_show_detail_mode(State(server_state.clone()), body, show_detail_mode)
-                .await;
+        let headers = modern_mcp_headers_for_body(&body);
+        let response = post_mcp_inner(
+            State(server_state.clone()),
+            body,
+            &headers,
+            Some(show_detail_mode),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1717,7 +1682,7 @@ mod tests {
         let discover = post_mcp_http(
             State(server_state.clone()),
             modern_mcp_headers("server/discover", None),
-            modern_mcp_request_body("server/discover", json!({})),
+            mcp_request_body("server/discover", json!({})),
         )
         .await;
         assert_eq!(discover.status(), StatusCode::OK);
@@ -1759,7 +1724,7 @@ mod tests {
         let tools = post_mcp_http(
             State(server_state.clone()),
             modern_mcp_headers("tools/list", None),
-            modern_mcp_request_body("tools/list", json!({})),
+            mcp_request_body("tools/list", json!({})),
         )
         .await;
         assert_eq!(tools.status(), StatusCode::OK);
@@ -1793,7 +1758,7 @@ mod tests {
         let unknown = post_mcp_http(
             State(server_state.clone()),
             modern_mcp_headers("catdesk/unknown", None),
-            modern_mcp_request_body("catdesk/unknown", json!({})),
+            mcp_request_body("catdesk/unknown", json!({})),
         )
         .await;
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
@@ -1811,11 +1776,11 @@ mod tests {
         );
 
         let mut mismatched_headers = modern_mcp_headers("server/discover", None);
-        mismatched_headers.insert("mcp-protocol-version", "2025-11-25".parse().unwrap());
+        mismatched_headers.insert("mcp-protocol-version", "1900-01-01".parse().unwrap());
         let mismatch = post_mcp_http(
             State(server_state),
             mismatched_headers,
-            modern_mcp_request_body("server/discover", json!({})),
+            mcp_request_body("server/discover", json!({})),
         )
         .await;
         assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
@@ -1830,6 +1795,82 @@ mod tests {
                 .and_then(|error| error.get("code"))
                 .and_then(Value::as_i64),
             Some(-32020)
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
+    #[tokio::test]
+    async fn initialize_is_not_a_supported_catdesk_mcp_method() {
+        let workspace_root = unique_temp_path("catdesk-no-initialize-workspace");
+        let config_root = unique_temp_path("catdesk-no-initialize-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: app_state,
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+        };
+
+        let legacy_shape = post_mcp_http(
+            State(server_state.clone()),
+            HeaderMap::new(),
+            raw_mcp_request_body(
+                "initialize",
+                json!({
+                    "protocolVersion": "legacy-test",
+                    "capabilities": {},
+                    "clientInfo": {"name": "legacy-client", "version": "1.0.0"}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(legacy_shape.status(), StatusCode::BAD_REQUEST);
+        let legacy_body = to_bytes(legacy_shape.into_body(), usize::MAX)
+            .await
+            .expect("read legacy-shaped response");
+        let legacy_json: Value =
+            serde_json::from_slice(&legacy_body).expect("parse legacy-shaped response");
+        assert_eq!(
+            legacy_json
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(-32602)
+        );
+
+        let modern_shape = post_mcp_http(
+            State(server_state),
+            modern_mcp_headers("initialize", None),
+            mcp_request_body("initialize", json!({})),
+        )
+        .await;
+        assert_eq!(modern_shape.status(), StatusCode::NOT_FOUND);
+        let modern_body = to_bytes(modern_shape.into_body(), usize::MAX)
+            .await
+            .expect("read unsupported initialize response");
+        let modern_json: Value =
+            serde_json::from_slice(&modern_body).expect("parse unsupported initialize response");
+        assert_eq!(
+            modern_json
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(-32601)
         );
 
         let _ = std::fs::remove_file(config_path);
@@ -2367,20 +2408,20 @@ mod tests {
             catdesk_instruction_called: instruction_called.clone(),
         };
 
-        let initialize = post_mcp_json_with_show_detail_mode(
+        let discover = post_mcp_json_with_show_detail_mode(
             &server_state,
-            mcp_request_body("initialize", json!({})),
+            mcp_request_body("server/discover", json!({})),
             ShowDetailMode::Disable,
         )
         .await;
-        let capabilities = initialize
+        let capabilities = discover
             .get("result")
             .and_then(|result| result.get("capabilities"))
-            .expect("missing initialize capabilities");
+            .expect("missing discover capabilities");
         assert!(capabilities.get("tools").is_some());
         assert!(
             capabilities.get("resources").is_none(),
-            "Disable must not advertise resources during initialize"
+            "Disable must not advertise resources during discovery"
         );
 
         let tools_list = post_mcp_json_with_show_detail_mode(
@@ -2599,27 +2640,13 @@ async fn post_mcp_http(
     headers: HeaderMap,
     body_bytes: Bytes,
 ) -> Response<Body> {
-    post_mcp_inner(State(s), body_bytes, Some(&headers), None).await
-}
-
-#[cfg(test)]
-async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<Body> {
-    post_mcp_inner(State(s), body_bytes, None, None).await
-}
-
-#[cfg(test)]
-async fn post_mcp_with_show_detail_mode(
-    state: State<ServerState>,
-    body_bytes: Bytes,
-    show_detail_mode: ShowDetailMode,
-) -> Response<Body> {
-    post_mcp_inner(state, body_bytes, None, Some(show_detail_mode)).await
+    post_mcp_inner(State(s), body_bytes, &headers, None).await
 }
 
 async fn post_mcp_inner(
     State(s): State<ServerState>,
     body_bytes: Bytes,
-    headers: Option<&HeaderMap>,
+    headers: &HeaderMap,
     show_detail_mode: Option<ShowDetailMode>,
 ) -> Response<Body> {
     let body: Value = match serde_json::from_slice(&body_bytes) {
@@ -2738,16 +2765,12 @@ async fn post_mcp_inner(
         message: format!("→ POST {mcp_path} {request_summary}"),
     });
 
-    let modern_request = headers.is_some_and(|headers| is_modern_request(&body, headers));
-    if modern_request {
-        let headers = headers.expect("modern requests require HTTP headers");
-        if let Err(response) = validate_modern_request(&body, headers) {
-            let _ = s.ui_events.send(ServerUiEvent::Log {
-                level: "ERROR",
-                message: format!("← POST {mcp_path} {request_summary} modern-validation-error"),
-            });
-            return response;
-        }
+    if let Err(response) = validate_modern_request(&body, headers) {
+        let _ = s.ui_events.send(ServerUiEvent::Log {
+            level: "ERROR",
+            message: format!("← POST {mcp_path} {request_summary} validation-error"),
+        });
+        return response;
     }
 
     let show_detail_mode = show_detail_mode.unwrap_or(app_show_detail_mode);
@@ -2801,10 +2824,8 @@ async fn post_mcp_inner(
                 partner_binagotchy_seed.as_deref(),
             );
         }
-        if modern_request {
-            if let Some(result) = resp.result.as_mut() {
-                mcp::decorate_modern_result(&req.method, result);
-            }
+        if let Some(result) = resp.result.as_mut() {
+            mcp::decorate_modern_result(&req.method, result);
         }
         response_json = Some(serde_json::to_value(resp).unwrap());
     }
@@ -2838,12 +2859,11 @@ async fn post_mcp_inner(
             "Internal error: request did not produce a JSON-RPC response",
         );
     };
-    let response_status = if modern_request
-        && response_json
-            .get("error")
-            .and_then(|error| error.get("code"))
-            .and_then(Value::as_i64)
-            == Some(-32601)
+    let response_status = if response_json
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_i64)
+        == Some(-32601)
     {
         StatusCode::NOT_FOUND
     } else {

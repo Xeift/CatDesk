@@ -24,10 +24,8 @@ use crate::workspace_tools;
 
 const SERVER_NAME: &str = "catdesk";
 const SERVER_VERSION: &str = "4.0.0";
-const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 pub(crate) const MODERN_MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
-const DEVTOOLS_PROTOCOL_VERSION: &str = "2025-03-26";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
 const WIDGET_RESOURCE_REVISION: u32 = 2;
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
@@ -167,28 +165,6 @@ pub(crate) async fn handle_request_with_show_detail_mode(
 ) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
         "server/discover" => Some(handle_server_discover(req, show_detail_mode)),
-        "initialize" => {
-            // Also initialize devtools bridge if available
-            if let Some(bridge) = devtools {
-                let init_req = json!({
-                    "jsonrpc": "2.0",
-                    "id": "dt-init",
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": DEVTOOLS_PROTOCOL_VERSION,
-                        "capabilities": {},
-                        "clientInfo": {"name": "catdesk-bridge", "version": SERVER_VERSION}
-                    }
-                });
-                let mut b = bridge.lock().await;
-                let _ = b.request(&init_req).await;
-                // Send initialized notification
-                let _ = b
-                    .notify(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
-                    .await;
-            }
-            Some(handle_initialize(req, show_detail_mode))
-        }
         m if m.starts_with("notifications/") => None,
         "tools/list" => Some(
             handle_tools_list_with_show_detail_mode(
@@ -267,17 +243,6 @@ fn handle_server_discover(
     });
     decorate_modern_result("server/discover", &mut result);
     JsonRpcResponse::success(req.id.clone(), result)
-}
-
-fn handle_initialize(req: &JsonRpcRequest, show_detail_mode: ShowDetailMode) -> JsonRpcResponse {
-    JsonRpcResponse::success(
-        req.id.clone(),
-        json!({
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": server_capabilities(show_detail_mode),
-            "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION }
-        }),
-    )
 }
 
 pub(crate) fn decorate_modern_result(method: &str, result: &mut Value) {
@@ -3550,40 +3515,42 @@ mod tests {
     }
 
     #[test]
-    fn initialize_negotiates_2025_11_25_without_changing_devtools_protocol() {
+    fn server_discover_advertises_only_2026_07_28() {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            id: Some(json!("req-initialize")),
-            method: "initialize".into(),
-            params: json!({
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": { "name": "test-client", "version": "1.0.0" }
-            }),
+            id: Some(json!("req-discover")),
+            method: "server/discover".into(),
+            params: json!({}),
         };
 
         for mode in [ShowDetailMode::Expanded, ShowDetailMode::Collapsed] {
-            let response = handle_initialize(&req, mode);
+            let response = handle_server_discover(&req, mode);
+            let result = response.result.as_ref().expect("missing discover result");
             assert_eq!(
-                response
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("protocolVersion"))
+                result
+                    .get("supportedVersions")
+                    .and_then(Value::as_array)
+                    .and_then(|versions| versions.first())
                     .and_then(Value::as_str),
-                Some("2025-11-25")
+                Some(MODERN_MCP_PROTOCOL_VERSION)
+            );
+            assert_eq!(
+                result
+                    .get("supportedVersions")
+                    .and_then(Value::as_array)
+                    .map(Vec::len),
+                Some(1)
             );
             assert!(
-                response
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("capabilities"))
+                result
+                    .get("capabilities")
                     .and_then(|capabilities| capabilities.get("resources"))
                     .is_some(),
                 "Widget-enabled modes must advertise resources"
             );
         }
 
-        let disabled = handle_initialize(&req, ShowDetailMode::Disable);
+        let disabled = handle_server_discover(&req, ShowDetailMode::Disable);
         let disabled_capabilities = disabled
             .result
             .as_ref()
@@ -3594,9 +3561,6 @@ mod tests {
             disabled_capabilities.get("resources").is_none(),
             "Disable must not advertise resources"
         );
-
-        assert_eq!(MCP_PROTOCOL_VERSION, "2025-11-25");
-        assert_eq!(DEVTOOLS_PROTOCOL_VERSION, "2025-03-26");
     }
 
     #[tokio::test]

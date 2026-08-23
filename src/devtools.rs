@@ -1,10 +1,14 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 use crate::browser::DetectedBrowser;
+
+const DEVTOOLS_PROTOCOL_VERSION: &str = "2025-03-26";
+const DEVTOOLS_CLIENT_NAME: &str = "catdesk-bridge";
+const DEVTOOLS_CLIENT_VERSION: &str = "4.0.0";
 
 /// A running chrome-devtools-mcp child process with stdin/stdout JSON-RPC bridge.
 pub struct DevtoolsBridge {
@@ -88,6 +92,30 @@ impl DevtoolsBridge {
                 }
             }
         });
+
+        {
+            let init_req = json!({
+                "jsonrpc": "2.0",
+                "id": "dt-init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": DEVTOOLS_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": DEVTOOLS_CLIENT_NAME,
+                        "version": DEVTOOLS_CLIENT_VERSION
+                    }
+                }
+            });
+            let mut bridge_guard = bridge.lock().await;
+            bridge_guard.request(&init_req).await?;
+            bridge_guard
+                .notify(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized"
+                }))
+                .await?;
+        }
 
         Ok(bridge)
     }
