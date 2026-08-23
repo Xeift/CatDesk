@@ -133,6 +133,35 @@ pub async fn handle_request(
     command_jobs: &CommandJobManager,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
 ) -> Option<JsonRpcResponse> {
+    handle_request_with_show_detail_mode(
+        req,
+        workspace_root,
+        mascot_seed,
+        public_base_url,
+        mode,
+        tool_mode,
+        set_catdesk_as_co_author,
+        catdesk_instruction_called,
+        command_jobs,
+        devtools,
+        current_show_detail_mode(),
+    )
+    .await
+}
+
+pub(crate) async fn handle_request_with_show_detail_mode(
+    req: &JsonRpcRequest,
+    workspace_root: &str,
+    mascot_seed: u64,
+    public_base_url: Option<&str>,
+    mode: Mode,
+    tool_mode: ToolMode,
+    set_catdesk_as_co_author: bool,
+    catdesk_instruction_called: bool,
+    command_jobs: &CommandJobManager,
+    devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+    show_detail_mode: ShowDetailMode,
+) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
         "initialize" => {
             // Also initialize devtools bridge if available
@@ -157,14 +186,26 @@ pub async fn handle_request(
             Some(handle_initialize(req))
         }
         m if m.starts_with("notifications/") => None,
-        "tools/list" => Some(handle_tools_list(req, mode, tool_mode, devtools).await),
+        "tools/list" => Some(
+            handle_tools_list_with_show_detail_mode(
+                req,
+                mode,
+                tool_mode,
+                devtools,
+                show_detail_mode,
+            )
+            .await,
+        ),
         "tools/call" => {
             let tool_name = tool_name_from_request(req);
             if tool_name != "catdesk_instruction" && !catdesk_instruction_called {
-                Some(catdesk_instruction_required_response(req))
+                Some(catdesk_instruction_required_response_with_show_detail_mode(
+                    req,
+                    show_detail_mode,
+                ))
             } else {
                 Some(
-                    handle_tools_call(
+                    handle_tools_call_with_show_detail_mode(
                         req,
                         workspace_root,
                         mascot_seed,
@@ -173,13 +214,23 @@ pub async fn handle_request(
                         set_catdesk_as_co_author,
                         command_jobs,
                         devtools,
+                        show_detail_mode,
                     )
                     .await,
                 )
             }
         }
-        "resources/list" => Some(handle_resources_list(req, public_base_url)),
-        "resources/read" => Some(handle_resources_read(req, public_base_url, mascot_seed)),
+        "resources/list" => Some(handle_resources_list_with_show_detail_mode(
+            req,
+            public_base_url,
+            show_detail_mode,
+        )),
+        "resources/read" => Some(handle_resources_read_with_show_detail_mode(
+            req,
+            public_base_url,
+            mascot_seed,
+            show_detail_mode,
+        )),
         "ping" => Some(JsonRpcResponse::success(req.id.clone(), json!({}))),
         _ => Some(JsonRpcResponse::error(
             req.id.clone(),
@@ -216,10 +267,6 @@ fn widget_resource_ui_meta(public_base_url: Option<&str>) -> Value {
         );
     }
     Value::Object(ui)
-}
-
-fn handle_resources_list(req: &JsonRpcRequest, public_base_url: Option<&str>) -> JsonRpcResponse {
-    handle_resources_list_with_show_detail_mode(req, public_base_url, current_show_detail_mode())
 }
 
 fn handle_resources_list_with_show_detail_mode(
@@ -323,6 +370,7 @@ fn render_widget_html(resource_uri: &str, mascot_seed: u64) -> String {
         .replace(INITIAL_MASCOT_OUTLINE_PLACEHOLDER, &initial_mascot_outline)
 }
 
+#[cfg(test)]
 fn handle_resources_read(
     req: &JsonRpcRequest,
     public_base_url: Option<&str>,
@@ -599,11 +647,29 @@ fn catdesk_instruction_tool_descriptor() -> Value {
     })
 }
 
+#[cfg(test)]
 async fn handle_tools_list(
     req: &JsonRpcRequest,
     mode: Mode,
     tool_mode: ToolMode,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+) -> JsonRpcResponse {
+    handle_tools_list_with_show_detail_mode(
+        req,
+        mode,
+        tool_mode,
+        devtools,
+        current_show_detail_mode(),
+    )
+    .await
+}
+
+async fn handle_tools_list_with_show_detail_mode(
+    req: &JsonRpcRequest,
+    mode: Mode,
+    tool_mode: ToolMode,
+    devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+    show_detail_mode: ShowDetailMode,
 ) -> JsonRpcResponse {
     let mut tools: Vec<Value> = Vec::new();
 
@@ -821,7 +887,7 @@ async fn handle_tools_list(
 
     for tool in &mut tools {
         ensure_local_tool_output_schema(tool);
-        ensure_tool_descriptor_widget_template(tool);
+        ensure_tool_descriptor_widget_template_with_show_detail_mode(tool, show_detail_mode);
     }
 
     JsonRpcResponse::success(req.id.clone(), json!({ "tools": tools }))
@@ -829,6 +895,7 @@ async fn handle_tools_list(
 
 // ── tools/call ──────────────────────────────────────────────
 
+#[cfg(test)]
 async fn handle_tools_call(
     req: &JsonRpcRequest,
     workspace_root: &str,
@@ -838,6 +905,31 @@ async fn handle_tools_call(
     set_catdesk_as_co_author: bool,
     command_jobs: &CommandJobManager,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+) -> JsonRpcResponse {
+    handle_tools_call_with_show_detail_mode(
+        req,
+        workspace_root,
+        mascot_seed,
+        mode,
+        tool_mode,
+        set_catdesk_as_co_author,
+        command_jobs,
+        devtools,
+        current_show_detail_mode(),
+    )
+    .await
+}
+
+async fn handle_tools_call_with_show_detail_mode(
+    req: &JsonRpcRequest,
+    workspace_root: &str,
+    mascot_seed: u64,
+    mode: Mode,
+    tool_mode: ToolMode,
+    set_catdesk_as_co_author: bool,
+    command_jobs: &CommandJobManager,
+    devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
+    show_detail_mode: ShowDetailMode,
 ) -> JsonRpcResponse {
     let params = &req.params;
     let tool_name = params
@@ -853,7 +945,14 @@ async fn handle_tools_call(
 
     let mut response = {
         if tool_name == "catdesk_instruction" {
-            handle_catdesk_instruction(req, workspace_root, mascot_seed, mode, tool_mode)
+            handle_catdesk_instruction_with_show_detail_mode(
+                req,
+                workspace_root,
+                mascot_seed,
+                mode,
+                tool_mode,
+                show_detail_mode,
+            )
         // Local computer tools
         } else if mode.computer_enabled() {
             if matches!(
@@ -948,9 +1047,19 @@ async fn handle_tools_call(
     let tool_name = tool_name_from_request(req);
     if let Some(result) = response.result.take() {
         if has_turn_changes {
-            response.result = Some(enrich_tool_result(req, result, Some(&widget_context)));
+            response.result = Some(enrich_tool_result_with_show_detail_mode(
+                req,
+                result,
+                Some(&widget_context),
+                show_detail_mode,
+            ));
         } else {
-            response.result = Some(enrich_tool_result(req, result, None));
+            response.result = Some(enrich_tool_result_with_show_detail_mode(
+                req,
+                result,
+                None,
+                show_detail_mode,
+            ));
         }
     }
 
@@ -1630,10 +1739,6 @@ fn catdesk_instruction_required_widget_payload(req: &JsonRpcRequest) -> Value {
     Value::Object(payload)
 }
 
-fn catdesk_instruction_required_response(req: &JsonRpcRequest) -> JsonRpcResponse {
-    catdesk_instruction_required_response_with_show_detail_mode(req, current_show_detail_mode())
-}
-
 fn catdesk_instruction_required_response_with_show_detail_mode(
     req: &JsonRpcRequest,
     show_detail_mode: ShowDetailMode,
@@ -2004,23 +2109,6 @@ fn catdesk_instruction_widget_payload(
     )
 }
 
-fn handle_catdesk_instruction(
-    req: &JsonRpcRequest,
-    workspace_root: &str,
-    mascot_seed: u64,
-    mode: Mode,
-    tool_mode: ToolMode,
-) -> JsonRpcResponse {
-    handle_catdesk_instruction_with_show_detail_mode(
-        req,
-        workspace_root,
-        mascot_seed,
-        mode,
-        tool_mode,
-        current_show_detail_mode(),
-    )
-}
-
 fn handle_catdesk_instruction_with_show_detail_mode(
     req: &JsonRpcRequest,
     workspace_root: &str,
@@ -2201,8 +2289,11 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
     )
 }
 
-fn ensure_tool_descriptor_widget_template(tool: &mut Value) {
-    if current_show_detail_mode() == ShowDetailMode::Disable {
+fn ensure_tool_descriptor_widget_template_with_show_detail_mode(
+    tool: &mut Value,
+    show_detail_mode: ShowDetailMode,
+) {
+    if show_detail_mode == ShowDetailMode::Disable {
         return;
     }
 
@@ -2868,6 +2959,7 @@ fn enrich_tool_result_with_show_detail_mode(
     result
 }
 
+#[cfg(test)]
 fn enrich_tool_result(
     req: &JsonRpcRequest,
     result: Value,

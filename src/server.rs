@@ -974,6 +974,33 @@ mod tests {
         )
     }
 
+    fn mcp_request_body(method: &str, params: Value) -> Bytes {
+        Bytes::from(
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": "req-mcp",
+                "method": method,
+                "params": params,
+            }))
+            .expect("serialize MCP request"),
+        )
+    }
+
+    async fn post_mcp_json_with_show_detail_mode(
+        server_state: &ServerState,
+        body: Bytes,
+        show_detail_mode: ShowDetailMode,
+    ) -> Value {
+        let response =
+            post_mcp_with_show_detail_mode(State(server_state.clone()), body, show_detail_mode)
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read MCP response body");
+        serde_json::from_slice(&body).expect("parse MCP response")
+    }
+
     #[tokio::test]
     async fn public_routes_require_secret_prefix() {
         let workspace_root = unique_temp_path("catdesk-route-guard");
@@ -1469,6 +1496,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_show_detail_mode_hides_widgets_across_mcp_flow() {
+        let workspace_root = unique_temp_path("catdesk-disable-mcp-flow-workspace");
+        let config_root = unique_temp_path("catdesk-disable-mcp-flow-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+        std::fs::write(workspace_root.join("hello.txt"), "hello world\n")
+            .expect("write workspace file");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let instruction_called = Arc::new(AtomicBool::new(false));
+        let server_state = ServerState {
+            app: app_state.clone(),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: instruction_called.clone(),
+        };
+
+        let tools_list = post_mcp_json_with_show_detail_mode(
+            &server_state,
+            mcp_request_body("tools/list", json!({})),
+            ShowDetailMode::Disable,
+        )
+        .await;
+        let tools = tools_list
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools");
+        assert!(!tools.is_empty());
+        for tool in tools {
+            assert!(
+                tool.get("_meta")
+                    .and_then(|meta| meta.get("openai/outputTemplate"))
+                    .is_none(),
+                "Disable must not advertise a Widget output template"
+            );
+        }
+
+        let blocked = post_mcp_json_with_show_detail_mode(
+            &server_state,
+            tool_call_body("read", json!({ "path": "hello.txt" })),
+            ShowDetailMode::Disable,
+        )
+        .await;
+        assert_eq!(
+            blocked
+                .get("result")
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("errorCode"))
+                .and_then(Value::as_str),
+            Some("CATDESK_INSTRUCTION_REQUIRED")
+        );
+        assert!(
+            blocked
+                .get("result")
+                .and_then(|result| result.get("_meta"))
+                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                .is_none()
+        );
+
+        let instruction = post_mcp_json_with_show_detail_mode(
+            &server_state,
+            tool_call_body("catdesk_instruction", json!({})),
+            ShowDetailMode::Disable,
+        )
+        .await;
+        assert!(
+            instruction
+                .get("result")
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("instructionText"))
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        assert!(
+            instruction
+                .get("result")
+                .and_then(|result| result.get("_meta"))
+                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                .is_none()
+        );
+        assert!(instruction_called.load(Ordering::Acquire));
+
+        let allowed = post_mcp_json_with_show_detail_mode(
+            &server_state,
+            tool_call_body("read", json!({ "path": "hello.txt" })),
+            ShowDetailMode::Disable,
+        )
+        .await;
+        assert_eq!(
+            allowed
+                .get("result")
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|structured| structured.get("text"))
+                .and_then(Value::as_str),
+            Some("hello world\n")
+        );
+        assert!(
+            allowed
+                .get("result")
+                .and_then(|result| result.get("_meta"))
+                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                .is_none()
+        );
+
+        let resources_list = post_mcp_json_with_show_detail_mode(
+            &server_state,
+            mcp_request_body("resources/list", json!({})),
+            ShowDetailMode::Disable,
+        )
+        .await;
+        assert_eq!(
+            resources_list
+                .get("result")
+                .and_then(|result| result.get("resources"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+
+        let resources_read = post_mcp_json_with_show_detail_mode(
+            &server_state,
+            mcp_request_body(
+                "resources/read",
+                json!({ "uri": "ui://widget/catdesk-dashboard.html" }),
+            ),
+            ShowDetailMode::Disable,
+        )
+        .await;
+        assert_eq!(
+            resources_read
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(-32602)
+        );
+
+        let app = app_state.lock().await;
+        let usage = app.all_time_usage_totals();
+        assert!(usage.total_tokens > 0);
+        assert_eq!(usage.tool_call_count, 3);
+        assert_eq!(app.session_usage_totals, usage);
+        drop(app);
+
+        let _ = std::fs::remove_file(workspace_root.join("hello.txt"));
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
+    #[tokio::test]
     async fn post_mcp_accumulates_usage_from_widget_payload_meta() {
         let workspace_root = unique_temp_path("catdesk-post-mcp-workspace");
         let config_root = unique_temp_path("catdesk-post-mcp-config");
@@ -1547,6 +1734,23 @@ mod tests {
 // ── POST /<slug>/mcp ────────────────────────────────────────
 
 async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<Body> {
+    post_mcp_inner(State(s), body_bytes, None).await
+}
+
+#[cfg(test)]
+async fn post_mcp_with_show_detail_mode(
+    state: State<ServerState>,
+    body_bytes: Bytes,
+    show_detail_mode: ShowDetailMode,
+) -> Response<Body> {
+    post_mcp_inner(state, body_bytes, Some(show_detail_mode)).await
+}
+
+async fn post_mcp_inner(
+    State(s): State<ServerState>,
+    body_bytes: Bytes,
+    show_detail_mode: Option<ShowDetailMode>,
+) -> Response<Body> {
     let body: Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
@@ -1629,21 +1833,42 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
         )
     };
 
+    let response = match show_detail_mode {
+        Some(show_detail_mode) => {
+            mcp::handle_request_with_show_detail_mode(
+                &req,
+                &workspace_root,
+                mascot_seed,
+                ngrok_url.as_deref(),
+                mode,
+                tool_mode,
+                set_catdesk_as_co_author,
+                s.catdesk_instruction_called.load(Ordering::Acquire),
+                &s.command_jobs,
+                &s.devtools,
+                show_detail_mode,
+            )
+            .await
+        }
+        None => {
+            mcp::handle_request(
+                &req,
+                &workspace_root,
+                mascot_seed,
+                ngrok_url.as_deref(),
+                mode,
+                tool_mode,
+                set_catdesk_as_co_author,
+                s.catdesk_instruction_called.load(Ordering::Acquire),
+                &s.command_jobs,
+                &s.devtools,
+            )
+            .await
+        }
+    };
+
     let mut response_json: Option<Value> = None;
-    if let Some(resp) = mcp::handle_request(
-        &req,
-        &workspace_root,
-        mascot_seed,
-        ngrok_url.as_deref(),
-        mode,
-        tool_mode,
-        set_catdesk_as_co_author,
-        s.catdesk_instruction_called.load(Ordering::Acquire),
-        &s.command_jobs,
-        &s.devtools,
-    )
-    .await
-    {
+    if let Some(resp) = response {
         let mut resp = resp;
         if req.method == "tools/call" {
             if req.params.get("name").and_then(Value::as_str) == Some("catdesk_instruction")
