@@ -959,6 +959,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(config_root);
     }
 
+    #[tokio::test]
+    async fn post_mcp_uses_app_state_show_detail_mode() {
+        let workspace_root = unique_temp_path("catdesk-show-detail-runtime-workspace");
+        let config_root = unique_temp_path("catdesk-show-detail-runtime-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+
+        let mut app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        app.show_detail_mode = ShowDetailMode::Disable;
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: app_state,
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+        };
+
+        let response = post_mcp(
+            State(server_state),
+            mcp_request_body("initialize", json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read initialize response");
+        let payload: Value = serde_json::from_slice(&body).expect("parse initialize response");
+        let capabilities = payload
+            .get("result")
+            .and_then(|result| result.get("capabilities"))
+            .expect("missing initialize capabilities");
+        assert!(capabilities.get("tools").is_some());
+        assert!(
+            capabilities.get("resources").is_none(),
+            "runtime MCP handling must use AppState show_detail_mode"
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
     fn tool_call_body(name: &str, arguments: Value) -> Bytes {
         Bytes::from(
             serde_json::to_vec(&json!({
@@ -1835,6 +1885,7 @@ async fn post_mcp_inner(
         ngrok_url,
         mcp_path,
         partner_binagotchy_seed,
+        app_show_detail_mode,
     ) = {
         let app = s.app.lock().await;
         (
@@ -1846,42 +1897,25 @@ async fn post_mcp_inner(
             app.ngrok_url.clone(),
             app.mcp_path(),
             app.partner_binagotchy_seed.clone(),
+            app.show_detail_mode,
         )
     };
 
-    let response = match show_detail_mode {
-        Some(show_detail_mode) => {
-            mcp::handle_request_with_show_detail_mode(
-                &req,
-                &workspace_root,
-                mascot_seed,
-                ngrok_url.as_deref(),
-                mode,
-                tool_mode,
-                set_catdesk_as_co_author,
-                s.catdesk_instruction_called.load(Ordering::Acquire),
-                &s.command_jobs,
-                &s.devtools,
-                show_detail_mode,
-            )
-            .await
-        }
-        None => {
-            mcp::handle_request(
-                &req,
-                &workspace_root,
-                mascot_seed,
-                ngrok_url.as_deref(),
-                mode,
-                tool_mode,
-                set_catdesk_as_co_author,
-                s.catdesk_instruction_called.load(Ordering::Acquire),
-                &s.command_jobs,
-                &s.devtools,
-            )
-            .await
-        }
-    };
+    let show_detail_mode = show_detail_mode.unwrap_or(app_show_detail_mode);
+    let response = mcp::handle_request_with_show_detail_mode(
+        &req,
+        &workspace_root,
+        mascot_seed,
+        ngrok_url.as_deref(),
+        mode,
+        tool_mode,
+        set_catdesk_as_co_author,
+        s.catdesk_instruction_called.load(Ordering::Acquire),
+        &s.command_jobs,
+        &s.devtools,
+        show_detail_mode,
+    )
+    .await;
 
     let mut response_json: Option<Value> = None;
     if let Some(resp) = response {

@@ -121,6 +121,7 @@ struct AutoWidgetContext {
 
 // ── Handler ─────────────────────────────────────────────────
 
+#[cfg(test)]
 pub async fn handle_request(
     req: &JsonRpcRequest,
     workspace_root: &str,
@@ -2471,12 +2472,11 @@ fn widget_changed_files(widget_context: Option<&AutoWidgetContext>) -> (Vec<Valu
     (changed_files, has_changes)
 }
 
-fn base_widget_payload_with_show_detail_mode(
+fn base_widget_payload(
     panel_mode: &str,
     title: &str,
     state: &str,
     tool_name: Option<&str>,
-    show_detail_mode: ShowDetailMode,
 ) -> Map<String, Value> {
     let mut payload = Map::new();
     let token_stats_layout = current_token_stats_layout();
@@ -2488,29 +2488,26 @@ fn base_widget_payload_with_show_detail_mode(
         "tokenStatsLayout".to_string(),
         json!(token_stats_layout.as_str()),
     );
-    payload.insert(
-        "showDetailMode".to_string(),
-        json!(show_detail_mode.as_str()),
-    );
     if let Some(tool_name) = tool_name {
         payload.insert("toolName".to_string(), json!(tool_name));
     }
     payload
 }
 
-fn base_widget_payload(
+#[cfg(test)]
+fn base_widget_payload_with_show_detail_mode(
     panel_mode: &str,
     title: &str,
     state: &str,
     tool_name: Option<&str>,
+    show_detail_mode: ShowDetailMode,
 ) -> Map<String, Value> {
-    base_widget_payload_with_show_detail_mode(
-        panel_mode,
-        title,
-        state,
-        tool_name,
-        current_show_detail_mode(),
-    )
+    let mut payload = base_widget_payload(panel_mode, title, state, tool_name);
+    payload.insert(
+        "showDetailMode".to_string(),
+        json!(show_detail_mode.as_str()),
+    );
+    payload
 }
 
 fn current_token_stats_layout() -> TokenStatsLayout {
@@ -2522,13 +2519,6 @@ fn current_token_stats_layout() -> TokenStatsLayout {
 #[cfg(test)]
 fn current_show_detail_mode() -> ShowDetailMode {
     ShowDetailMode::Expanded
-}
-
-#[cfg(not(test))]
-fn current_show_detail_mode() -> ShowDetailMode {
-    crate::state::load_app_config()
-        .map(|config| config.show_detail_mode)
-        .unwrap_or_default()
 }
 
 fn attach_widget_changed_files(
@@ -2972,6 +2962,12 @@ fn enrich_tool_result_with_show_detail_mode(
     }
     if let Some(widget_payload) = widget_payload {
         attach_widget_payload_meta(&mut result, widget_payload);
+    }
+    if let Some(widget_payload) = widget_payload_meta_mut(&mut result) {
+        widget_payload.insert(
+            "showDetailMode".to_string(),
+            json!(show_detail_mode.as_str()),
+        );
     }
     remove_text_content_from_tool_result(req, &mut result);
     result
@@ -5362,6 +5358,16 @@ mod tests {
                 .and_then(Value::as_str)
                 .is_some()
         );
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("_meta"))
+                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                .and_then(|payload| payload.get("showDetailMode"))
+                .and_then(Value::as_str),
+            Some("expanded")
+        );
 
         let _ = std::fs::remove_dir_all(workspace_root);
     }
@@ -5888,7 +5894,7 @@ hello world"
         );
         assert!(widget_payload.get("agentsPathMode").is_some());
         assert!(widget_payload.get("tokenStatsLayout").is_some());
-        assert!(widget_payload.get("showDetailMode").is_some());
+        assert!(widget_payload.get("showDetailMode").is_none());
         assert_eq!(
             widget_payload
                 .get("tokenStatsLayoutUrl")
