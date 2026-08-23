@@ -183,7 +183,7 @@ pub(crate) async fn handle_request_with_show_detail_mode(
                     .notify(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
                     .await;
             }
-            Some(handle_initialize(req))
+            Some(handle_initialize(req, show_detail_mode))
         }
         m if m.starts_with("notifications/") => None,
         "tools/list" => Some(
@@ -240,15 +240,22 @@ pub(crate) async fn handle_request_with_show_detail_mode(
     }
 }
 
-fn handle_initialize(req: &JsonRpcRequest) -> JsonRpcResponse {
+fn handle_initialize(req: &JsonRpcRequest, show_detail_mode: ShowDetailMode) -> JsonRpcResponse {
+    let capabilities = if show_detail_mode == ShowDetailMode::Disable {
+        json!({
+            "tools": { "listChanged": false }
+        })
+    } else {
+        json!({
+            "tools": { "listChanged": false },
+            "resources": { "listChanged": false }
+        })
+    };
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": {
-                "tools": { "listChanged": false },
-                "resources": { "listChanged": false }
-            },
+            "capabilities": capabilities,
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION }
         }),
     )
@@ -3505,15 +3512,39 @@ mod tests {
             }),
         };
 
-        let response = handle_initialize(&req);
-        assert_eq!(
-            response
-                .result
-                .as_ref()
-                .and_then(|result| result.get("protocolVersion"))
-                .and_then(Value::as_str),
-            Some("2025-11-25")
+        for mode in [ShowDetailMode::Expanded, ShowDetailMode::Collapsed] {
+            let response = handle_initialize(&req, mode);
+            assert_eq!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("protocolVersion"))
+                    .and_then(Value::as_str),
+                Some("2025-11-25")
+            );
+            assert!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("capabilities"))
+                    .and_then(|capabilities| capabilities.get("resources"))
+                    .is_some(),
+                "Widget-enabled modes must advertise resources"
+            );
+        }
+
+        let disabled = handle_initialize(&req, ShowDetailMode::Disable);
+        let disabled_capabilities = disabled
+            .result
+            .as_ref()
+            .and_then(|result| result.get("capabilities"))
+            .expect("missing Disable capabilities");
+        assert!(disabled_capabilities.get("tools").is_some());
+        assert!(
+            disabled_capabilities.get("resources").is_none(),
+            "Disable must not advertise resources"
         );
+
         assert_eq!(MCP_PROTOCOL_VERSION, "2025-11-25");
         assert_eq!(DEVTOOLS_PROTOCOL_VERSION, "2025-03-26");
     }

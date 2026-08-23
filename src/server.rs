@@ -1522,6 +1522,22 @@ mod tests {
             catdesk_instruction_called: instruction_called.clone(),
         };
 
+        let initialize = post_mcp_json_with_show_detail_mode(
+            &server_state,
+            mcp_request_body("initialize", json!({})),
+            ShowDetailMode::Disable,
+        )
+        .await;
+        let capabilities = initialize
+            .get("result")
+            .and_then(|result| result.get("capabilities"))
+            .expect("missing initialize capabilities");
+        assert!(capabilities.get("tools").is_some());
+        assert!(
+            capabilities.get("resources").is_none(),
+            "Disable must not advertise resources during initialize"
+        );
+
         let tools_list = post_mcp_json_with_show_detail_mode(
             &server_state,
             mcp_request_body("tools/list", json!({})),
