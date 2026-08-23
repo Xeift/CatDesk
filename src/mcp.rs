@@ -27,13 +27,17 @@ const SERVER_VERSION: &str = "4.0.0";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const DEVTOOLS_PROTOCOL_VERSION: &str = "2025-03-26";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
-const WIDGET_RESOURCE_REVISION: u32 = 1;
+const WIDGET_RESOURCE_REVISION: u32 = 2;
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
 const REENABLE_WIDGET_PNG: &[u8] = include_bytes!("widget/assets/reenable_widget.png");
+const REFRESH_CATDESK_PNG: &[u8] = include_bytes!("widget/assets/refresh_catdesk.png");
+const REMOVE_CATDESK_PNG: &[u8] = include_bytes!("widget/assets/remove_catdesk.png");
 const WIDGET_RESOURCE_URI_PLACEHOLDER: &str = "__catdeskWidgetResourceUriPlaceholder__";
 const REENABLE_WIDGET_IMAGE_PLACEHOLDER: &str = "__catdeskReenableWidgetImageDataUriPlaceholder__";
+const REFRESH_CATDESK_IMAGE_PLACEHOLDER: &str = "__catdeskRefreshCatdeskImageDataUriPlaceholder__";
+const REMOVE_CATDESK_IMAGE_PLACEHOLDER: &str = "__catdeskRemoveCatdeskImageDataUriPlaceholder__";
 const INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER: &str =
     "__catdeskInitialTokenStatsLayoutPlaceholder__";
 const INITIAL_TOOL_NAME_PLACEHOLDER: &str = "__catdeskInitialToolNamePlaceholder__";
@@ -277,9 +281,19 @@ fn render_widget_html(resource_uri: &str, mascot_seed: u64) -> String {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(REENABLE_WIDGET_PNG)
     );
+    let refresh_catdesk_image = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(REFRESH_CATDESK_PNG)
+    );
+    let remove_catdesk_image = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(REMOVE_CATDESK_PNG)
+    );
     CATDESK_WIDGET_HTML
         .replace(WIDGET_RESOURCE_URI_PLACEHOLDER, resource_uri)
         .replace(REENABLE_WIDGET_IMAGE_PLACEHOLDER, &reenable_widget_image)
+        .replace(REFRESH_CATDESK_IMAGE_PLACEHOLDER, &refresh_catdesk_image)
+        .replace(REMOVE_CATDESK_IMAGE_PLACEHOLDER, &remove_catdesk_image)
         .replace(
             INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER,
             current_token_stats_layout().as_str(),
@@ -5413,7 +5427,7 @@ hello world"
     #[test]
     fn widget_resource_uri_includes_revision_for_cache_busting() {
         let uri = current_widget_resource_uri_for_tool("catdesk_instruction");
-        assert!(uri.contains("widgetRevision=1"));
+        assert!(uri.contains("widgetRevision=2"));
         assert!(uri.contains("toolName=catdesk_instruction"));
     }
 
@@ -5454,8 +5468,12 @@ hello world"
         assert!(text.contains("var INITIAL_MASCOT_OUTLINE = {"));
         assert!(!text.contains(INITIAL_MASCOT_OUTLINE_PLACEHOLDER));
         assert!(text.contains("Disable CatDesk widget?"));
+        assert!(text.contains("Widget disabled"));
+        assert!(text.contains("https://chatgpt.com/#settings/Plugins"));
         assert!(text.contains("data:image/png;base64,"));
         assert!(!text.contains(REENABLE_WIDGET_IMAGE_PLACEHOLDER));
+        assert!(!text.contains(REFRESH_CATDESK_IMAGE_PLACEHOLDER));
+        assert!(!text.contains(REMOVE_CATDESK_IMAGE_PLACEHOLDER));
         assert_eq!(
             ui_meta
                 .get("csp")

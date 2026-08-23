@@ -1860,6 +1860,29 @@
         filter: brightness(1.12);
       }
 
+      .show-detail-disabled-success {
+        width: min(100%, 720px);
+        max-height: calc(100vh - 32px);
+        overflow-y: auto;
+      }
+
+      .show-detail-disabled-success-images {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .show-detail-disabled-success-button {
+        color: var(--text);
+        text-decoration: none;
+      }
+
+      @media (max-width: 560px) {
+        .show-detail-disabled-success-images {
+          grid-template-columns: 1fr;
+        }
+      }
+
       .instruction-hero {
         position: relative;
         overflow: hidden;
@@ -4953,6 +4976,24 @@
           );
         }
 
+        function renderShowDetailDisabledSuccess() {
+          return (
+            '<div class="show-detail-disable-confirm-root" id="show-detail-disabled-success" aria-hidden="true">' +
+            '<div class="show-detail-disable-confirm show-detail-disabled-success" role="dialog" aria-modal="true" aria-labelledby="show-detail-disabled-success-title" aria-describedby="show-detail-disabled-success-message">' +
+            '<h3 class="show-detail-disable-confirm-title" id="show-detail-disabled-success-title">Widget disabled</h3>' +
+            '<div class="show-detail-disable-confirm-message" id="show-detail-disabled-success-message">To apply the disabled widget configuration in ChatGPT, remove CatDesk from ChatGPT settings, install it again, then start a new chat.</div>' +
+            '<div class="show-detail-disabled-success-images">' +
+            '<img class="show-detail-disable-confirm-image" src="__catdeskRefreshCatdeskImageDataUriPlaceholder__" alt="Refresh CatDesk in ChatGPT settings">' +
+            '<img class="show-detail-disable-confirm-image" src="__catdeskRemoveCatdeskImageDataUriPlaceholder__" alt="Remove CatDesk from ChatGPT settings">' +
+            "</div>" +
+            '<div class="show-detail-disable-confirm-actions">' +
+            '<a class="show-detail-disable-confirm-button show-detail-disabled-success-button" href="https://chatgpt.com/#settings/Plugins" target="_blank" rel="noopener noreferrer">Open ChatGPT settings</a>' +
+            "</div>" +
+            "</div>" +
+            "</div>"
+          );
+        }
+
         function renderCatDeskInstructionPanel(current) {
           var pathsHtml = "";
           if (
@@ -5392,6 +5433,7 @@
             pathsHtml +
             renderBinagotchyBrowser(current) +
             renderShowDetailDisableConfirm() +
+            renderShowDetailDisabledSuccess() +
             "</div>"
           );
         }
@@ -6299,6 +6341,7 @@
                   }
                   if (view) view.showDetailMode = nextMode;
                   render();
+                  if (nextMode === "disable") openShowDetailDisabledSuccess();
                 });
             })
             .catch(function (error) {
@@ -6331,6 +6374,24 @@
           confirmRoot.setAttribute("aria-hidden", "false");
           var cancelButton = confirmRoot.querySelector("[data-cancel-show-detail-disable]");
           if (cancelButton) cancelButton.focus();
+        }
+
+        function closeShowDetailDisabledSuccess() {
+          var successRoot = document.getElementById("show-detail-disabled-success");
+          if (!successRoot) return;
+          successRoot.classList.remove("is-open");
+          successRoot.setAttribute("aria-hidden", "true");
+        }
+
+        function openShowDetailDisabledSuccess() {
+          var successRoot = document.getElementById("show-detail-disabled-success");
+          if (!successRoot) return;
+          successRoot.classList.add("is-open");
+          successRoot.setAttribute("aria-hidden", "false");
+          var settingsButton = successRoot.querySelector(
+            ".show-detail-disabled-success-button",
+          );
+          if (settingsButton) settingsButton.focus();
         }
 
         function submitShowDetailMode(fanRoot, node) {
@@ -6373,6 +6434,18 @@
           });
           confirmRoot.addEventListener("keydown", function (event) {
             if (event.key === "Escape") closeShowDetailDisableConfirm();
+          });
+        }
+
+        function bindShowDetailDisabledSuccess(root) {
+          if (!root) return;
+          var successRoot = root.querySelector("#show-detail-disabled-success");
+          if (!successRoot) return;
+          successRoot.addEventListener("click", function (event) {
+            if (event.target === successRoot) closeShowDetailDisabledSuccess();
+          });
+          successRoot.addEventListener("keydown", function (event) {
+            if (event.key === "Escape") closeShowDetailDisabledSuccess();
           });
         }
 
@@ -7627,6 +7700,7 @@
           bindTokenLayoutFans(root);
           bindShowDetailFans(root);
           bindShowDetailDisableConfirm(root);
+          bindShowDetailDisabledSuccess(root);
           bindDiffNavigators(root);
 
           playLiveTokenAnimation(root, view, { fromLoading: fromLoading });
