@@ -1596,6 +1596,13 @@ fn catdesk_instruction_required_widget_payload(req: &JsonRpcRequest) -> Value {
 }
 
 fn catdesk_instruction_required_response(req: &JsonRpcRequest) -> JsonRpcResponse {
+    catdesk_instruction_required_response_with_show_detail_mode(req, current_show_detail_mode())
+}
+
+fn catdesk_instruction_required_response_with_show_detail_mode(
+    req: &JsonRpcRequest,
+    show_detail_mode: ShowDetailMode,
+) -> JsonRpcResponse {
     let tool_name = tool_name_from_request(req);
     let structured = json!({
         "toolName": tool_name,
@@ -1608,11 +1615,19 @@ fn catdesk_instruction_required_response(req: &JsonRpcRequest) -> JsonRpcRespons
         CATDESK_INSTRUCTION_REQUIRED_MESSAGE.into(),
         structured,
     );
+    if show_detail_mode == ShowDetailMode::Disable {
+        return response;
+    }
     if let Some(result) = response.result.as_mut() {
         attach_widget_payload_meta(result, catdesk_instruction_required_widget_payload(req));
     }
     if let Some(result) = response.result.take() {
-        response.result = Some(enrich_tool_result(req, result, None));
+        response.result = Some(enrich_tool_result_with_show_detail_mode(
+            req,
+            result,
+            None,
+            show_detail_mode,
+        ));
     }
     if let Some(result) = response.result.as_mut() {
         if widget_payload_meta_mut(result).is_some() {
@@ -4112,6 +4127,36 @@ mod tests {
         assert_eq!(result_text(&allowed), "hello\n");
 
         let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn instruction_required_disable_skips_widget_payload() {
+        let req = tool_call_request("read", json!({ "path": "notes.txt" }));
+        let response = catdesk_instruction_required_response_with_show_detail_mode(
+            &req,
+            ShowDetailMode::Disable,
+        );
+        let result = response.result.as_ref().expect("missing result");
+        let structured = result
+            .get("structuredContent")
+            .expect("missing structured content");
+
+        assert_eq!(
+            structured.get("errorCode").and_then(Value::as_str),
+            Some(CATDESK_INSTRUCTION_REQUIRED_CODE)
+        );
+        assert_eq!(
+            structured.get("success").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(
+            result
+                .get("_meta")
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+                .is_none(),
+            "Disable must not attach the instruction-required widget payload"
+        );
     }
 
     #[test]
