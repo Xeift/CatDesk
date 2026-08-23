@@ -670,19 +670,25 @@ fn flow_phase_status_label(flow: Option<&FlowLane>, phase_index: usize) -> Optio
 
 fn flow_phase_lines(
     flow: Option<&FlowLane>,
+    mode: ShowDetailMode,
     palette: &theme::Palette,
     status_style: Style,
 ) -> Vec<Line<'static>> {
     const TITLE_STATUS_GAP: usize = 4;
     const STATUS_ANIM_GAP: usize = 4;
-    let title_width = FLOW_BOOTSTRAP_PHASES
+    let phases = if mode == ShowDetailMode::Disable {
+        &FLOW_BOOTSTRAP_PHASES[..1]
+    } else {
+        FLOW_BOOTSTRAP_PHASES
+    };
+    let title_width = phases
         .iter()
         .enumerate()
         .map(|(phase_index, phase)| format!("    Phase {}  {}", phase_index + 1, phase.title))
         .map(|title| title.chars().count())
         .max()
         .unwrap_or(0);
-    let status_width = FLOW_BOOTSTRAP_PHASES
+    let status_width = phases
         .iter()
         .flat_map(|phase| {
             std::iter::once("✓".to_string())
@@ -700,7 +706,7 @@ fn flow_phase_lines(
     let future_style = Style::default().fg(palette.muted_fg);
     let label_style = Style::default().fg(palette.primary_fg);
 
-    FLOW_BOOTSTRAP_PHASES
+    phases
         .iter()
         .enumerate()
         .map(|(phase_index, phase)| {
@@ -810,9 +816,9 @@ fn flow_bootstrap_status_lines(
     let action_label = latest_flow_action(flow);
     let bootstrap_complete = flow_bootstrap_complete(flow, app.show_detail_mode);
     let header_title = if bootstrap_complete {
-        "Initialize completed"
+        "Bootstrap completed"
     } else {
-        "Initialize connector in progress"
+        "Connector bootstrap in progress"
     };
     let call_text = trim_line(&action_label, FLOW_ROW_CELLS);
     let call_offset = flow_call_offset(&call_text);
@@ -862,6 +868,7 @@ fn flow_bootstrap_status_lines(
     ];
     lines.extend(flow_phase_lines(
         Some(flow),
+        app.show_detail_mode,
         palette,
         Style::default()
             .fg(palette.info_fg)
@@ -876,7 +883,7 @@ fn flow_bootstrap_status_lines(
             None => "Completed.".to_string(),
         }
     } else {
-        "Auto closes after initialize is completed.".to_string()
+        "Auto closes after bootstrap is completed.".to_string()
     };
     lines.push(Line::from(Span::styled(
         format!("  {footer_text}"),
@@ -2413,6 +2420,31 @@ mod tests {
         assert!(text.contains(url));
         assert!(text.contains("[ EXPOSED 10s ]"));
         assert!(!text.contains("Click to reveal"));
+    }
+
+    #[test]
+    fn bootstrap_phase_lines_follow_widget_detail_mode() {
+        let palette = super::theme::all()[0].palette;
+        let status_style = ratatui::style::Style::default();
+
+        let disabled =
+            super::flow_phase_lines(None, super::ShowDetailMode::Disable, &palette, status_style);
+        let expanded = super::flow_phase_lines(
+            None,
+            super::ShowDetailMode::Expanded,
+            &palette,
+            status_style,
+        );
+        let collapsed = super::flow_phase_lines(
+            None,
+            super::ShowDetailMode::Collapsed,
+            &palette,
+            status_style,
+        );
+
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(collapsed.len(), 2);
     }
 
     #[test]

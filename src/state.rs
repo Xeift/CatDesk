@@ -384,16 +384,8 @@ pub struct FlowBootstrapPhase {
 
 const FLOW_BOOTSTRAP_PHASE_1_STEPS: &[FlowBootstrapStep] = &[
     FlowBootstrapStep {
-        event: "initialize",
-        label: "initialize#1",
-    },
-    FlowBootstrapStep {
-        event: "initialize",
-        label: "initialize#2",
-    },
-    FlowBootstrapStep {
-        event: "notifications/initialized",
-        label: "initialized",
+        event: "server/discover",
+        label: "discover",
     },
     FlowBootstrapStep {
         event: "tools/list",
@@ -401,10 +393,26 @@ const FLOW_BOOTSTRAP_PHASE_1_STEPS: &[FlowBootstrapStep] = &[
     },
 ];
 
-const FLOW_BOOTSTRAP_WIDGET_READ_STEPS: &[FlowBootstrapStep] = &[
+const FLOW_BOOTSTRAP_PHASE_2_STEPS: &[FlowBootstrapStep] = &[
+    FlowBootstrapStep {
+        event: "server/discover",
+        label: "discover",
+    },
     FlowBootstrapStep {
         event: "resources/read:run_command",
         label: "run_command",
+    },
+    FlowBootstrapStep {
+        event: "resources/read:start_command",
+        label: "start_command",
+    },
+    FlowBootstrapStep {
+        event: "resources/read:poll_command",
+        label: "poll_command",
+    },
+    FlowBootstrapStep {
+        event: "resources/read:cancel_command",
+        label: "cancel_command",
     },
     FlowBootstrapStep {
         event: "resources/read:catdesk_instruction",
@@ -432,11 +440,9 @@ const FLOW_BOOTSTRAP_WIDGET_READ_STEPS: &[FlowBootstrapStep] = &[
     },
 ];
 
-const FLOW_BOOTSTRAP_PHASE_2_STEPS: &[FlowBootstrapStep] = FLOW_BOOTSTRAP_WIDGET_READ_STEPS;
-
 pub const FLOW_BOOTSTRAP_PHASES: &[FlowBootstrapPhase] = &[
     FlowBootstrapPhase {
-        title: "Checking tools",
+        title: "Connecting",
         steps: FLOW_BOOTSTRAP_PHASE_1_STEPS,
     },
     FlowBootstrapPhase {
@@ -842,7 +848,7 @@ pub fn flow_bootstrap_steps_total(mode: ShowDetailMode) -> usize {
 }
 
 fn events_start_bootstrap_status(events: &[String]) -> bool {
-    events.iter().any(|event| event == "initialize")
+    events.iter().any(|event| event == "server/discover")
 }
 
 fn is_bootstrap_status_event(event: &str) -> bool {
@@ -871,10 +877,6 @@ fn advance_bootstrap_progress(
                     break;
                 };
                 if step.event != event {
-                    continue;
-                }
-                if step.event == "notifications/initialized" {
-                    *completed_steps = next_index + 1;
                     continue;
                 }
                 pending_steps.push_back(next_index);
@@ -1831,12 +1833,12 @@ toolCallCount = 0
     }
 
     #[test]
-    fn record_flow_initialize_activates_bootstrap_status() {
-        let (mut app, workspace, config_path) = test_app("catdesk-flow-initialize");
+    fn record_flow_server_discover_activates_bootstrap_status() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-server-discover");
 
         app.record_flow(
             "stateless",
-            &["initialize".to_string()],
+            &["server/discover".to_string()],
             FlowDirection::Forward,
         );
 
@@ -1855,8 +1857,13 @@ toolCallCount = 0
 
         app.record_flow(
             "stateless",
-            &["initialize".to_string()],
+            &["server/discover".to_string()],
             FlowDirection::Forward,
+        );
+        app.record_flow(
+            "stateless",
+            &["server/discover".to_string()],
+            FlowDirection::Backward,
         );
         app.record_flow(
             "stateless",
@@ -1872,21 +1879,26 @@ toolCallCount = 0
     }
 
     #[test]
-    fn record_flow_bootstrap_tracks_current_tool_and_widget_loading_sequence() {
+    fn record_flow_bootstrap_tracks_modern_tool_and_widget_loading_sequence() {
         let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-widgets");
 
         let sequence = [
-            // Phase 1: Checking tools
-            ("initialize", FlowDirection::Forward),
-            ("initialize", FlowDirection::Backward),
-            ("initialize", FlowDirection::Forward),
-            ("initialize", FlowDirection::Backward),
-            ("notifications/initialized", FlowDirection::Forward),
+            // Phase 1: Connecting
+            ("server/discover", FlowDirection::Forward),
+            ("server/discover", FlowDirection::Backward),
             ("tools/list", FlowDirection::Forward),
             ("tools/list", FlowDirection::Backward),
             // Phase 2: Loading widgets
+            ("server/discover", FlowDirection::Forward),
+            ("server/discover", FlowDirection::Backward),
             ("resources/read:run_command", FlowDirection::Forward),
             ("resources/read:run_command", FlowDirection::Backward),
+            ("resources/read:start_command", FlowDirection::Forward),
+            ("resources/read:start_command", FlowDirection::Backward),
+            ("resources/read:poll_command", FlowDirection::Forward),
+            ("resources/read:poll_command", FlowDirection::Backward),
+            ("resources/read:cancel_command", FlowDirection::Forward),
+            ("resources/read:cancel_command", FlowDirection::Backward),
             ("resources/read:catdesk_instruction", FlowDirection::Forward),
             (
                 "resources/read:catdesk_instruction",
@@ -1914,9 +1926,10 @@ toolCallCount = 0
             .iter()
             .map(|phase| phase.steps.len())
             .collect();
-        assert_eq!(phase_step_counts, vec![4, 7]);
-        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Expanded), 11);
-        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Disable), 4);
+        assert_eq!(phase_step_counts, vec![2, 11]);
+        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Expanded), 13);
+        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Collapsed), 13);
+        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Disable), 2);
         assert_eq!(
             flow.bootstrap_completed_steps,
             flow_bootstrap_steps_total(ShowDetailMode::Expanded)
@@ -1928,41 +1941,15 @@ toolCallCount = 0
     }
 
     #[test]
-    fn record_flow_bootstrap_ignores_optional_reinitialize_before_widget_reads() {
-        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-reinitialize");
+    fn record_flow_disable_bootstrap_completes_after_discover_and_tools_list() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-disable");
+        app.show_detail_mode = ShowDetailMode::Disable;
 
         let sequence = [
-            ("initialize", FlowDirection::Forward),
-            ("initialize", FlowDirection::Backward),
-            ("initialize", FlowDirection::Forward),
-            ("initialize", FlowDirection::Backward),
-            ("notifications/initialized", FlowDirection::Forward),
-            ("tools/list", FlowDirection::Forward),
-            ("tools/list", FlowDirection::Backward),
             ("server/discover", FlowDirection::Forward),
             ("server/discover", FlowDirection::Backward),
-            ("initialize", FlowDirection::Forward),
-            ("initialize", FlowDirection::Backward),
-            ("initialize", FlowDirection::Forward),
-            ("initialize", FlowDirection::Backward),
-            ("notifications/initialized", FlowDirection::Forward),
-            ("resources/read:run_command", FlowDirection::Forward),
-            ("resources/read:run_command", FlowDirection::Backward),
-            ("resources/read:catdesk_instruction", FlowDirection::Forward),
-            (
-                "resources/read:catdesk_instruction",
-                FlowDirection::Backward,
-            ),
-            ("resources/read:read", FlowDirection::Forward),
-            ("resources/read:read", FlowDirection::Backward),
-            ("resources/read:search", FlowDirection::Forward),
-            ("resources/read:search", FlowDirection::Backward),
-            ("resources/read:write", FlowDirection::Forward),
-            ("resources/read:write", FlowDirection::Backward),
-            ("resources/read:edit", FlowDirection::Forward),
-            ("resources/read:edit", FlowDirection::Backward),
-            ("resources/read:delete", FlowDirection::Forward),
-            ("resources/read:delete", FlowDirection::Backward),
+            ("tools/list", FlowDirection::Forward),
+            ("tools/list", FlowDirection::Backward),
         ];
 
         for (event, direction) in sequence {
@@ -1971,20 +1958,21 @@ toolCallCount = 0
 
         let flow = app.flows.first().expect("missing flow");
         assert!(flow.bootstrap_status_active);
-        assert_eq!(flow.bootstrap_completed_steps, 11);
+        assert_eq!(flow.bootstrap_completed_steps, 2);
         assert!(flow.bootstrap_pending_steps.is_empty());
+        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Disable), 2);
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]
-    fn record_flow_tool_call_after_initialize_deactivates_bootstrap_status() {
-        let (mut app, workspace, config_path) = test_app("catdesk-flow-tool-after-initialize");
+    fn record_flow_tool_call_after_discover_deactivates_bootstrap_status() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-tool-after-discover");
 
         app.record_flow(
             "stateless",
-            &["initialize".to_string()],
+            &["server/discover".to_string()],
             FlowDirection::Forward,
         );
         app.record_flow(
@@ -2007,7 +1995,7 @@ toolCallCount = 0
 
         app.record_flow(
             "stateless",
-            &["initialize".to_string()],
+            &["server/discover".to_string()],
             FlowDirection::Forward,
         );
         app.begin_flow_close("stateless");

@@ -164,7 +164,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 | --- | --- |
 | Core | Rust |
 | MCP server | Custom implementation (no SDK) |
-| MCP protocolVersion | `2025-11-25` |
+| MCP protocolVersion | `2026-07-28` |
 | Server | Axum + Tokio |
 | TUI | Ratatui |
 | Tunnel | ngrok |

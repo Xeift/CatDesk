@@ -25,6 +25,8 @@ use crate::workspace_tools;
 const SERVER_NAME: &str = "catdesk";
 const SERVER_VERSION: &str = "4.0.0";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+pub(crate) const MODERN_MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const DEVTOOLS_PROTOCOL_VERSION: &str = "2025-03-26";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
 const WIDGET_RESOURCE_REVISION: u32 = 2;
@@ -164,6 +166,7 @@ pub(crate) async fn handle_request_with_show_detail_mode(
     show_detail_mode: ShowDetailMode,
 ) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
+        "server/discover" => Some(handle_server_discover(req, show_detail_mode)),
         "initialize" => {
             // Also initialize devtools bridge if available
             if let Some(bridge) = devtools {
@@ -241,8 +244,8 @@ pub(crate) async fn handle_request_with_show_detail_mode(
     }
 }
 
-fn handle_initialize(req: &JsonRpcRequest, show_detail_mode: ShowDetailMode) -> JsonRpcResponse {
-    let capabilities = if show_detail_mode == ShowDetailMode::Disable {
+fn server_capabilities(show_detail_mode: ShowDetailMode) -> Value {
+    if show_detail_mode == ShowDetailMode::Disable {
         json!({
             "tools": { "listChanged": false }
         })
@@ -251,15 +254,66 @@ fn handle_initialize(req: &JsonRpcRequest, show_detail_mode: ShowDetailMode) -> 
             "tools": { "listChanged": false },
             "resources": { "listChanged": false }
         })
-    };
+    }
+}
+
+fn handle_server_discover(
+    req: &JsonRpcRequest,
+    show_detail_mode: ShowDetailMode,
+) -> JsonRpcResponse {
+    let mut result = json!({
+        "supportedVersions": [MODERN_MCP_PROTOCOL_VERSION],
+        "capabilities": server_capabilities(show_detail_mode),
+    });
+    decorate_modern_result("server/discover", &mut result);
+    JsonRpcResponse::success(req.id.clone(), result)
+}
+
+fn handle_initialize(req: &JsonRpcRequest, show_detail_mode: ShowDetailMode) -> JsonRpcResponse {
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": capabilities,
+            "capabilities": server_capabilities(show_detail_mode),
             "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION }
         }),
     )
+}
+
+pub(crate) fn decorate_modern_result(method: &str, result: &mut Value) {
+    let Some(result_obj) = result.as_object_mut() else {
+        return;
+    };
+    result_obj.insert("resultType".to_string(), json!("complete"));
+
+    if matches!(
+        method,
+        "server/discover"
+            | "tools/list"
+            | "resources/list"
+            | "resources/read"
+            | "resources/templates/list"
+            | "prompts/list"
+    ) {
+        result_obj.insert("ttlMs".to_string(), json!(0));
+        result_obj.insert("cacheScope".to_string(), json!("private"));
+    }
+    if result_obj.get("nextCursor").is_some_and(Value::is_null) {
+        result_obj.remove("nextCursor");
+    }
+
+    let meta = result_obj
+        .entry("_meta".to_string())
+        .or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    if let Some(meta_obj) = meta.as_object_mut() {
+        meta_obj.insert(
+            SERVER_INFO_META_KEY.to_string(),
+            json!({ "name": SERVER_NAME, "version": SERVER_VERSION }),
+        );
+    }
 }
 
 fn widget_resource_ui_meta(public_base_url: Option<&str>) -> Value {
