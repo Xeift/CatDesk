@@ -268,6 +268,17 @@ fn extract_turn_token_usage(result: Option<&Value>) -> Option<(u64, u64)> {
     Some((tool_input_tokens, tool_output_tokens))
 }
 
+fn turn_token_usage_for_response(
+    req: &JsonRpcRequest,
+    result: Option<&Value>,
+) -> Option<(u64, u64)> {
+    let result = result?;
+    Some(
+        extract_turn_token_usage(Some(result))
+            .unwrap_or_else(|| mcp::estimate_turn_token_counts(req, result)),
+    )
+}
+
 fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) {
     let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
         return;
@@ -1016,6 +1027,32 @@ mod tests {
     }
 
     #[test]
+    fn turn_token_usage_falls_back_without_widget_payload() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "read",
+                "arguments": { "path": "notes.txt" }
+            }),
+        };
+        let result = json!({
+            "content": [],
+            "structuredContent": {
+                "toolName": "read",
+                "text": "hello"
+            }
+        });
+
+        assert!(extract_turn_token_usage(Some(&result)).is_none());
+        let (input_tokens, output_tokens) =
+            turn_token_usage_for_response(&req, Some(&result)).expect("missing usage");
+        assert!(input_tokens > 0);
+        assert!(output_tokens > 0);
+    }
+
+    #[test]
     fn attach_history_usage_updates_widget_payload_meta() {
         let mut result = Some(json!({
             "structuredContent": {
@@ -1575,7 +1612,7 @@ async fn post_mcp(State(s): State<ServerState>, body_bytes: Bytes) -> Response<B
             {
                 s.catdesk_instruction_called.store(true, Ordering::Release);
             }
-            let turn_token_usage = extract_turn_token_usage(resp.result.as_ref());
+            let turn_token_usage = turn_token_usage_for_response(&req, resp.result.as_ref());
             let usage_totals = {
                 let mut app = s.app.lock().await;
                 if let Some((tool_input_tokens, tool_output_tokens)) = turn_token_usage {

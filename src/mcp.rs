@@ -906,9 +906,11 @@ async fn handle_tools_call(
     }
 
     if let Some(result) = response.result.as_mut() {
-        let turn_token_usage = estimate_turn_token_usage(req, &tool_name, result);
-        attach_turn_token_usage(result, &turn_token_usage);
-        attach_tool_call_count(result, 1);
+        if widget_payload_meta_mut(result).is_some() {
+            let turn_token_usage = estimate_turn_token_usage(req, &tool_name, result);
+            attach_turn_token_usage(result, &turn_token_usage);
+            attach_tool_call_count(result, 1);
+        }
     }
 
     response
@@ -1599,9 +1601,11 @@ fn catdesk_instruction_required_response(req: &JsonRpcRequest) -> JsonRpcRespons
         response.result = Some(enrich_tool_result(req, result, None));
     }
     if let Some(result) = response.result.as_mut() {
-        let turn_token_usage = estimate_turn_token_usage(req, &tool_name, result);
-        attach_turn_token_usage(result, &turn_token_usage);
-        attach_tool_call_count(result, 1);
+        if widget_payload_meta_mut(result).is_some() {
+            let turn_token_usage = estimate_turn_token_usage(req, &tool_name, result);
+            attach_turn_token_usage(result, &turn_token_usage);
+            attach_tool_call_count(result, 1);
+        }
     }
     response
 }
@@ -2030,6 +2034,12 @@ fn estimate_turn_token_usage(req: &JsonRpcRequest, tool_name: &str, result: &Val
     TokenUsage::from_counts(tool_input_tokens, tool_output_tokens)
 }
 
+pub(crate) fn estimate_turn_token_counts(req: &JsonRpcRequest, result: &Value) -> (u64, u64) {
+    let tool_name = tool_name_from_request(req);
+    let usage = estimate_turn_token_usage(req, &tool_name, result);
+    (usage.tool_input_tokens, usage.tool_output_tokens)
+}
+
 fn sanitize_result_for_turn_token_count(result: &Value) -> Value {
     let mut sanitized = result.clone();
     let Some(obj) = sanitized.as_object_mut() else {
@@ -2084,19 +2094,12 @@ fn attach_widget_payload_meta(result: &mut Value, payload: Value) {
 }
 
 fn widget_payload_meta_mut(result: &mut Value) -> Option<&mut Map<String, Value>> {
-    let obj = result.as_object_mut()?;
-    let meta_value = obj.entry("_meta".to_string()).or_insert_with(|| json!({}));
-    if !meta_value.is_object() {
-        *meta_value = json!({});
-    }
-    let meta_obj = meta_value.as_object_mut()?;
-    let widget_payload = meta_obj
-        .entry(WIDGET_PAYLOAD_META_KEY.to_string())
-        .or_insert_with(|| json!({}));
-    if !widget_payload.is_object() {
-        *widget_payload = json!({});
-    }
-    widget_payload.as_object_mut()
+    result
+        .as_object_mut()?
+        .get_mut("_meta")?
+        .as_object_mut()?
+        .get_mut(WIDGET_PAYLOAD_META_KEY)?
+        .as_object_mut()
 }
 
 fn attach_turn_token_usage(result: &mut Value, usage: &TokenUsage) {
@@ -5511,6 +5514,25 @@ hello world"
             widget_payload.get("toolCallCount").and_then(Value::as_u64),
             Some(1)
         );
+    }
+
+    #[test]
+    fn usage_attachment_does_not_create_widget_payload() {
+        let mut result = json!({
+            "structuredContent": { "toolName": "read" },
+            "_meta": { "unrelated": true }
+        });
+        let usage = TokenUsage::from_counts(123, 45);
+
+        attach_turn_token_usage(&mut result, &usage);
+        attach_tool_call_count(&mut result, 1);
+
+        let meta = result
+            .get("_meta")
+            .and_then(Value::as_object)
+            .expect("missing meta");
+        assert_eq!(meta.get("unrelated").and_then(Value::as_bool), Some(true));
+        assert!(meta.get(WIDGET_PAYLOAD_META_KEY).is_none());
     }
 
     #[test]
