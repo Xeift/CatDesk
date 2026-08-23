@@ -100,5 +100,5 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" release/* \
             --title "${GITHUB_REF_NAME}" \
-            --notes "CatDesk ${GITHUB_REF_NAME}" \
+            --notes-from-tag \
             --verify-tag
