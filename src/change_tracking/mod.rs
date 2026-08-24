@@ -157,6 +157,54 @@ mod tests {
     }
 
     #[test]
+    fn recursive_discovery_uses_exact_default_ignores_without_project_ignore_file() {
+        let root = workspace("default-ignore");
+        fs::create_dir_all(root.join("target")).expect("create target");
+        fs::write(root.join("target/generated.txt"), "before\n").expect("write generated");
+        fs::write(root.join(".env"), "SECRET=before\n").expect("write env");
+        fs::write(root.join(".env.example"), "SECRET=before\n").expect("write env example");
+        fs::write(root.join("tracked.txt"), "before\n").expect("write tracked");
+
+        let session = ChangeSession::begin(
+            &root,
+            ChangeScope::single(ChangeTarget::discovered(root.clone(), true)),
+        );
+        fs::write(root.join("target/generated.txt"), "after\n").expect("change generated");
+        fs::write(root.join(".env"), "SECRET=after\n").expect("change env");
+        fs::write(root.join(".env.example"), "SECRET=after\n").expect("change env example");
+        fs::write(root.join("tracked.txt"), "after\n").expect("change tracked");
+
+        let changes = session.changes();
+        let paths = changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec![".env.example", "tracked.txt"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_ignore_file_disables_default_ignore_names() {
+        let root = workspace("project-ignore-disables-defaults");
+        fs::create_dir_all(root.join("target")).expect("create target");
+        fs::write(root.join(".gitignore"), "other/\n").expect("write gitignore");
+        fs::write(root.join("target/generated.txt"), "before\n").expect("write generated");
+
+        let session = ChangeSession::begin(
+            &root,
+            ChangeScope::single(ChangeTarget::discovered(root.clone(), true)),
+        );
+        fs::write(root.join("target/generated.txt"), "after\n").expect("change generated");
+
+        let changes = session.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "target/generated.txt");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn explicit_targets_override_project_ignore_files() {
         let root = workspace("explicit-ignore-override");
         fs::create_dir_all(root.join("target")).expect("create target");
@@ -175,6 +223,24 @@ mod tests {
         let changes = session.changes();
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, "target/result.txt");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_targets_override_default_ignore_names() {
+        let root = workspace("explicit-default-ignore-override");
+        fs::write(root.join(".env"), "SECRET=before\n").expect("write env");
+
+        let session = ChangeSession::begin(
+            &root,
+            ChangeScope::single(ChangeTarget::explicit(root.join(".env"), false)),
+        );
+        fs::write(root.join(".env"), "SECRET=after\n").expect("change env");
+
+        let changes = session.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, ".env");
 
         let _ = fs::remove_dir_all(root);
     }

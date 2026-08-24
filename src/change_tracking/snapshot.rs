@@ -5,7 +5,7 @@ use std::path::Path;
 
 use ignore::WalkBuilder;
 
-use super::ignore::is_vcs_admin_path;
+use super::ignore::{has_project_ignore_file, is_default_ignored_path, is_vcs_admin_path};
 use super::{ChangeTarget, MAX_FILE_CAPTURE_BYTES, MAX_WATCHED_ENTRIES};
 
 #[derive(Clone, Debug, Default)]
@@ -51,11 +51,16 @@ fn collect_target(
         return;
     }
 
+    let use_default_ignores =
+        target.respect_project_ignores && !has_project_ignore_file(workspace_root);
     let Ok(metadata) = fs::symlink_metadata(&target.path) else {
         return;
     };
     let file_type = metadata.file_type();
     if file_type.is_file() || file_type.is_symlink() {
+        if use_default_ignores && is_default_ignored_path(&target.path, false) {
+            return;
+        }
         capture_path(workspace_root, &target.path, files, remaining);
         return;
     }
@@ -68,6 +73,7 @@ fn collect_target(
             workspace_root,
             &target.path,
             target.recursive,
+            use_default_ignores,
             files,
             remaining,
         );
@@ -86,6 +92,7 @@ fn collect_directory_with_project_ignores(
     workspace_root: &Path,
     start: &Path,
     recursive: bool,
+    use_default_ignores: bool,
     files: &mut HashMap<String, FileSnapshot>,
     remaining: &mut usize,
 ) {
@@ -101,7 +108,18 @@ fn collect_directory_with_project_ignores(
         .follow_links(false)
         .max_depth((!recursive).then_some(1));
     let root = workspace_root.to_path_buf();
-    builder.filter_entry(move |entry| !is_vcs_admin_path(&root, entry.path()));
+    builder.filter_entry(move |entry| {
+        if is_vcs_admin_path(&root, entry.path()) {
+            return false;
+        }
+        if !use_default_ignores {
+            return true;
+        }
+        let is_directory = entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_dir());
+        !is_default_ignored_path(entry.path(), is_directory)
+    });
 
     for entry in builder.build().flatten() {
         if *remaining == 0 {
@@ -109,6 +127,12 @@ fn collect_directory_with_project_ignores(
         }
         let path = entry.path();
         if is_vcs_admin_path(workspace_root, path) {
+            continue;
+        }
+        let is_directory = entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_dir());
+        if use_default_ignores && is_default_ignored_path(path, is_directory) {
             continue;
         }
         capture_path(workspace_root, path, files, remaining);
