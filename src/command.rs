@@ -176,9 +176,20 @@ pub fn detect_move_path_intercept(command: &str) -> Option<InterceptedMovePathRe
 /// The process runner owns the complete process tree. If this future is timed
 /// out or dropped because the MCP request disappears, the child tree is
 /// terminated instead of being left behind as an orphaned build.
-pub async fn run_command(command: &str, cwd: &Path, timeout_ms: u64) -> CommandResult {
-    let result =
-        crate::process_runner::run_shell_command(command, cwd, timeout_ms, MAX_BUFFER_BYTES).await;
+pub async fn run_command(
+    command: &str,
+    workspace_root: &Path,
+    cwd: &Path,
+    timeout_ms: u64,
+) -> CommandResult {
+    let result = crate::process_runner::run_shell_command(
+        command,
+        workspace_root,
+        cwd,
+        timeout_ms,
+        MAX_BUFFER_BYTES,
+    )
+    .await;
 
     CommandResult {
         stdout: result.stdout,
@@ -988,7 +999,7 @@ mod tests {
             "basename \"$PWD\""
         };
 
-        let result = run_command(command, &workspace_root, 10_000).await;
+        let result = run_command(command, &workspace_root, &workspace_root, 10_000).await;
 
         assert!(result.success, "stderr: {}", result.stderr);
         assert_eq!(result.stdout.trim(), leaf);

@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
 
@@ -31,6 +31,7 @@ pub struct SpawnedProcess {
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
     tree: ProcessTreeGuard,
+    cleanup_dir: Option<PathBuf>,
 }
 
 impl SpawnedProcess {
@@ -59,6 +60,13 @@ impl SpawnedProcess {
     /// work that outlives its CatDesk job.
     pub async fn disarm(&mut self) {
         self.tree.disarm().await;
+        self.cleanup_command_dir();
+    }
+
+    fn cleanup_command_dir(&mut self) {
+        if let Some(path) = self.cleanup_dir.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 }
 
@@ -68,6 +76,7 @@ impl Drop for SpawnedProcess {
             self.tree.terminate_blocking();
             let _ = self.child.start_kill();
         }
+        self.cleanup_command_dir();
     }
 }
 
@@ -318,9 +327,15 @@ fn terminate_process_tree(pid: u32) {
 #[cfg(not(any(windows, unix)))]
 fn terminate_process_tree(_pid: u32) {}
 
-fn shell_command(command: &str) -> Command {
+struct PreparedShellCommand {
+    command: Command,
+    cleanup_dir: Option<PathBuf>,
+}
+
+fn shell_command(command: &str, workspace_root: &Path) -> io::Result<PreparedShellCommand> {
     #[cfg(windows)]
     {
+        let _ = workspace_root;
         let mut shell = Command::new("powershell.exe");
         shell
             .arg("-NoLogo")
@@ -330,19 +345,52 @@ fn shell_command(command: &str) -> Command {
             .arg("Bypass")
             .arg("-Command")
             .arg(command);
-        shell
+        Ok(PreparedShellCommand {
+            command: shell,
+            cleanup_dir: None,
+        })
     }
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     {
+        let _ = workspace_root;
         let mut shell = Command::new("/bin/bash");
         shell.arg("-c").arg(command);
-        shell
+        Ok(PreparedShellCommand {
+            command: shell,
+            cleanup_dir: None,
+        })
+    }
+
+    #[cfg(all(target_os = "linux", not(test)))]
+    {
+        let (helper, scratch_dir) = crate::linux_sandbox::helper_command(command, workspace_root)?;
+        Ok(PreparedShellCommand {
+            command: Command::from(helper),
+            cleanup_dir: Some(scratch_dir),
+        })
+    }
+
+    #[cfg(all(target_os = "linux", test))]
+    {
+        let _ = workspace_root;
+        let mut shell = Command::new("/bin/bash");
+        shell.arg("-c").arg(command);
+        Ok(PreparedShellCommand {
+            command: shell,
+            cleanup_dir: None,
+        })
     }
 }
 
-fn spawn_shell_command_blocking(command: &str, cwd: &Path) -> io::Result<SpawnedProcess> {
-    let mut shell = shell_command(command);
+fn spawn_shell_command_blocking(
+    command: &str,
+    workspace_root: &Path,
+    cwd: &Path,
+) -> io::Result<SpawnedProcess> {
+    let prepared = shell_command(command, workspace_root)?;
+    let mut shell = prepared.command;
+    let mut cleanup_dir = prepared.cleanup_dir;
     shell
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -363,9 +411,20 @@ fn spawn_shell_command_blocking(command: &str, cwd: &Path) -> io::Result<Spawned
         shell.as_std_mut().creation_flags(CREATE_SUSPENDED);
     }
 
-    let mut child = shell.spawn()?;
+    let mut child = match shell.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(path) = cleanup_dir.take() {
+                let _ = std::fs::remove_dir_all(path);
+            }
+            return Err(error);
+        }
+    };
     let Some(pid) = child.id() else {
         let _ = child.start_kill();
+        if let Some(path) = cleanup_dir.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
         return Err(io::Error::other(
             "spawned command did not expose a process id",
         ));
@@ -406,15 +465,23 @@ fn spawn_shell_command_blocking(command: &str, cwd: &Path) -> io::Result<Spawned
         stdout,
         stderr,
         tree,
+        cleanup_dir,
     })
 }
 
-pub async fn spawn_shell_command(command: &str, cwd: &Path) -> io::Result<SpawnedProcess> {
+pub async fn spawn_shell_command(
+    command: &str,
+    workspace_root: &Path,
+    cwd: &Path,
+) -> io::Result<SpawnedProcess> {
     let command = command.to_owned();
+    let workspace_root = workspace_root.to_path_buf();
     let cwd = cwd.to_path_buf();
-    tokio::task::spawn_blocking(move || spawn_shell_command_blocking(&command, &cwd))
-        .await
-        .map_err(|error| io::Error::other(format!("command spawn task failed: {error}")))?
+    tokio::task::spawn_blocking(move || {
+        spawn_shell_command_blocking(&command, &workspace_root, &cwd)
+    })
+    .await
+    .map_err(|error| io::Error::other(format!("command spawn task failed: {error}")))?
 }
 
 #[derive(Debug)]
@@ -512,12 +579,13 @@ fn append_stderr_diagnostic(stderr: &mut String, message: &str) {
 
 pub async fn run_shell_command(
     command: &str,
+    workspace_root: &Path,
     cwd: &Path,
     timeout_ms: u64,
     max_capture_bytes: usize,
 ) -> ProcessRunResult {
     let started = Instant::now();
-    let mut process = match spawn_shell_command(command, cwd).await {
+    let mut process = match spawn_shell_command(command, workspace_root, cwd).await {
         Ok(process) => process,
         Err(error) => {
             return ProcessRunResult {
@@ -660,7 +728,7 @@ mod tests {
         } else {
             "printf 'hello\\n'"
         };
-        let result = run_shell_command(command, &root, 5_000, 1024).await;
+        let result = run_shell_command(command, &root, &root, 5_000, 1024).await;
         assert!(result.success, "stderr: {}", result.stderr);
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout.trim(), "hello");
@@ -676,7 +744,7 @@ mod tests {
         } else {
             "printf '%*s' 200000 ''; printf '%*s' 200000 '' >&2"
         };
-        let result = run_shell_command(command, &root, 5_000, 4_096).await;
+        let result = run_shell_command(command, &root, &root, 5_000, 4_096).await;
         assert!(
             result.success,
             "large-output command failed: {}",
@@ -698,7 +766,7 @@ mod tests {
         } else {
             "sleep 0.7; printf survived > sentinel.txt"
         };
-        let result = run_shell_command(command, &root, 100, 1024).await;
+        let result = run_shell_command(command, &root, &root, 100, 1024).await;
         assert!(result.timed_out);
         tokio::time::sleep(Duration::from_millis(900)).await;
         assert!(
@@ -717,7 +785,7 @@ mod tests {
         } else {
             "(sleep 0.8; printf survived > descendant.txt) & sleep 5"
         };
-        let result = run_shell_command(command, &root, 150, 1024).await;
+        let result = run_shell_command(command, &root, &root, 150, 1024).await;
         assert!(result.timed_out);
         tokio::time::sleep(Duration::from_millis(1_000)).await;
         assert!(
@@ -736,7 +804,7 @@ mod tests {
         } else {
             "(sleep 0.8; printf survived > detached.txt) & printf 'root-done\\n'"
         };
-        let result = run_shell_command(command, &root, 5_000, 1024).await;
+        let result = run_shell_command(command, &root, &root, 5_000, 1024).await;
         assert!(result.success, "root command failed: {}", result.stderr);
         assert!(result.stdout.contains("root-done"));
         tokio::time::sleep(Duration::from_millis(1_000)).await;
@@ -757,10 +825,9 @@ mod tests {
             "sleep 0.7; printf survived > sentinel.txt"
         };
         let root_for_task = root.clone();
-        let task =
-            tokio::spawn(
-                async move { run_shell_command(command, &root_for_task, 5_000, 1024).await },
-            );
+        let task = tokio::spawn(async move {
+            run_shell_command(command, &root_for_task, &root_for_task, 5_000, 1024).await
+        });
         tokio::time::sleep(Duration::from_millis(100)).await;
         task.abort();
         let _ = task.await;

@@ -1307,6 +1307,7 @@ async fn handle_start_command(
     match command_jobs
         .start_with_change_session(
             effective_command,
+            Path::new(workspace_root).to_path_buf(),
             cwd,
             timeout_ms,
             request_key,
@@ -1501,7 +1502,13 @@ async fn handle_run_command(
         );
     }
 
-    let result = command::run_command(&effective_command, &cwd, effective_timeout).await;
+    let result = command::run_command(
+        &effective_command,
+        Path::new(workspace_root),
+        &cwd,
+        effective_timeout,
+    )
+    .await;
     let output = command::format_result(&result);
     let structured = json!({
         "toolName": "run_command",

@@ -4,6 +4,8 @@ mod change_tracking;
 mod command;
 mod command_jobs;
 mod devtools;
+#[cfg(target_os = "linux")]
+mod linux_sandbox;
 mod macos_terminal;
 mod mascot;
 mod mcp;
@@ -1095,6 +1097,12 @@ fn drain_server_ui_events(app: &mut AppState, ui_events: &mut UnboundedReceiver<
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    if linux_sandbox::is_helper_invocation() {
+        linux_sandbox::exec_helper()?;
+        unreachable!("Landlock helper returned after exec");
+    }
+
     match macos_terminal::maybe_relaunch_in_terminal_profile() {
         Ok(macos_terminal::LaunchAction::Continue) => {}
         #[cfg(target_os = "macos")]

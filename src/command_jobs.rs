@@ -110,6 +110,7 @@ impl Default for JobRuntime {
 struct CommandJob {
     id: String,
     command: String,
+    workspace_root: PathBuf,
     cwd: PathBuf,
     started_at: Instant,
     timeout_ms: u64,
@@ -122,11 +123,12 @@ struct CommandJob {
 impl CommandJob {
     #[cfg(test)]
     fn new(command: String, cwd: PathBuf, timeout_ms: u64) -> (Arc<Self>, watch::Receiver<bool>) {
-        Self::new_with_change_session(command, cwd, timeout_ms, None)
+        Self::new_with_change_session(command, cwd.clone(), cwd, timeout_ms, None)
     }
 
     fn new_with_change_session(
         command: String,
+        workspace_root: PathBuf,
         cwd: PathBuf,
         timeout_ms: u64,
         change_session: Option<ChangeSession>,
@@ -136,6 +138,7 @@ impl CommandJob {
             Arc::new(Self {
                 id: Uuid::new_v4().to_string(),
                 command,
+                workspace_root,
                 cwd,
                 started_at: Instant::now(),
                 timeout_ms,
@@ -274,13 +277,14 @@ impl CommandJobManager {
         timeout_ms: u64,
         request_key: Option<String>,
     ) -> Result<StartCommandResult, String> {
-        self.start_with_change_session(command, cwd, timeout_ms, request_key, None)
+        self.start_with_change_session(command, cwd.clone(), cwd, timeout_ms, request_key, None)
             .await
     }
 
     pub async fn start_with_change_session(
         &self,
         command: String,
+        workspace_root: PathBuf,
         cwd: PathBuf,
         timeout_ms: u64,
         request_key: Option<String>,
@@ -309,7 +313,11 @@ impl CommandJobManager {
                     })
             };
             if let Some(job) = existing {
-                if job.command != command || job.cwd != cwd || job.timeout_ms != timeout_ms {
+                if job.command != command
+                    || job.workspace_root != workspace_root
+                    || job.cwd != cwd
+                    || job.timeout_ms != timeout_ms
+                {
                     return Err(
                         "the same MCP request id was reused with different start_command arguments"
                             .to_string(),
@@ -341,8 +349,13 @@ impl CommandJobManager {
             ));
         }
 
-        let (job, cancel_rx) =
-            CommandJob::new_with_change_session(command, cwd, timeout_ms, change_session);
+        let (job, cancel_rx) = CommandJob::new_with_change_session(
+            command,
+            workspace_root,
+            cwd,
+            timeout_ms,
+            change_session,
+        );
         let job_id = job.id.clone();
         {
             let mut manager = self.inner.write().await;
@@ -637,7 +650,13 @@ async fn run_job(job: Arc<CommandJob>, mut cancel_rx: watch::Receiver<bool>) {
         return;
     }
 
-    let mut process = match process_runner::spawn_shell_command(&job.command, &job.cwd).await {
+    let mut process = match process_runner::spawn_shell_command(
+        &job.command,
+        &job.workspace_root,
+        &job.cwd,
+    )
+    .await
+    {
         Ok(process) => process,
         Err(error) => {
             job.append_output("stderr", format!("Failed to execute: {error}\n").as_bytes())
