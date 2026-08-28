@@ -103,6 +103,8 @@ fn runtime_read_paths() -> BTreeSet<PathBuf> {
         insert_existing(&mut paths, path);
     }
 
+    insert_existing(&mut paths, "/etc/resolv.conf");
+
     // Executables installed outside the standard system prefixes must remain
     // executable when their directory is explicitly present in PATH.
     insert_env_path_list(&mut paths, "PATH");
@@ -130,6 +132,7 @@ fn runtime_read_paths() -> BTreeSet<PathBuf> {
         // inaccessible.
         insert_existing(&mut paths, home.join(".gitconfig"));
         insert_existing(&mut paths, home.join(".config/git/config"));
+        insert_existing(&mut paths, home.join(".ssh/known_hosts"));
     }
 
     paths
@@ -237,6 +240,26 @@ pub fn helper_command(command: &str, workspace: &Path) -> io::Result<(Command, P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_read_paths_include_resolv_conf_target() {
+        let resolv_conf = Path::new("/etc/resolv.conf")
+            .canonicalize()
+            .expect("canonical /etc/resolv.conf");
+        assert!(runtime_read_paths().contains(&resolv_conf));
+    }
+
+    #[test]
+    fn runtime_read_paths_include_ssh_known_hosts_target() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let known_hosts = PathBuf::from(home).join(".ssh/known_hosts");
+        let Ok(known_hosts) = known_hosts.canonicalize() else {
+            return;
+        };
+        assert!(runtime_read_paths().contains(&known_hosts));
+    }
 
     #[test]
     fn runtime_read_paths_do_not_grant_the_home_directory_itself() {
