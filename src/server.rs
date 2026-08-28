@@ -383,10 +383,18 @@ fn flow_file_name(path: &str) -> Option<String> {
 }
 
 fn flow_argument_summary(tool: &str, arguments: &serde_json::Map<String, Value>) -> Option<String> {
+    if tool == "read" {
+        let paths = arguments.get("paths")?.as_array()?;
+        let first = flow_file_name(paths.first()?.as_str()?)?;
+        return Some(match paths.len() {
+            1 => first,
+            count => format!("{first} +{}", count - 1),
+        });
+    }
     let (key, file_name_only) = match tool {
         "run_command" | "start_command" => ("command", false),
         "poll_command" | "cancel_command" => ("job_id", false),
-        "read" | "write" | "edit" | "delete" => ("path", true),
+        "write" | "edit" | "delete" => ("path", true),
         "search" => ("pattern", false),
         _ => return None,
     };
@@ -1280,7 +1288,7 @@ mod tests {
             "method": "tools/call",
             "params": {
                 "name": "read",
-                "arguments": { "path": "src/widget/catdesk_dashboard.html" }
+                "arguments": { "paths": ["src/widget/catdesk_dashboard.html"] }
             }
         });
         assert_eq!(
@@ -1879,6 +1887,20 @@ mod tests {
     }
 
     #[test]
+    fn flow_argument_summary_labels_batched_reads() {
+        let one = json!({ "paths": ["src/config.py"] });
+        let many = json!({ "paths": ["src/config.py", "src/loader.py", "src/errors.py"] });
+        assert_eq!(
+            flow_argument_summary("read", one.as_object().unwrap()).as_deref(),
+            Some("config.py")
+        );
+        assert_eq!(
+            flow_argument_summary("read", many.as_object().unwrap()).as_deref(),
+            Some("config.py +2")
+        );
+    }
+
+    #[test]
     fn modern_mcp_name_header_decodes_base64_sentinel() {
         let encoded = base64::engine::general_purpose::STANDARD.encode("測試 resource");
         assert_eq!(
@@ -2301,7 +2323,7 @@ mod tests {
 
         let blocked_response = post_mcp(
             State(server_state.clone()),
-            tool_call_body("read", json!({ "path": "hello.txt" })),
+            tool_call_body("read", json!({ "paths": ["hello.txt"] })),
         )
         .await;
         assert_eq!(blocked_response.status(), StatusCode::OK);
@@ -2357,7 +2379,7 @@ mod tests {
 
         let allowed_response = post_mcp(
             State(server_state),
-            tool_call_body("read", json!({ "path": "hello.txt" })),
+            tool_call_body("read", json!({ "paths": ["hello.txt"] })),
         )
         .await;
         assert_eq!(allowed_response.status(), StatusCode::OK);
@@ -2370,7 +2392,7 @@ mod tests {
             allowed_payload
                 .get("result")
                 .and_then(|result| result.get("structuredContent"))
-                .and_then(|structured| structured.get("text"))
+                .and_then(|structured| structured.pointer("/files/0/text"))
                 .and_then(Value::as_str),
             Some("hello world\n")
         );
@@ -2447,7 +2469,7 @@ mod tests {
 
         let blocked = post_mcp_json_with_show_detail_mode(
             &server_state,
-            tool_call_body("read", json!({ "path": "hello.txt" })),
+            tool_call_body("read", json!({ "paths": ["hello.txt"] })),
             ShowDetailMode::Disable,
         )
         .await;
@@ -2492,7 +2514,7 @@ mod tests {
 
         let allowed = post_mcp_json_with_show_detail_mode(
             &server_state,
-            tool_call_body("read", json!({ "path": "hello.txt" })),
+            tool_call_body("read", json!({ "paths": ["hello.txt"] })),
             ShowDetailMode::Disable,
         )
         .await;
@@ -2500,7 +2522,7 @@ mod tests {
             allowed
                 .get("result")
                 .and_then(|result| result.get("structuredContent"))
-                .and_then(|structured| structured.get("text"))
+                .and_then(|structured| structured.pointer("/files/0/text"))
                 .and_then(Value::as_str),
             Some("hello world\n")
         );

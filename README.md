@@ -198,7 +198,7 @@ CatDesk's local tools in `multi-tools` mode are:
 | Tool                  | Type  | What it does                                                               |
 | --------------------- | ----- | -------------------------------------------------------------------------- |
 | `catdesk_instruction` | Guide | Returns CatDesk usage instructions and render Binagotchy                   |
-| `read`                | Read  | Reads a text file from the workspace                                       |
+| `read`                | Read  | Reads one or more text files from the workspace                            |
 | `search`              | Read  | Searches workspace text with `rg`, `grep`, or built-in search              |
 | `write`               | Write | Creates or overwrites a file                                               |
 | `edit`                | Write | Applies guarded replace/range edits atomically                             |

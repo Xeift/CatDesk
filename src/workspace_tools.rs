@@ -4,13 +4,16 @@ use ignore::WalkBuilder;
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
+/// Per-file cap; MAX_READ_BATCH_BYTES caps the whole batch.
 const MAX_READ_BYTES: usize = 512 * 1024;
+pub const MAX_READ_BATCH_FILES: usize = 32;
+pub const MAX_READ_BATCH_BYTES: usize = 512 * 1024;
 const MAX_WRITE_BYTES: usize = 512 * 1024;
 const DEFAULT_LIST_LIMIT: usize = 200;
 const HARD_LIST_LIMIT: usize = 1000;
@@ -64,28 +67,12 @@ impl ListFilesOutput {
     }
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadFileOutput {
-    pub path: String,
-    pub bytes: usize,
-    pub size_bytes: u64,
-    pub line_count: usize,
-    pub text: String,
-    pub truncated: bool,
-}
-
-impl ReadFileOutput {
-    pub fn render_text(&self) -> String {
-        let mut out = String::new();
-        out.push_str(&format!("path: {}\n", self.path));
-        out.push_str(&format!("bytes: {}\n\n", self.bytes));
-        out.push_str(&self.text);
-        if self.truncated {
-            out.push_str(&format!("\n\n[truncated at {} bytes]", MAX_READ_BYTES));
-        }
-        out
-    }
+struct ReadFileOutput {
+    path: String,
+    size_bytes: u64,
+    line_count: usize,
+    text: String,
+    truncated: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -256,28 +243,54 @@ fn resolve_target_path(workspace_root: &str, path: &str) -> Result<PathBuf, Stri
     command::resolve_workspace_path(workspace_root, Some(path))
 }
 
-pub fn read_file(workspace_root: &str, path: &str) -> Result<ReadFileOutput, String> {
-    let root = workspace_root_path(workspace_root)?;
-    let target = resolve_target_path(workspace_root, path)?;
-    if !target.exists() {
-        return Err(format!("File not found: {}", target.display()));
-    }
-    if !target.is_file() {
+/// Planning and the read share this check so an unreadable path fails the same
+/// way from either one, rather than with whatever the open happened to return.
+fn readable_size(target: &Path) -> Result<u64, String> {
+    let metadata = fs::metadata(target).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("File not found: {}", target.display()),
+        _ => format!("{e}: {}", target.display()),
+    })?;
+    if !metadata.is_file() {
         return Err(format!("Not a file: {}", target.display()));
     }
+    Ok(metadata.len())
+}
 
-    let size_bytes = target.metadata().map_err(|e| e.to_string())?.len();
-    let line_count = count_file_lines(&target)?;
-    let mut file = fs::File::open(&target).map_err(|e| e.to_string())?;
-    let mut buf = vec![0_u8; MAX_READ_BYTES + 1];
-    let read_n = file.read(&mut buf).map_err(|e| e.to_string())?;
-    let truncated = read_n > MAX_READ_BYTES;
-    let data = &buf[..read_n.min(MAX_READ_BYTES)];
-    let text = String::from_utf8_lossy(data).into_owned();
+fn read_file(workspace_root: &str, path: &str, budget: usize) -> Result<ReadFileOutput, String> {
+    let root = workspace_root_path(workspace_root)?;
+    let target = resolve_target_path(workspace_root, path)?;
+    let size_bytes = readable_size(&target)?;
+    let mut file =
+        fs::File::open(&target).map_err(|error| format!("{error}: {}", target.display()))?;
+    // A single read() may come back short on a network filesystem, and
+    // line_count is derived from what was read.
+    // Whatever the batch cannot keep would be read and then thrown away, so
+    // the read stops at the budget. The open still happens, which is what lets
+    // a file that cannot be read report its own error instead of a budget cut.
+    let cap = budget.min(MAX_READ_BYTES);
+    let mut buf = Vec::with_capacity(cap + 1);
+    let read_n = file
+        .by_ref()
+        .take((cap + 1) as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    let mut truncated = read_n > cap;
+    let data = &buf[..read_n.min(cap)];
+    let mut text = String::from_utf8_lossy(data).into_owned();
+    // from_utf8_lossy expands one invalid byte into three, so the text can
+    // exceed the cap even when the file did not. Cutting it here keeps that a
+    // per-file limit rather than something the batch blames on its budget.
+    if text.len() > MAX_READ_BYTES {
+        let keep = floor_char_boundary(&text, MAX_READ_BYTES);
+        text.truncate(keep);
+        truncated = true;
+    }
+    // Over what was read, not the whole file: a full scan costs the entire
+    // file in disk reads to return at most MAX_READ_BYTES.
+    let line_count = count_lines(&text);
 
     Ok(ReadFileOutput {
         path: to_workspace_relative(&root, &target),
-        bytes: data.len(),
         size_bytes,
         line_count,
         text,
@@ -285,26 +298,209 @@ pub fn read_file(workspace_root: &str, path: &str) -> Result<ReadFileOutput, Str
     })
 }
 
-fn count_file_lines(path: &Path) -> Result<usize, String> {
-    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut buf = [0_u8; 8192];
-    let mut line_count = 0_usize;
-    let mut last_byte = None;
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadBatchEntry {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub bytes: usize,
+    pub size_bytes: u64,
+    pub line_count: usize,
+    pub text: String,
+    pub truncated: bool,
+    /// This entry was cut by the shared budget, so asking for fewer files
+    /// returns more of it. A file over the per-file cap sets `truncated`
+    /// without this: no retry returns the rest.
+    pub budget_truncated: bool,
+}
 
-    loop {
-        let read_n = file.read(&mut buf).map_err(|e| e.to_string())?;
-        if read_n == 0 {
-            break;
+pub struct ReadBatchOutput {
+    pub files: Vec<ReadBatchEntry>,
+    pub total_bytes: usize,
+    pub total_line_count: usize,
+    /// The shared budget cut something short, so a smaller retry returns more.
+    /// A file over the per-file cap does not set this: no retry helps.
+    pub batch_truncated: bool,
+}
+
+fn floor_char_boundary(text: &str, max: usize) -> usize {
+    if max >= text.len() {
+        return text.len();
+    }
+    let mut index = max;
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// One path form for every entry, readable or not.
+fn entry_path(root: &Path, planned: &PlannedRead, requested: &str) -> String {
+    planned
+        .target
+        .as_ref()
+        .map(|target| to_workspace_relative(root, target))
+        .unwrap_or_else(|| requested.to_string())
+}
+
+fn failed_entry(path: &str, error: String) -> ReadBatchEntry {
+    ReadBatchEntry {
+        path: path.to_string(),
+        error: Some(error),
+        bytes: 0,
+        size_bytes: 0,
+        line_count: 0,
+        text: String::new(),
+        truncated: false,
+        budget_truncated: false,
+    }
+}
+
+struct PlannedRead {
+    size_bytes: u64,
+    error: Option<String>,
+    target: Option<PathBuf>,
+}
+
+fn plan_read(workspace_root: &str, path: &str) -> PlannedRead {
+    let resolved = resolve_target_path(workspace_root, path);
+    let target = resolved.as_ref().ok().cloned();
+    let size_bytes = resolved.and_then(|target| readable_size(&target));
+    match size_bytes {
+        Ok(size_bytes) => PlannedRead {
+            size_bytes,
+            error: None,
+            target,
+        },
+        Err(error) => PlannedRead {
+            size_bytes: 0,
+            error: Some(error),
+            target,
+        },
+    }
+}
+
+/// Smallest on disk first. Lossy expansion can still make a small file
+/// spend more than its size, so this is a heuristic, not a guarantee.
+fn read_order(planned: &[PlannedRead]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..planned.len())
+        .filter(|index| planned[*index].error.is_none())
+        .collect();
+    order.sort_by_key(|index| planned[*index].size_bytes);
+    order
+}
+
+/// Entries come back in the order requested, whatever order they were read in.
+pub fn read_files(workspace_root: &str, paths: &[String]) -> Result<ReadBatchOutput, String> {
+    if paths.is_empty() {
+        return Err("paths must contain at least one path".into());
+    }
+    if paths.len() > MAX_READ_BATCH_FILES {
+        return Err(format!(
+            "paths must contain at most {MAX_READ_BATCH_FILES} entries (got {})",
+            paths.len()
+        ));
+    }
+    let root = workspace_root_path(workspace_root)?;
+
+    let planned: Vec<PlannedRead> = paths
+        .iter()
+        .map(|path| plan_read(workspace_root, path))
+        .collect();
+
+    let mut entries: Vec<Option<ReadBatchEntry>> = (0..paths.len()).map(|_| None).collect();
+    let mut remaining = MAX_READ_BATCH_BYTES;
+    let mut batch_truncated = false;
+    let mut total_bytes = 0_usize;
+    let mut total_line_count = 0_usize;
+
+    // A symlink and its target canonicalize to the same place, as does the
+    // same string twice. Reading it twice would charge the budget twice.
+    let mut already_read: HashSet<PathBuf> = HashSet::new();
+
+    for index in read_order(&planned) {
+        let path = &paths[index];
+        if let Some(target) = &planned[index].target
+            && already_read.contains(target)
+        {
+            continue;
         }
-        line_count += buf[..read_n].iter().filter(|byte| **byte == b'\n').count();
-        last_byte = Some(buf[read_n - 1]);
+        match read_file(workspace_root, path, remaining) {
+            Ok(output) => {
+                let keep = floor_char_boundary(&output.text, remaining);
+                let text_cut = keep < output.text.len();
+                // Now that the read stops at the budget, how much came back no
+                // longer says which limit stopped it. The budget is the binding
+                // one whenever it is tighter than the per-file cap.
+                let budget_cut = text_cut || (output.truncated && remaining < MAX_READ_BYTES);
+                let truncated = output.truncated || text_cut;
+                batch_truncated |= budget_cut;
+                let mut text = output.text;
+                text.truncate(keep);
+                let line_count = if text_cut {
+                    count_lines(&text)
+                } else {
+                    output.line_count
+                };
+                remaining -= keep;
+                total_bytes += keep;
+                total_line_count += line_count;
+                if let Some(target) = &planned[index].target {
+                    already_read.insert(target.clone());
+                }
+                entries[index] = Some(ReadBatchEntry {
+                    path: output.path,
+                    error: None,
+                    bytes: keep,
+                    size_bytes: output.size_bytes,
+                    line_count,
+                    text,
+                    truncated,
+                    budget_truncated: budget_cut,
+                });
+            }
+            Err(error) => {
+                entries[index] = Some(failed_entry(
+                    &entry_path(&root, &planned[index], path),
+                    error,
+                ))
+            }
+        }
     }
 
-    if matches!(last_byte, Some(byte) if byte != b'\n') {
-        line_count += 1;
-    }
+    let files: Vec<ReadBatchEntry> = entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match (entry, &planned[index].error) {
+            (Some(entry), _) => Some(entry),
+            (None, Some(error)) => Some(failed_entry(
+                &entry_path(&root, &planned[index], &paths[index]),
+                error.clone(),
+            )),
+            // Deduplicated: an earlier path named the same file.
+            (None, None) => None,
+        })
+        .collect();
 
-    Ok(line_count)
+    Ok(ReadBatchOutput {
+        files,
+        total_bytes,
+        total_line_count,
+        batch_truncated,
+    })
+}
+
+fn count_lines(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let newlines = text.bytes().filter(|byte| *byte == b'\n').count();
+    if text.ends_with('\n') {
+        newlines
+    } else {
+        newlines + 1
+    }
 }
 
 pub fn write_file(

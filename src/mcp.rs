@@ -12,7 +12,7 @@ use crate::change_tracking::{ChangeScope, ChangeSession, ChangeTarget, FileChang
 use crate::command;
 use crate::command_jobs::{
     CommandJobManager, CommandJobSnapshot, CommandJobState, DEFAULT_JOB_TIMEOUT_MS,
-    MAX_JOB_TIMEOUT_MS, MAX_POLL_WAIT_MS,
+    DEFAULT_POLL_WAIT_MS, MAX_JOB_TIMEOUT_MS, MAX_POLL_WAIT_MS,
 };
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
@@ -27,7 +27,7 @@ const SERVER_VERSION: &str = "4.0.0";
 pub(crate) const MODERN_MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
-const WIDGET_RESOURCE_REVISION: u32 = 2;
+const WIDGET_RESOURCE_REVISION: u32 = 3;
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
@@ -459,21 +459,75 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
             properties.insert("instructionText".to_string(), json!({ "type": "string" }));
         }
         "read" => {
-            properties.insert("path".to_string(), json!({ "type": "string" }));
+            properties.insert(
+                "path".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "One file the totals below are headed by. Every file read is in files[]."
+                }),
+            );
             properties.insert(
                 "bytes".to_string(),
-                json!({ "type": "integer", "minimum": 0 }),
+                json!({ "type": "integer", "minimum": 0, "description": "Total across the batch." }),
             );
             properties.insert(
                 "sizeBytes".to_string(),
-                json!({ "type": "integer", "minimum": 0 }),
+                json!({ "type": "integer", "minimum": 0, "description": "Total across the batch." }),
             );
             properties.insert(
                 "lineCount".to_string(),
-                json!({ "type": "integer", "minimum": 0 }),
+                json!({ "type": "integer", "minimum": 0, "description": "Total across the batch." }),
             );
-            properties.insert("text".to_string(), json!({ "type": "string" }));
-            properties.insert("truncated".to_string(), json!({ "type": "boolean" }));
+            properties.insert(
+                "fileCount".to_string(),
+                json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Entries in files[], including failures."
+                }),
+            );
+            properties.insert(
+                "batchTruncated".to_string(),
+                json!({
+                    "type": "boolean",
+                    "description": "The shared budget cut something short, so asking for fewer files returns more."
+                }),
+            );
+            properties.insert(
+                "files".to_string(),
+                json!({
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "error": { "type": "string" },
+                            "bytes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Bytes of text returned. Not comparable to sizeBytes: undecodable bytes are replaced and take more room than they did on disk."
+                            },
+                            "sizeBytes": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Size on disk. Use truncated, not a comparison with bytes, to tell whether this file came back whole."
+                            },
+                            "lineCount": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Lines in the text returned, not in the whole file."
+                            },
+                            "text": { "type": "string" },
+                            "truncated": { "type": "boolean" },
+                            "budgetTruncated": {
+                                "type": "boolean",
+                                "description": "Cut by the shared budget, so asking for fewer files returns more of this one. A file truncated without this is over the per-file cap and no retry returns the rest."
+                            }
+                        },
+                        "required": ["path", "bytes", "sizeBytes", "lineCount", "text", "truncated", "budgetTruncated"]
+                    }
+                }),
+            );
         }
         "search" => {
             properties.insert("searchPattern".to_string(), json!({ "type": "string" }));
@@ -759,7 +813,14 @@ async fn handle_tools_list_with_show_detail_mode(
                     "properties": {
                         "job_id": { "type": "string", "description": "Opaque command job ID returned by start_command" },
                         "after": { "type": "integer", "minimum": 0, "description": "Return only output events after this cursor (default 0)" },
-                        "wait_ms": { "type": "integer", "minimum": 0, "maximum": MAX_POLL_WAIT_MS, "description": "Wait briefly for new output or completion before returning (maximum 30000 ms)" }
+                        "wait_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": MAX_POLL_WAIT_MS,
+                            "description": format!(
+                                "Wait for new output or completion before returning (default {DEFAULT_POLL_WAIT_MS} ms, maximum {MAX_POLL_WAIT_MS} ms). Pass 0 for a non-blocking check."
+                            )
+                        }
                     },
                     "required": ["job_id"]
                 },
@@ -783,14 +844,23 @@ async fn handle_tools_list_with_show_detail_mode(
         tools.push(catdesk_instruction_tool_descriptor());
         tools.push(json!({
             "name": "read",
-            "title": "Read file",
-            "description": "Read a text file from workspace.",
+            "title": "Read files",
+            "description": "Read text files from the workspace. Name every file you need in one call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "File path relative to workspace root or absolute path within it" }
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "minItems": 1,
+                        "maxItems": workspace_tools::MAX_READ_BATCH_FILES,
+                        "description": format!(
+                            "File paths relative to workspace root, or absolute paths within it. Paths that resolve to the same file are read once. Combined text is capped at {} bytes; files past that return metadata only.",
+                            workspace_tools::MAX_READ_BATCH_BYTES
+                        )
+                    }
                 },
-                "required": ["path"]
+                "required": ["paths"]
             },
             "annotations": { "readOnlyHint": true, "openWorldHint": false, "destructiveHint": false }
         }));
@@ -1014,7 +1084,7 @@ async fn handle_tools_call_with_show_detail_mode(
                 }
             } else {
                 match tool_name.as_str() {
-                    "read" => handle_read_file(req, workspace_root),
+                    "read" => handle_read_files(req, workspace_root),
                     "search" => handle_search_text(req, workspace_root),
                     _ => {
                         if tool_mode.write_tools_enabled() {
@@ -1368,7 +1438,7 @@ async fn handle_poll_command(
                 );
             }
         },
-        None => 0,
+        None => DEFAULT_POLL_WAIT_MS,
     };
     match command_jobs.poll(job_id, after, wait_ms).await {
         Ok(snapshot) => {
@@ -2023,7 +2093,7 @@ Always specify the branch explicitly when using `git push`."#
         .collect();
 
     if mode.computer_enabled() {
-        lines.push("Use read to read files and search to search the workspace.".to_string());
+        lines.push("Use read to read files and search to search the workspace. Name every file you need in one read call.".to_string());
         if tool_mode.run_command_enabled() {
             lines.push(
                 "For directory inspection, run_command can intercept plain listing commands such as find, tree, ls -R, and rg --files."
@@ -2055,7 +2125,7 @@ Always specify the branch explicitly when using `git push`."#
                 .to_string(),
         );
         lines.push(
-            "Use poll_command to read incremental output from a background command. Pass the returned nextCursor as after on the next poll so output is not repeated, and use wait_ms when waiting briefly for new progress. If hasMoreOutput is true, keep polling even after the command reaches a terminal state so all buffered output can be drained."
+            "Use poll_command to read incremental output from a background command. Pass the returned nextCursor as after on the next poll so output is not repeated. If hasMoreOutput is true, keep polling even after the command reaches a terminal state so all buffered output can be drained."
                 .to_string(),
         );
         lines.push(
@@ -2633,26 +2703,57 @@ fn build_search_text_widget_payload(result: &Value, is_error: bool) -> Option<Va
     Some(Value::Object(payload))
 }
 
-fn build_read_file_widget_payload(result: &Value, is_error: bool) -> Option<Value> {
+fn build_read_files_widget_payload(result: &Value, is_error: bool) -> Option<Value> {
     let structured = result_structured_content(result)?;
     let mut payload = base_widget_payload(
         "tool_call",
-        "Read File",
+        "Read Files",
         widget_state(is_error, None),
         Some("read"),
     );
     payload.insert("path".to_string(), structured.get("path")?.clone());
+    // Failures get their own row below; do not count them twice.
     payload.insert(
-        "sizeBytes".to_string(),
-        structured.get("sizeBytes")?.clone(),
+        "renderedFileCount".to_string(),
+        json!(
+            structured
+                .get("files")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter(|file| file.get("error").is_none())
+                .count()
+        ),
     );
+    payload.insert("bytes".to_string(), structured.get("bytes")?.clone());
     payload.insert(
         "lineCount".to_string(),
         structured.get("lineCount")?.clone(),
     );
+    // Only the failures: the full entries carry file contents.
+    payload.insert("failedFiles".to_string(), failed_read_files(structured));
     payload.insert("changedFiles".to_string(), json!([]));
     payload.insert("hasChanges".to_string(), json!(false));
     Some(Value::Object(payload))
+}
+
+fn failed_read_files(structured: &Map<String, Value>) -> Value {
+    let failures = structured
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|file| {
+                    let error = file.get("error").and_then(Value::as_str)?;
+                    let path = file.get("path").and_then(Value::as_str)?;
+                    // The name is already shown; the tail pushes the row out of view.
+                    let reason = error.split_once(": ").map_or(error, |(head, _)| head);
+                    Some(json!({ "path": path, "error": reason }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Value::Array(failures)
 }
 
 fn build_file_change_widget_payload(
@@ -2863,7 +2964,7 @@ fn build_auto_widget_payload(
                 "Failed to build search widget payload from structuredContent.".into(),
             ),
         },
-        "read" => match build_read_file_widget_payload(result, is_error) {
+        "read" => match build_read_files_widget_payload(result, is_error) {
             Some(payload) => payload,
             None if is_error => build_generic_widget_payload(req, result, widget_context, is_error),
             None => build_widget_payload_error(
@@ -3114,26 +3215,62 @@ async fn devtools_tool_is_read_only(
         .map(tool_is_read_only)
 }
 
-fn handle_read_file(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
-    let arguments = tool_arguments(req);
-    let path = match arguments.get("path").and_then(|v| v.as_str()) {
-        Some(v) => v,
-        None => return tool_error_response(req, "Missing required parameter: path".into()),
+fn parse_read_paths(arguments: &Value) -> Result<Vec<String>, String> {
+    let items = arguments
+        .get("paths")
+        .ok_or_else(|| "Missing required parameter: paths".to_string())?
+        .as_array()
+        .ok_or_else(|| "Parameter paths must be an array".to_string())?;
+    let mut paths = Vec::with_capacity(items.len());
+    for item in items {
+        let path = item
+            .as_str()
+            .ok_or_else(|| "Parameter paths must contain only strings".to_string())?;
+        if path.is_empty() {
+            return Err("Parameter paths must not contain empty strings".into());
+        }
+        paths.push(path.to_string());
+    }
+    Ok(paths)
+}
+
+fn handle_read_files(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResponse {
+    let paths = match parse_read_paths(&tool_arguments(req)) {
+        Ok(paths) => paths,
+        Err(error) => return tool_error_response(req, error),
     };
-    match workspace_tools::read_file(workspace_root, path) {
-        Ok(output) => tool_success_response_with_structured(
-            req,
-            output.render_text(),
-            json!({
+    match workspace_tools::read_files(workspace_root, &paths) {
+        Ok(output) => {
+            let structured = json!({
                 "toolName": "read",
-                "path": output.path,
-                "bytes": output.bytes,
-                "sizeBytes": output.size_bytes,
-                "lineCount": output.line_count,
-                "text": output.text,
-                "truncated": output.truncated,
-            }),
-        ),
+                // The batch's byte and line counts are billed to this path, so
+                // it has to be a file that contributed them -- not a failed
+                // entry, not an empty file.
+                "path": output
+                    .files
+                    .iter()
+                    .find(|file| !file.truncated && file.bytes > 0)
+                    .or_else(|| output.files.iter().find(|file| file.bytes > 0))
+                    .or_else(|| output.files.iter().find(|file| file.error.is_none()))
+                    .or_else(|| output.files.first())
+                    .map(|file| file.path.clone())
+                    .unwrap_or_default(),
+                "bytes": output.total_bytes,
+                "sizeBytes": output.files.iter().map(|f| f.size_bytes).sum::<u64>(),
+                "lineCount": output.total_line_count,
+                "fileCount": output.files.len(),
+                "batchTruncated": output.batch_truncated,
+                "files": output.files,
+            });
+            // tool_response drops `text` whenever structured content is given.
+            if output.files.iter().all(|file| file.error.is_some()) {
+                // Per-entry errors are right for a batch, but a batch where
+                // nothing was read is a failed call, not a successful empty one.
+                tool_error_response_with_structured(req, String::new(), structured)
+            } else {
+                tool_success_response_with_structured(req, String::new(), structured)
+            }
+        }
         Err(e) => tool_error_response(req, e),
     }
 }
@@ -3502,6 +3639,13 @@ mod tests {
                     .get("message")
                     .or_else(|| structured.get("text"))
                     .or_else(|| structured.get("instructionText"))
+                    .or_else(|| {
+                        structured
+                            .get("files")
+                            .and_then(Value::as_array)
+                            .and_then(|files| files.first())
+                            .and_then(|file| file.get("text"))
+                    })
             })
             .and_then(Value::as_str)
             .expect("missing result text")
@@ -4129,7 +4273,7 @@ mod tests {
         for (tool_name, field) in [
             ("run_command", "stdout"),
             ("catdesk_instruction", "instructionText"),
-            ("read", "text"),
+            ("read", "files"),
             ("search", "searchResults"),
             ("write", "bytesWritten"),
             ("edit", "operationCount"),
@@ -4223,7 +4367,7 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).expect("create workspace");
         std::fs::write(workspace_root.join("notes.txt"), "hello\n").expect("write file");
         let workspace_root_str = workspace_root.to_string_lossy().into_owned();
-        let req = tool_call_request("read", json!({ "path": "notes.txt" }));
+        let req = tool_call_request("read", json!({ "paths": ["notes.txt"] }));
 
         let blocked = handle_request(
             &req,
@@ -4330,7 +4474,7 @@ mod tests {
 
     #[test]
     fn instruction_required_disable_skips_widget_payload() {
-        let req = tool_call_request("read", json!({ "path": "notes.txt" }));
+        let req = tool_call_request("read", json!({ "paths": ["notes.txt"] }));
         let response = catdesk_instruction_required_response_with_show_detail_mode(
             &req,
             ShowDetailMode::Disable,
@@ -5437,7 +5581,7 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).expect("create workspace");
         std::fs::write(workspace_root.join("notes.txt"), "hello world\n").expect("write file");
 
-        let req = tool_call_request("read", json!({ "path": "notes.txt" }));
+        let req = tool_call_request("read", json!({ "paths": ["notes.txt"] }));
         let workspace_root_str = workspace_root.to_string_lossy().into_owned();
         let response = handle_tools_call(
             &req,
@@ -5458,12 +5602,554 @@ mod tests {
             .and_then(|result| result.get("structuredContent"))
             .expect("missing structured content");
         assert_eq!(
-            structured.get("text").and_then(Value::as_str),
+            structured["files"][0]["text"].as_str(),
             Some("hello world\n")
         );
 
         let _ = std::fs::remove_file(workspace_root.join("notes.txt"));
         let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    async fn read_batch(workspace_root: &Path, paths: Value) -> Value {
+        let req = tool_call_request("read", json!({ "paths": paths }));
+        handle_tools_call(
+            &req,
+            &workspace_root.to_string_lossy(),
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await
+        .result
+        .and_then(|result| result.get("structuredContent").cloned())
+        .expect("missing structured content")
+    }
+
+    // Line breaks keep the tokenizer off one huge pre-token; BPE is quadratic there.
+    fn filler(bytes: usize) -> String {
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(bytes / 41 + 1)[..bytes].to_string()
+    }
+
+    fn read_workspace(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("catdesk-mcp-read-{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create workspace");
+        root
+    }
+
+    #[tokio::test]
+    async fn read_tool_returns_every_named_file_in_one_call() {
+        let workspace_root = read_workspace("batch");
+        for (name, body) in [("a.txt", "alpha\n"), ("b.txt", "beta\n")] {
+            std::fs::write(workspace_root.join(name), body).expect("write file");
+        }
+
+        std::fs::write(workspace_root.join("empty.txt"), "").expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["a.txt", "empty.txt", "b.txt"])).await;
+        let files = structured["files"].as_array().expect("missing files");
+
+        assert_eq!(structured["fileCount"], json!(3));
+        assert_eq!(files[0]["text"], json!("alpha\n"));
+        assert_eq!(files[1]["text"], json!(""));
+        assert_eq!(
+            files[1]["truncated"],
+            json!(false),
+            "an empty file is whole"
+        );
+        assert_eq!(files[2]["text"], json!("beta\n"));
+        assert_eq!(structured["batchTruncated"], json!(false));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_stops_reading_once_the_batch_budget_is_spent() {
+        let workspace_root = read_workspace("batch-budget");
+        // The first file alone spends the whole budget, so the rest must come
+        // back with metadata and no text.
+        let names = ["a.txt", "b.txt", "c.txt"];
+        for name in names {
+            std::fs::write(
+                workspace_root.join(name),
+                filler(workspace_tools::MAX_READ_BATCH_BYTES),
+            )
+            .expect("write file");
+        }
+
+        let structured = read_batch(&workspace_root, json!(names)).await;
+        let files = structured["files"].as_array().expect("missing files");
+        let total: usize = files
+            .iter()
+            .map(|file| file["text"].as_str().unwrap_or_default().len())
+            .sum();
+
+        assert!(
+            total <= workspace_tools::MAX_READ_BATCH_BYTES,
+            "combined text {total} exceeded the batch cap"
+        );
+        assert_eq!(structured["batchTruncated"], json!(true));
+        for skipped in &files[1..] {
+            assert_eq!(
+                skipped["bytes"],
+                json!(0),
+                "over-budget file was still read"
+            );
+            assert_eq!(
+                skipped["lineCount"],
+                json!(0),
+                "over-budget file was scanned"
+            );
+            assert_eq!(skipped["truncated"], json!(true));
+            assert_eq!(
+                skipped["budgetTruncated"],
+                json!(true),
+                "a file the budget never reached must still say a smaller retry helps"
+            );
+            assert!(
+                skipped["sizeBytes"].as_u64().unwrap_or(0) > 0,
+                "missing metadata"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_widget_payload_carries_per_file_failures() {
+        let workspace_root = read_workspace("widget-failures");
+        std::fs::write(workspace_root.join("a.txt"), "alpha\n").expect("write file");
+
+        let req = tool_call_request("read", json!({ "paths": ["a.txt", "missing.txt"] }));
+        let response = handle_tools_call(
+            &req,
+            &workspace_root.to_string_lossy(),
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+
+        let payload = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        let failed = payload["failedFiles"]
+            .as_array()
+            .expect("missing failedFiles in widget payload");
+
+        assert_eq!(failed.len(), 1);
+        assert_eq!(payload["path"], json!("a.txt"));
+        assert_eq!(payload["renderedFileCount"], json!(1));
+        assert_eq!(failed[0]["path"], json!("missing.txt"));
+        assert_eq!(failed[0]["error"], json!("File not found"));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_rejects_a_directory_the_same_way_wherever_it_lands() {
+        let workspace_root = read_workspace("dir-entry");
+        std::fs::create_dir_all(workspace_root.join("subdir")).expect("create dir");
+        std::fs::write(workspace_root.join("a.txt"), "alpha\n").expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["subdir", "a.txt"])).await;
+        let files = structured["files"].as_array().expect("missing files");
+
+        assert!(
+            files[0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Not a file"),
+            "a directory must be an error, not an empty file: {:?}",
+            files[0]
+        );
+        assert_eq!(files[1]["text"], json!("alpha\n"));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_tool_does_not_let_an_unreadable_file_shrink_the_others() {
+        let workspace_root = read_workspace("unreadable");
+        let big = workspace_tools::MAX_READ_BATCH_BYTES - 8192;
+        std::fs::write(workspace_root.join("app.js"), filler(big)).expect("write file");
+        std::fs::write(workspace_root.join("locked.txt"), filler(100 * 1024)).expect("write file");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            workspace_root.join("locked.txt"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("lock file");
+
+        let structured = read_batch(&workspace_root, json!(["locked.txt", "app.js"])).await;
+        let files = structured["files"].as_array().expect("missing files");
+
+        assert!(files[0]["error"].is_string());
+        assert_eq!(
+            files[1]["bytes"].as_u64().unwrap(),
+            big as u64,
+            "the readable file lost budget to one that never opened"
+        );
+        assert_eq!(files[1]["truncated"], json!(false));
+
+        let _ = std::fs::set_permissions(
+            workspace_root.join("locked.txt"),
+            std::fs::Permissions::from_mode(0o644),
+        );
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_does_not_blame_the_budget_for_lossy_expansion() {
+        let workspace_root = read_workspace("lossy-big");
+        // Lossy conversion triples these past the cap.
+        let mut bytes = Vec::new();
+        while bytes.len() < 200 * 1024 {
+            bytes.extend(std::iter::repeat_n(0xE9_u8, 40));
+            bytes.push(b'\n');
+        }
+        std::fs::write(workspace_root.join("bin.dat"), bytes).expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["bin.dat"])).await;
+
+        assert_eq!(structured["files"][0]["truncated"], json!(true));
+        assert_eq!(structured["batchTruncated"], json!(false));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_counts_lines_over_what_it_returned() {
+        let workspace_root = read_workspace("lines");
+        let cap = workspace_tools::MAX_READ_BATCH_BYTES;
+        std::fs::write(workspace_root.join("a.txt"), filler(cap - 1)).expect("write file");
+        std::fs::write(workspace_root.join("b.txt"), "line\n".repeat(cap / 5 + 200))
+            .expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["a.txt", "b.txt"])).await;
+        let b = structured["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == json!("b.txt"))
+            .expect("missing b.txt");
+
+        assert_eq!(b["bytes"], json!(1));
+        assert_eq!(
+            b["lineCount"],
+            json!(1),
+            "lines of text that was thrown away"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_charges_one_file_once_however_many_times_it_is_named() {
+        let workspace_root = read_workspace("dup");
+        std::fs::write(workspace_root.join("a.txt"), filler(300 * 1024)).expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["a.txt", "a.txt"])).await;
+        let files = structured["files"].as_array().expect("missing files");
+
+        assert_eq!(files.len(), 1, "one file, one entry");
+        assert_eq!(files[0]["truncated"], json!(false));
+        assert_eq!(structured["batchTruncated"], json!(false));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_tool_still_reports_an_unreadable_file_past_the_budget() {
+        let workspace_root = read_workspace("locked-past-budget");
+        std::fs::write(
+            workspace_root.join("big.txt"),
+            filler(workspace_tools::MAX_READ_BATCH_BYTES),
+        )
+        .expect("write file");
+        std::fs::write(workspace_root.join("locked.txt"), filler(600 * 1024)).expect("write file");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            workspace_root.join("locked.txt"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("chmod");
+
+        let structured = read_batch(&workspace_root, json!(["big.txt", "locked.txt"])).await;
+        let locked = &structured["files"][1];
+
+        // Skipping the open would have called this a budget cut, which tells
+        // the model a smaller retry returns the file. It never will.
+        assert!(
+            locked["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Permission denied"),
+            "an unreadable file must say so even with the budget gone: {locked:?}"
+        );
+        assert_eq!(locked["budgetTruncated"], json!(false));
+
+        let _ = std::fs::set_permissions(
+            workspace_root.join("locked.txt"),
+            std::fs::Permissions::from_mode(0o644),
+        );
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_budget_goes_to_the_smallest_files_first() {
+        let workspace_root = read_workspace("batch-order");
+        std::fs::write(
+            workspace_root.join("big.log"),
+            filler(workspace_tools::MAX_READ_BATCH_BYTES),
+        )
+        .expect("write file");
+        std::fs::write(workspace_root.join("a.txt"), "alpha\n").expect("write file");
+        std::fs::write(workspace_root.join("b.txt"), "beta\n").expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["big.log", "a.txt", "b.txt"])).await;
+        let files = structured["files"].as_array().expect("missing files");
+
+        assert_eq!(files[0]["path"], json!("big.log"));
+        assert_eq!(files[1]["text"], json!("alpha\n"));
+        assert_eq!(files[2]["text"], json!("beta\n"));
+        assert!(
+            files[0]["bytes"].as_u64().unwrap() < workspace_tools::MAX_READ_BATCH_BYTES as u64,
+            "the big file should have left room for the small ones"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn poll_command_waits_for_progress_unless_told_not_to() {
+        let jobs = CommandJobManager::new();
+        let workspace_root = read_workspace("poll-default");
+        let command = if cfg!(windows) {
+            "Start-Sleep -Milliseconds 400"
+        } else {
+            "sleep 0.4"
+        };
+        let started = jobs
+            .start(command.into(), workspace_root.clone(), 60_000, None)
+            .await
+            .expect("start job");
+        let job_id = started.snapshot.job_id.clone();
+
+        let poll = |args: Value| {
+            let req = tool_call_request("poll_command", args);
+            let jobs = jobs.clone();
+            async move {
+                handle_poll_command(&req, &jobs)
+                    .await
+                    .result
+                    .and_then(|result| result.get("structuredContent").cloned())
+                    .expect("missing structured content")
+            }
+        };
+
+        let immediate = poll(json!({ "job_id": job_id, "wait_ms": 0 })).await;
+        assert_eq!(immediate["state"], json!("running"), "0 must not block");
+
+        let waited = poll(json!({ "job_id": job_id })).await;
+        assert_ne!(
+            waited["state"],
+            json!("running"),
+            "omitting wait_ms must block until there is progress"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_says_which_truncations_a_retry_would_fix() {
+        let workspace_root = read_workspace("retryable");
+        let cap = workspace_tools::MAX_READ_BATCH_BYTES;
+        std::fs::write(workspace_root.join("a.txt"), filler(cap - 1)).expect("write file");
+        std::fs::write(workspace_root.join("b.txt"), filler(cap + 4096)).expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["a.txt", "b.txt"])).await;
+        let files = structured["files"].as_array().expect("missing files");
+        let b = files
+            .iter()
+            .find(|file| file["path"] == json!("b.txt"))
+            .expect("missing b.txt");
+
+        assert_eq!(b["truncated"], json!(true));
+        assert_eq!(b["budgetTruncated"], json!(true), "a smaller retry helps");
+
+        // The same file alone is cut by the per-file cap instead.
+        let alone = read_batch(&workspace_root, json!(["b.txt"])).await;
+        assert_eq!(alone["files"][0]["truncated"], json!(true));
+        assert_eq!(
+            alone["files"][0]["budgetTruncated"],
+            json!(false),
+            "no retry returns the rest"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_does_not_head_the_result_with_a_failure() {
+        let workspace_root = read_workspace("head-failure");
+        std::fs::write(workspace_root.join("__init__.py"), "").expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["missing.txt", "__init__.py"])).await;
+
+        assert_eq!(
+            structured["path"],
+            json!("__init__.py"),
+            "an empty file still beats one that could not be read"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_does_not_head_the_result_with_an_empty_file() {
+        let workspace_root = read_workspace("head-empty");
+        std::fs::write(workspace_root.join("__init__.py"), "").expect("write file");
+        std::fs::write(workspace_root.join("whole.txt"), "alpha\n").expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["__init__.py", "whole.txt"])).await;
+
+        assert_eq!(structured["bytes"], json!(6));
+        assert_eq!(
+            structured["path"],
+            json!("whole.txt"),
+            "an empty file contributed none of those bytes"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_heads_the_result_with_a_whole_file() {
+        let workspace_root = read_workspace("head-whole");
+        let cap = workspace_tools::MAX_READ_BATCH_BYTES;
+        // Sorted smallest first, pad.txt is read whole and huge.txt gets a sliver.
+        std::fs::write(workspace_root.join("pad.txt"), filler(cap - 4)).expect("write file");
+        std::fs::write(workspace_root.join("huge.txt"), filler(cap + 4096)).expect("write file");
+
+        let structured = read_batch(&workspace_root, json!(["huge.txt", "pad.txt"])).await;
+
+        assert_eq!(
+            structured["path"],
+            json!("pad.txt"),
+            "the batch's bytes belong to pad.txt"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_is_an_error_when_nothing_was_read() {
+        let workspace_root = read_workspace("all-failed");
+        let req = tool_call_request("read", json!({ "paths": ["a.txt", "b.txt"] }));
+        let response = handle_tools_call(
+            &req,
+            &workspace_root.to_string_lossy(),
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("isError")),
+            Some(&json!(true)),
+            "a batch where nothing was read is a failed call"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_rejects_argument_shapes_the_schema_forbids() {
+        let workspace_root = read_workspace("bad-args");
+        for (label, args) in [
+            ("not an array", json!({ "paths": "a.txt" })),
+            ("not strings", json!({ "paths": [1] })),
+            ("empty string", json!({ "paths": [""] })),
+            ("empty array", json!({ "paths": [] })),
+            (
+                "too many",
+                json!({ "paths": vec!["a.txt"; workspace_tools::MAX_READ_BATCH_FILES + 1] }),
+            ),
+        ] {
+            let req = tool_call_request("read", args);
+            let response = handle_tools_call(
+                &req,
+                &workspace_root.to_string_lossy(),
+                1,
+                Mode::Both,
+                ToolMode::MultiTools,
+                false,
+                &CommandJobManager::new(),
+                &None,
+            )
+            .await;
+            assert_eq!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("isError")),
+                Some(&json!(true)),
+                "{label} should be rejected"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn read_tool_schema_requires_a_non_empty_paths_array() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+        let response = handle_tools_list(&req, Mode::Both, ToolMode::MultiTools, &None).await;
+        let schema = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("read"))
+            .and_then(|tool| tool.get("inputSchema"))
+            .expect("missing read schema")
+            .clone();
+
+        assert_eq!(schema["required"], json!(["paths"]));
+        assert!(
+            schema["properties"].get("path").is_none(),
+            "path was removed"
+        );
+        assert_eq!(schema["properties"]["paths"]["minItems"], json!(1));
+        assert_eq!(
+            schema["properties"]["paths"]["items"]["minLength"],
+            json!(1)
+        );
     }
 
     #[tokio::test]
@@ -5530,21 +6216,25 @@ mod tests {
 
     #[test]
     fn read_file_separates_model_payload_from_widget_payload() {
-        let req = tool_call_request(
-            "read",
-            json!({
-                "path": "README.md",
-            }),
-        );
+        let req = tool_call_request("read", json!({ "paths": ["README.md"] }));
         let raw = json!({
             "structuredContent": {
                 "toolName": "read",
                 "path": "README.md",
                 "bytes": 11,
-                "sizeBytes": 11,
+                "sizeBytes": 99,
                 "lineCount": 1,
-                "text": "hello world",
-                "truncated": false
+                "fileCount": 1,
+                "batchTruncated": false,
+                "files": [{
+                    "path": "README.md",
+                    "bytes": 11,
+                    "sizeBytes": 11,
+                    "lineCount": 1,
+                    "text": "hello world",
+                    "truncated": false,
+                    "budgetTruncated": false
+                }]
             },
             "content": [{
                 "type": "text",
@@ -5580,15 +6270,12 @@ hello world"
         assert_eq!(structured.get("bytes").and_then(Value::as_u64), Some(11));
         assert_eq!(
             structured.get("sizeBytes").and_then(Value::as_u64),
-            Some(11)
+            Some(99)
         );
         assert_eq!(structured.get("lineCount").and_then(Value::as_u64), Some(1));
+        assert_eq!(structured["files"][0]["text"], json!("hello world"));
         assert_eq!(
-            structured.get("text").and_then(Value::as_str),
-            Some("hello world")
-        );
-        assert_eq!(
-            structured.get("truncated").and_then(Value::as_bool),
+            structured.get("batchTruncated").and_then(Value::as_bool),
             Some(false)
         );
         assert!(structured.get("schema").is_none());
@@ -5599,7 +6286,7 @@ hello world"
         assert!(structured.get("hasChanges").is_none());
         assert_eq!(
             widget_payload.get("title").and_then(Value::as_str),
-            Some("Read File")
+            Some("Read Files")
         );
         assert_eq!(
             widget_payload.get("panelMode").and_then(Value::as_str),
@@ -5610,16 +6297,25 @@ hello world"
             Some("README.md")
         );
         assert_eq!(
-            widget_payload.get("sizeBytes").and_then(Value::as_u64),
+            widget_payload.get("bytes").and_then(Value::as_u64),
             Some(11)
         );
         assert_eq!(
             widget_payload.get("lineCount").and_then(Value::as_u64),
             Some(1)
         );
-        assert!(widget_payload.get("bytes").is_none());
+        assert_eq!(
+            widget_payload
+                .get("renderedFileCount")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        // The widget payload must not reuse a structured key with a different
+        // meaning; renaming these two was how that stopped happening.
+        assert!(widget_payload.get("sizeBytes").is_none());
+        assert!(widget_payload.get("fileCount").is_none());
         assert!(widget_payload.get("text").is_none());
-        assert!(widget_payload.get("truncated").is_none());
+        assert!(widget_payload.get("files").is_none());
     }
 
     #[test]
@@ -5681,7 +6377,7 @@ hello world"
     #[test]
     fn widget_resource_uri_includes_revision_for_cache_busting() {
         let uri = current_widget_resource_uri_for_tool("catdesk_instruction");
-        assert!(uri.contains("widgetRevision=2"));
+        assert!(uri.contains("widgetRevision=3"));
         assert!(uri.contains("toolName=catdesk_instruction"));
     }
 
