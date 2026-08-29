@@ -604,6 +604,7 @@
         gap: 12px;
         min-width: 0;
         padding: 10px 12px;
+        flex-wrap: wrap;
       }
 
       .change-card {
@@ -722,6 +723,18 @@
         color: var(--text-3);
         font-size: 11px;
         white-space: nowrap;
+      }
+
+      .read-failures {
+        flex: 1 0 100%;
+        gap: 4px 12px;
+        flex-wrap: wrap;
+      }
+
+      .read-failure {
+        color: var(--err);
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
 
       .read-meta-item,
@@ -2949,6 +2962,20 @@
           return typeof value === "string" && value.length > 0 ? value : null;
         }
 
+        function readFailedFiles(value) {
+          if (!Array.isArray(value)) return [];
+          var failed = [];
+          for (var i = 0; i < value.length; i++) {
+            var entry = value[i];
+            if (!entry || typeof entry !== "object") continue;
+            var error = readNonEmptyString(entry.error);
+            if (error === null) continue;
+            var path = readNonEmptyString(entry.path);
+            failed.push({ path: path === null ? "?" : path, error: error });
+          }
+          return failed;
+        }
+
         function readBoolean(value) {
           return typeof value === "boolean" ? value : null;
         }
@@ -3277,8 +3304,10 @@
             commandElapsedMs: 0,
             commandOutput: "",
             readFilePath: "",
-            readFileSizeBytes: 0,
+            readFileCount: 1,
+            readFileBytes: 0,
             readFileLineCount: 0,
+            readFailedFiles: [],
             changeFilePath: "",
             changeBytesWritten: 0,
             changeOperationCount: 0,
@@ -3580,20 +3609,24 @@
 
           if (toolName === "read") {
             var readFilePath = readNonEmptyString(data.path);
-            var readFileSizeBytes = readNonNegativeInteger(data.sizeBytes);
+            var readFileBytes = readNonNegativeInteger(data.bytes);
             var readFileLineCount = readNonNegativeInteger(data.lineCount);
+            var readFileCount = readNonNegativeInteger(data.renderedFileCount);
             if (
               readFilePath === null ||
-              readFileSizeBytes === null ||
-              readFileLineCount === null
+              readFileBytes === null ||
+              readFileLineCount === null ||
+              readFileCount === null
             ) {
               return invalidPayload(
                 "read widget payload is missing required fields.",
               );
             }
             next.readFilePath = readFilePath;
-            next.readFileSizeBytes = readFileSizeBytes;
+            next.readFileCount = readFileCount;
+            next.readFileBytes = readFileBytes;
             next.readFileLineCount = readFileLineCount;
+            next.readFailedFiles = readFailedFiles(data.failedFiles);
             return validPayload(next);
           }
 
@@ -4147,7 +4180,9 @@
         }
 
         function renderReadFilePanel(current) {
-          var fileName = fileNameFromPath(current.readFilePath);
+          var extra = current.readFileCount - 1;
+          var suffix = extra > 0 ? " +" + extra : "";
+          var fileName = fileNameFromPath(current.readFilePath) + suffix;
           return (
             '<div class="read-panel">' +
             '<div class="read-target">' +
@@ -4160,18 +4195,37 @@
             esc(fileName) +
             "</span>" +
             '<span class="read-name read-name-full" tabindex="0">' +
-            esc(current.readFilePath) +
+            esc(current.readFilePath + suffix) +
             "</span>" +
             "</span>" +
             "</div>" +
             '<div class="read-meta" aria-label="file metadata">' +
             '<span class="read-meta-item">' +
-            esc(formatFileSize(current.readFileSizeBytes)) +
+            esc(formatFileSize(current.readFileBytes)) +
             "</span>" +
             '<span class="read-meta-item">' +
             esc(formatLineCount(current.readFileLineCount)) +
             "</span>" +
             "</div>" +
+            renderReadFailures(current.readFailedFiles) +
+            "</div>"
+          );
+        }
+
+        function renderReadFailures(failed) {
+          if (!Array.isArray(failed) || failed.length === 0) return "";
+          var items = "";
+          for (var i = 0; i < failed.length; i++) {
+            items +=
+              '<span class="read-meta-item read-failure">' +
+              esc(fileNameFromPath(failed[i].path)) +
+              ": " +
+              esc(failed[i].error) +
+              "</span>";
+          }
+          return (
+            '<div class="read-meta read-failures" aria-label="read errors">' +
+            items +
             "</div>"
           );
         }
