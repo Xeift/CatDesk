@@ -1709,6 +1709,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(config_root);
     }
 
+    #[tokio::test]
+    async fn post_mcp_tracks_widget_read_by_tool_name_across_uri_variations() {
+        let workspace_root = unique_temp_path("catdesk-bootstrap-read-workspace");
+        let config_root = unique_temp_path("catdesk-bootstrap-read-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, mut ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: app_state,
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+        };
+
+        let response = post_mcp(
+            State(server_state),
+            mcp_request_body(
+                "resources/read",
+                json!({
+                    "uri": "ui://widget/catdesk-dashboard.html?widgetRevision=999&tokenStatsLayout=bottom&toolName=read"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut tracked = None;
+        while let Ok(event) = ui_rx.try_recv() {
+            if let ServerUiEvent::RecordBootstrapWidgetReadResponse {
+                tool_name, success, ..
+            } = event
+            {
+                tracked = Some((tool_name, success));
+            }
+        }
+        let (tool_name, success) = tracked.expect("missing bootstrap resources/read event");
+        assert!(success);
+        assert_eq!(tool_name, "read");
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
     fn tool_call_body(name: &str, arguments: Value) -> Bytes {
         mcp_request_body(
             "tools/call",
@@ -2999,12 +3053,16 @@ async fn post_mcp_inner(
                     });
             }
             "resources/read" => {
-                if let Some(uri) = request_resource_uri(&body) {
+                if let Some(tool_name) = request_resource_uri(&body)
+                    .filter(|uri| mcp::is_catdesk_widget_resource_uri(uri))
+                    .and_then(|uri| query_param_value(uri, "toolName"))
+                    .filter(|tool_name| !tool_name.is_empty())
+                {
                     let _ = s
                         .ui_events
                         .send(ServerUiEvent::RecordBootstrapWidgetReadResponse {
                             flow_id: STATELESS_FLOW_ID.to_string(),
-                            uri: uri.to_string(),
+                            tool_name: tool_name.to_string(),
                             success: response_succeeded,
                         });
                 }

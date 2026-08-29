@@ -692,8 +692,8 @@ fn flow_phase_views(
                             &event,
                             widget.label.clone(),
                             flow.bootstrap_progress
-                                .loaded_widget_uris
-                                .contains(&widget.uri),
+                                .loaded_widget_tool_names
+                                .contains(&widget.tool_name),
                             now_millis,
                         )
                     })
@@ -702,15 +702,7 @@ fn flow_phase_views(
             .unwrap_or_default();
         let complete = flow.is_some_and(|flow| {
             flow.bootstrap_progress.tools_list_complete
-                && flow
-                    .bootstrap_progress
-                    .expected_widgets
-                    .iter()
-                    .all(|widget| {
-                        flow.bootstrap_progress
-                            .loaded_widget_uris
-                            .contains(&widget.uri)
-                    })
+                && flow.bootstrap_progress.widgets_complete()
         });
         phases.push(FlowPhaseView {
             title: "Loading widgets",

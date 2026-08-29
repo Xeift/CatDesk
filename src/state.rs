@@ -50,17 +50,18 @@ pub struct FlowBootstrapProgress {
     pub discover_complete: bool,
     pub tools_list_complete: bool,
     pub expected_widgets: Vec<FlowBootstrapWidget>,
-    pub loaded_widget_uris: HashSet<String>,
+    pub loaded_widget_tool_names: HashSet<String>,
 }
 
 impl FlowBootstrapProgress {
+    pub fn widgets_complete(&self) -> bool {
+        self.expected_widgets
+            .iter()
+            .all(|widget| self.loaded_widget_tool_names.contains(&widget.tool_name))
+    }
+
     pub fn is_complete(&self) -> bool {
-        self.discover_complete
-            && self.tools_list_complete
-            && self
-                .expected_widgets
-                .iter()
-                .all(|widget| self.loaded_widget_uris.contains(&widget.uri))
+        self.discover_complete && self.tools_list_complete && self.widgets_complete()
     }
 }
 
@@ -368,7 +369,7 @@ pub enum ServerUiEvent {
     },
     RecordBootstrapWidgetReadResponse {
         flow_id: String,
-        uri: String,
+        tool_name: String,
         success: bool,
     },
     RecordTurnUsage {
@@ -982,10 +983,10 @@ impl AppState {
             }
             ServerUiEvent::RecordBootstrapWidgetReadResponse {
                 flow_id,
-                uri,
+                tool_name,
                 success,
             } => {
-                self.record_bootstrap_widget_read_response(&flow_id, &uri, success);
+                self.record_bootstrap_widget_read_response(&flow_id, &tool_name, success);
             }
             ServerUiEvent::RecordTurnUsage {
                 flow_id,
@@ -1113,10 +1114,10 @@ impl AppState {
         if !success {
             return;
         }
-        let mut seen_uris = HashSet::new();
+        let mut seen_tool_names = HashSet::new();
         let widgets = widgets
             .into_iter()
-            .filter(|widget| seen_uris.insert(widget.uri.clone()))
+            .filter(|widget| seen_tool_names.insert(widget.tool_name.clone()))
             .collect();
         let progress = self
             .flow_bootstrap_progress
@@ -1124,13 +1125,16 @@ impl AppState {
             .or_default();
         progress.tools_list_complete = true;
         progress.expected_widgets = widgets;
+        progress
+            .loaded_widget_tool_names
+            .retain(|tool_name| seen_tool_names.contains(tool_name));
         self.sync_flow_bootstrap_progress(flow_id);
     }
 
     pub fn record_bootstrap_widget_read_response(
         &mut self,
         flow_id: &str,
-        uri: &str,
+        tool_name: &str,
         success: bool,
     ) {
         if !success {
@@ -1139,8 +1143,8 @@ impl AppState {
         self.flow_bootstrap_progress
             .entry(flow_id.to_string())
             .or_default()
-            .loaded_widget_uris
-            .insert(uri.to_string());
+            .loaded_widget_tool_names
+            .insert(tool_name.to_string());
         self.sync_flow_bootstrap_progress(flow_id);
     }
 
@@ -1881,7 +1885,7 @@ toolCallCount = 0
         for widget in &widgets {
             let event = format!("resources/read:{}", widget.tool_name);
             app.record_flow("stateless", &[event.clone()], FlowDirection::Forward);
-            app.record_bootstrap_widget_read_response("stateless", &widget.uri, true);
+            app.record_bootstrap_widget_read_response("stateless", &widget.tool_name, true);
             app.record_flow("stateless", &[event], FlowDirection::Backward);
         }
 
@@ -1889,7 +1893,7 @@ toolCallCount = 0
         assert!(flow.bootstrap_status_active);
         assert!(flow.bootstrap_progress.is_complete());
         assert_eq!(flow.bootstrap_progress.expected_widgets, widgets);
-        assert_eq!(flow.bootstrap_progress.loaded_widget_uris.len(), 10);
+        assert_eq!(flow.bootstrap_progress.loaded_widget_tool_names.len(), 10);
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
@@ -1902,7 +1906,7 @@ toolCallCount = 0
         record_successful_bootstrap_handshake(&mut app, widgets.clone());
 
         for widget in widgets.iter().rev() {
-            app.record_bootstrap_widget_read_response("stateless", &widget.uri, true);
+            app.record_bootstrap_widget_read_response("stateless", &widget.tool_name, true);
         }
 
         let flow = app.flows.first().expect("missing flow");
@@ -1945,7 +1949,7 @@ toolCallCount = 0
         let widget = bootstrap_widget("read");
         record_successful_bootstrap_handshake(&mut app, vec![widget.clone()]);
 
-        app.record_bootstrap_widget_read_response("stateless", &widget.uri, false);
+        app.record_bootstrap_widget_read_response("stateless", &widget.tool_name, false);
         assert!(
             !app.flows
                 .first()
@@ -1954,7 +1958,7 @@ toolCallCount = 0
                 .is_complete()
         );
 
-        app.record_bootstrap_widget_read_response("stateless", &widget.uri, true);
+        app.record_bootstrap_widget_read_response("stateless", &widget.tool_name, true);
         assert!(
             app.flows
                 .first()
@@ -1962,6 +1966,65 @@ toolCallCount = 0
                 .bootstrap_progress
                 .is_complete()
         );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn widget_completion_uses_tool_name_identity_even_if_widget_uri_changes() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-tool-name");
+        let mut widget = bootstrap_widget("read");
+        widget.uri = "ui://widget/catdesk-dashboard.html?widgetRevision=2&tokenStatsLayout=right&toolName=read".to_string();
+        record_successful_bootstrap_handshake(&mut app, vec![widget]);
+
+        app.record_bootstrap_widget_read_response("stateless", "read", true);
+
+        let flow = app.flows.first().expect("missing flow");
+        assert!(flow.bootstrap_progress.is_complete());
+        assert!(
+            flow.bootstrap_progress
+                .loaded_widget_tool_names
+                .contains("read")
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn different_tool_name_does_not_complete_expected_widget() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-wrong-tool");
+        let widget = bootstrap_widget("read");
+        record_successful_bootstrap_handshake(&mut app, vec![widget]);
+
+        app.record_bootstrap_widget_read_response("stateless", "search", true);
+
+        let flow = app.flows.first().expect("missing flow");
+        assert!(!flow.bootstrap_progress.is_complete());
+        assert!(
+            flow.bootstrap_progress
+                .loaded_widget_tool_names
+                .contains("search")
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn repeated_tools_list_drops_loaded_tools_that_are_no_longer_expected() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-refresh-tools");
+        let widgets = ["read", "search"].map(bootstrap_widget).to_vec();
+        record_successful_bootstrap_handshake(&mut app, widgets);
+        app.record_bootstrap_widget_read_response("stateless", "search", true);
+
+        app.record_bootstrap_tools_list_response("stateless", true, vec![bootstrap_widget("read")]);
+
+        let flow = app.flows.first().expect("missing flow");
+        assert_eq!(flow.bootstrap_progress.expected_widgets.len(), 1);
+        assert!(flow.bootstrap_progress.loaded_widget_tool_names.is_empty());
+        assert!(!flow.bootstrap_progress.is_complete());
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
