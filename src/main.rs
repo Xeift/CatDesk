@@ -32,11 +32,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use state::{
-    AppState, FLOW_ANIM_CELLS, FLOW_BOOTSTRAP_PHASES, FlowAnimKind, FlowAnimSegment, FlowDirection,
-    FlowLane, GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, Mode, ServerUiEvent, SharedState,
-    ShowDetailMode, ToolMode, UsageTotals, app_config_path, flow_anim_lit_count,
-    load_ngrok_authtoken, load_ngrok_domain, save_ngrok_authtoken, save_ngrok_domain,
-    user_home_dir,
+    AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, FlowLane,
+    GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, Mode, ServerUiEvent, SharedState, ShowDetailMode,
+    ToolMode, UsageTotals, app_config_path, flow_anim_lit_count, load_ngrok_authtoken,
+    load_ngrok_domain, save_ngrok_authtoken, save_ngrok_domain, user_home_dir,
 };
 use std::collections::HashMap;
 use std::io::{Write, stdout};
@@ -620,54 +619,118 @@ enum FlowPhaseStepState {
     Complete,
 }
 
-fn flow_phase_bounds(phase_index: usize) -> (usize, usize) {
-    let start = FLOW_BOOTSTRAP_PHASES
-        .iter()
-        .take(phase_index)
-        .map(|phase| phase.steps.len())
-        .sum::<usize>();
-    let end = start + FLOW_BOOTSTRAP_PHASES[phase_index].steps.len();
-    (start, end)
+struct FlowPhaseStepView {
+    label: String,
+    state: FlowPhaseStepState,
 }
 
-fn flow_phase_step_state(flow: Option<&FlowLane>, step_index: usize) -> FlowPhaseStepState {
-    let Some(flow) = flow else {
-        return FlowPhaseStepState::Future;
-    };
-    if step_index < flow.bootstrap_completed_steps {
+struct FlowPhaseView {
+    title: &'static str,
+    complete: bool,
+    steps: Vec<FlowPhaseStepView>,
+}
+
+fn flow_event_pending(flow: &FlowLane, event: &str, now_millis: u128) -> bool {
+    current_anim_segment(flow, now_millis).is_some() && latest_flow_action(flow) == event
+}
+
+fn flow_phase_step_view(
+    flow: Option<&FlowLane>,
+    event: &str,
+    label: String,
+    complete: bool,
+    now_millis: u128,
+) -> FlowPhaseStepView {
+    let state = if complete {
         FlowPhaseStepState::Complete
-    } else if flow.bootstrap_pending_steps.contains(&step_index) {
+    } else if flow.is_some_and(|flow| flow_event_pending(flow, event, now_millis)) {
         FlowPhaseStepState::Pending
     } else {
         FlowPhaseStepState::Future
-    }
+    };
+    FlowPhaseStepView { label, state }
 }
 
-fn flow_phase_status_label(flow: Option<&FlowLane>, phase_index: usize) -> Option<String> {
-    let Some(flow) = flow else {
-        return None;
-    };
-    let (start, end) = flow_phase_bounds(phase_index);
-    if flow.bootstrap_completed_steps >= end {
+fn flow_phase_views(
+    flow: Option<&FlowLane>,
+    mode: ShowDetailMode,
+    now_millis: u128,
+) -> Vec<FlowPhaseView> {
+    let discover_complete = flow.is_some_and(|flow| flow.bootstrap_progress.discover_complete);
+    let tools_list_complete = flow.is_some_and(|flow| flow.bootstrap_progress.tools_list_complete);
+    let mut phases = vec![FlowPhaseView {
+        title: "Connecting",
+        complete: discover_complete && tools_list_complete,
+        steps: vec![
+            flow_phase_step_view(
+                flow,
+                "server/discover",
+                "discover".to_string(),
+                discover_complete,
+                now_millis,
+            ),
+            flow_phase_step_view(
+                flow,
+                "tools/list",
+                "tools/list".to_string(),
+                tools_list_complete,
+                now_millis,
+            ),
+        ],
+    }];
+
+    if mode != ShowDetailMode::Disable {
+        let steps = flow
+            .map(|flow| {
+                flow.bootstrap_progress
+                    .expected_widgets
+                    .iter()
+                    .map(|widget| {
+                        let event = format!("resources/read:{}", widget.tool_name);
+                        flow_phase_step_view(
+                            Some(flow),
+                            &event,
+                            widget.label.clone(),
+                            flow.bootstrap_progress
+                                .loaded_widget_tool_names
+                                .contains(&widget.tool_name),
+                            now_millis,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let complete = flow.is_some_and(|flow| {
+            flow.bootstrap_progress.tools_list_complete
+                && flow.bootstrap_progress.widgets_complete()
+        });
+        phases.push(FlowPhaseView {
+            title: "Loading widgets",
+            complete,
+            steps,
+        });
+    }
+
+    phases
+}
+
+fn flow_phase_status_label(phase: &FlowPhaseView) -> Option<String> {
+    if phase.complete {
         return Some("✓".to_string());
     }
-    if let Some(step_index) = flow
-        .bootstrap_pending_steps
+    if let Some(step) = phase
+        .steps
         .iter()
-        .copied()
-        .find(|step_index| (start..end).contains(step_index))
+        .find(|step| step.state == FlowPhaseStepState::Pending)
     {
-        let step = &FLOW_BOOTSTRAP_PHASES[phase_index].steps[step_index - start];
-        return Some(step.label.to_string());
+        return Some(step.label.clone());
     }
-    if (start..end).contains(&flow.bootstrap_completed_steps.saturating_sub(1))
-        && flow.bootstrap_completed_steps > start
-    {
-        let step_index = flow.bootstrap_completed_steps - 1;
-        let step = &FLOW_BOOTSTRAP_PHASES[phase_index].steps[step_index - start];
-        return Some(step.label.to_string());
-    }
-    None
+    phase
+        .steps
+        .iter()
+        .rev()
+        .find(|step| step.state == FlowPhaseStepState::Complete)
+        .map(|step| step.label.clone())
 }
 
 fn flow_phase_lines(
@@ -675,14 +738,11 @@ fn flow_phase_lines(
     mode: ShowDetailMode,
     palette: &theme::Palette,
     status_style: Style,
+    now_millis: u128,
 ) -> Vec<Line<'static>> {
     const TITLE_STATUS_GAP: usize = 4;
     const STATUS_ANIM_GAP: usize = 4;
-    let phases = if mode == ShowDetailMode::Disable {
-        &FLOW_BOOTSTRAP_PHASES[..1]
-    } else {
-        FLOW_BOOTSTRAP_PHASES
-    };
+    let phases = flow_phase_views(flow, mode, now_millis);
     let title_width = phases
         .iter()
         .enumerate()
@@ -694,7 +754,7 @@ fn flow_phase_lines(
         .iter()
         .flat_map(|phase| {
             std::iter::once("✓".to_string())
-                .chain(phase.steps.iter().map(|step| step.label.to_string()))
+                .chain(phase.steps.iter().map(|step| step.label.clone()))
                 .map(|status| format!("[{status}]").chars().count())
         })
         .max()
@@ -714,8 +774,7 @@ fn flow_phase_lines(
         .map(|(phase_index, phase)| {
             let title = format!("    Phase {}  {}", phase_index + 1, phase.title);
             let title_padding = title_width.saturating_sub(title.chars().count());
-            let status_label = flow_phase_status_label(flow, phase_index);
-            let status_text = status_label
+            let status_text = flow_phase_status_label(phase)
                 .map(|label| format!("[{label}]"))
                 .unwrap_or_default();
             let status_padding = status_width.saturating_sub(status_text.chars().count());
@@ -725,13 +784,11 @@ fn flow_phase_lines(
                 Span::styled(status_text, status_style),
                 Span::styled(" ".repeat(status_padding + STATUS_ANIM_GAP), future_style),
             ];
-            let (start, _) = flow_phase_bounds(phase_index);
-            for (step_offset, _) in phase.steps.iter().enumerate() {
+            for (step_offset, step) in phase.steps.iter().enumerate() {
                 if step_offset > 0 {
                     spans.push(Span::raw(" "));
                 }
-                let step_index = start + step_offset;
-                match flow_phase_step_state(flow, step_index) {
+                match step.state {
                     FlowPhaseStepState::Future => {
                         spans.push(Span::styled("✧", future_style));
                     }
@@ -748,21 +805,12 @@ fn flow_phase_lines(
         .collect()
 }
 
-fn flow_bootstrap_steps_total(mode: state::ShowDetailMode) -> usize {
-    state::flow_bootstrap_steps_total(mode)
+fn flow_bootstrap_complete(flow: &FlowLane) -> bool {
+    flow.bootstrap_progress.is_complete()
 }
 
-fn flow_bootstrap_complete(flow: &FlowLane, mode: state::ShowDetailMode) -> bool {
-    flow.bootstrap_completed_steps >= flow_bootstrap_steps_total(mode)
-        && flow.bootstrap_pending_steps.is_empty()
-}
-
-fn flow_bootstrap_status_visible(
-    flow: &FlowLane,
-    now_millis: u128,
-    mode: state::ShowDetailMode,
-) -> bool {
-    if !flow_bootstrap_complete(flow, mode) {
+fn flow_bootstrap_status_visible(flow: &FlowLane, now_millis: u128) -> bool {
+    if !flow_bootstrap_complete(flow) {
         return true;
     }
     if current_anim_segment(flow, now_millis).is_some() {
@@ -785,7 +833,7 @@ fn active_bootstrap_status_flow<'a>(app: &'a AppState, now_millis: u128) -> Opti
         should_display_flow_row(flow, app.remote_connected)
             && flow.bootstrap_status_active
             && flow.closing_started_ms.is_none()
-            && flow_bootstrap_status_visible(flow, now_millis, app.show_detail_mode)
+            && flow_bootstrap_status_visible(flow, now_millis)
     })
 }
 
@@ -816,7 +864,7 @@ fn flow_bootstrap_status_lines(
     now_millis: u128,
 ) -> Vec<Line<'static>> {
     let action_label = latest_flow_action(flow);
-    let bootstrap_complete = flow_bootstrap_complete(flow, app.show_detail_mode);
+    let bootstrap_complete = flow_bootstrap_complete(flow);
     let header_title = if bootstrap_complete {
         "Bootstrap completed"
     } else {
@@ -875,6 +923,7 @@ fn flow_bootstrap_status_lines(
         Style::default()
             .fg(palette.info_fg)
             .add_modifier(Modifier::BOLD),
+        now_millis,
     ));
     lines.push(Line::from(""));
 
@@ -2435,19 +2484,26 @@ mod tests {
         let palette = super::theme::all()[0].palette;
         let status_style = ratatui::style::Style::default();
 
-        let disabled =
-            super::flow_phase_lines(None, super::ShowDetailMode::Disable, &palette, status_style);
+        let disabled = super::flow_phase_lines(
+            None,
+            super::ShowDetailMode::Disable,
+            &palette,
+            status_style,
+            0,
+        );
         let expanded = super::flow_phase_lines(
             None,
             super::ShowDetailMode::Expanded,
             &palette,
             status_style,
+            0,
         );
         let collapsed = super::flow_phase_lines(
             None,
             super::ShowDetailMode::Collapsed,
             &palette,
             status_style,
+            0,
         );
 
         assert_eq!(disabled.len(), 1);

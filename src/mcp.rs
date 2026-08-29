@@ -334,6 +334,10 @@ fn current_widget_resource_uri() -> String {
     current_widget_resource_uri_for_tool("")
 }
 
+pub(crate) fn is_catdesk_widget_resource_uri(uri: &str) -> bool {
+    uri == UI_TEMPLATE_URI || uri.starts_with(&format!("{UI_TEMPLATE_URI}?"))
+}
+
 fn current_widget_resource_uri_for_tool(tool_name: &str) -> String {
     let token_stats_layout = current_token_stats_layout();
     if tool_name.is_empty() {
@@ -425,7 +429,7 @@ fn handle_resources_read_with_show_detail_mode(
     if show_detail_mode == ShowDetailMode::Disable {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
     }
-    let text = if uri == UI_TEMPLATE_URI || uri.starts_with(&format!("{UI_TEMPLATE_URI}?")) {
+    let text = if is_catdesk_widget_resource_uri(uri) {
         render_widget_html(uri, mascot_seed)
     } else {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
