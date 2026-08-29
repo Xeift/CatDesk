@@ -67,8 +67,8 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "macos")]
-pub fn maybe_relaunch_in_terminal_profile() -> Result<LaunchAction, String> {
-    if !should_manage_terminal_launch() {
+pub fn maybe_relaunch_in_terminal_profile(profile_enabled: bool) -> Result<LaunchAction, String> {
+    if !profile_enabled || !should_manage_terminal_launch() {
         return Ok(LaunchAction::Continue);
     }
 
@@ -125,8 +125,18 @@ pub fn maybe_relaunch_in_terminal_profile() -> Result<LaunchAction, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn maybe_relaunch_in_terminal_profile() -> Result<LaunchAction, String> {
+pub fn maybe_relaunch_in_terminal_profile(_profile_enabled: bool) -> Result<LaunchAction, String> {
     Ok(LaunchAction::Continue)
+}
+
+#[cfg(target_os = "macos")]
+pub fn should_prompt_for_terminal_profile() -> bool {
+    should_manage_terminal_launch()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn should_prompt_for_terminal_profile() -> bool {
+    false
 }
 
 #[cfg(target_os = "macos")]

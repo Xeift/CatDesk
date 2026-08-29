@@ -34,8 +34,9 @@ use ratatui::{
 use state::{
     AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, FlowLane,
     GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, Mode, ServerUiEvent, SharedState, ShowDetailMode,
-    ToolMode, UsageTotals, app_config_path, flow_anim_lit_count, load_ngrok_authtoken,
-    load_ngrok_domain, save_ngrok_authtoken, save_ngrok_domain, user_home_dir,
+    ToolMode, UsageTotals, app_config_path, flow_anim_lit_count, load_macos_terminal_profile,
+    load_ngrok_authtoken, load_ngrok_domain, save_macos_terminal_profile, save_ngrok_authtoken,
+    save_ngrok_domain, user_home_dir,
 };
 use std::collections::HashMap;
 use std::io::{Write, stdout};
@@ -1144,6 +1145,42 @@ fn drain_server_ui_events(app: &mut AppState, ui_events: &mut UnboundedReceiver<
 
 // ── Main ────────────────────────────────────────────────────
 
+fn parse_terminal_profile_choice(input: &str) -> Option<bool> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn prompt_macos_terminal_profile() -> std::io::Result<bool> {
+    loop {
+        println!("CatDesk can apply its Terminal.app profile for the best TUI appearance.");
+        print!("Use the CatDesk Terminal.app profile? [Y/n]: ");
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if let Some(enabled) = parse_terminal_profile_choice(&input) {
+            return Ok(enabled);
+        }
+        eprintln!("Please answer y/yes or n/no.");
+    }
+}
+
+fn macos_terminal_profile_enabled() -> std::io::Result<bool> {
+    if !macos_terminal::should_prompt_for_terminal_profile() {
+        return Ok(true);
+    }
+    if let Some(enabled) = load_macos_terminal_profile()? {
+        return Ok(enabled);
+    }
+
+    let enabled = prompt_macos_terminal_profile()?;
+    save_macos_terminal_profile(enabled)?;
+    Ok(enabled)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
@@ -1152,7 +1189,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         unreachable!("Landlock helper returned after exec");
     }
 
-    match macos_terminal::maybe_relaunch_in_terminal_profile() {
+    let terminal_profile_enabled = macos_terminal_profile_enabled()?;
+    match macos_terminal::maybe_relaunch_in_terminal_profile(terminal_profile_enabled) {
         Ok(macos_terminal::LaunchAction::Continue) => {}
         #[cfg(target_os = "macos")]
         Ok(macos_terminal::LaunchAction::ExitAfterProfileBootstrap) => {
@@ -2283,10 +2321,20 @@ mod tests {
     use super::{
         LogView, draw_chatgpt_connector_refresh_notice, draw_tui_header, export_logs_to_dir,
         key_is_clipboard_paste, mask_mcp_path_in_log, normalize_ngrok_authtoken_input,
-        text_input_key_is_cancel, wrap_log_message,
+        parse_terminal_profile_choice, text_input_key_is_cancel, wrap_log_message,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    #[test]
+    fn parses_terminal_profile_choice() {
+        assert_eq!(parse_terminal_profile_choice(""), Some(true));
+        assert_eq!(parse_terminal_profile_choice(" y "), Some(true));
+        assert_eq!(parse_terminal_profile_choice("YES"), Some(true));
+        assert_eq!(parse_terminal_profile_choice("n"), Some(false));
+        assert_eq!(parse_terminal_profile_choice(" No "), Some(false));
+        assert_eq!(parse_terminal_profile_choice("maybe"), None);
+    }
 
     #[test]
     fn normalizes_plain_ngrok_token() {
