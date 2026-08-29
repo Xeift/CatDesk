@@ -346,8 +346,10 @@ fn command_line_starts_with_executable(command_line: &str, executable: &str) -> 
     }
     command_line
         .strip_prefix(executable)
-        .map(str::trim_start)
-        .is_some_and(|rest| rest.starts_with('-'))
+        .is_some_and(|rest| {
+            rest.chars().next().is_some_and(char::is_whitespace)
+                && rest.trim_start().starts_with('-')
+        })
 }
 
 fn command_matches_binary(arg: &str, binary: &str) -> bool {
