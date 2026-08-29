@@ -1,6 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,8 +30,7 @@ pub struct FlowLane {
     pub events: Vec<String>,
     pub turn_usage: Option<UsageTotals>,
     pub bootstrap_status_active: bool,
-    pub bootstrap_completed_steps: usize,
-    pub bootstrap_pending_steps: VecDeque<usize>,
+    pub bootstrap_progress: FlowBootstrapProgress,
     pub bootstrap_status_close_deadline_ms: Option<u128>,
     pub anim_queue: VecDeque<FlowAnimSegment>,
     pub last_direction: FlowDirection,
@@ -39,10 +38,30 @@ pub struct FlowLane {
     pub closing_step_ms: u64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlowBootstrapWidget {
+    pub uri: String,
+    pub tool_name: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FlowBootstrapProgress {
-    pub completed_steps: usize,
-    pub pending_steps: VecDeque<usize>,
+    pub discover_complete: bool,
+    pub tools_list_complete: bool,
+    pub expected_widgets: Vec<FlowBootstrapWidget>,
+    pub loaded_widget_uris: HashSet<String>,
+}
+
+impl FlowBootstrapProgress {
+    pub fn is_complete(&self) -> bool {
+        self.discover_complete
+            && self.tools_list_complete
+            && self
+                .expected_widgets
+                .iter()
+                .all(|widget| self.loaded_widget_uris.contains(&widget.uri))
+    }
 }
 
 const APP_CONFIG_DIR_NAME: &str = ".catdesk";
@@ -338,6 +357,20 @@ pub enum ServerUiEvent {
         events: Vec<String>,
         direction: FlowDirection,
     },
+    RecordBootstrapDiscoverResponse {
+        flow_id: String,
+        success: bool,
+    },
+    RecordBootstrapToolsListResponse {
+        flow_id: String,
+        success: bool,
+        widgets: Vec<FlowBootstrapWidget>,
+    },
+    RecordBootstrapWidgetReadResponse {
+        flow_id: String,
+        uri: String,
+        success: bool,
+    },
     RecordTurnUsage {
         flow_id: String,
         tool_input_tokens: u64,
@@ -369,87 +402,6 @@ pub struct FlowAnimSegment {
     pub start_cells: usize,
     pub end_cells: usize,
 }
-
-#[derive(Clone, Copy)]
-pub struct FlowBootstrapStep {
-    pub event: &'static str,
-    pub label: &'static str,
-}
-
-#[derive(Clone, Copy)]
-pub struct FlowBootstrapPhase {
-    pub title: &'static str,
-    pub steps: &'static [FlowBootstrapStep],
-}
-
-const FLOW_BOOTSTRAP_PHASE_1_STEPS: &[FlowBootstrapStep] = &[
-    FlowBootstrapStep {
-        event: "server/discover",
-        label: "discover",
-    },
-    FlowBootstrapStep {
-        event: "tools/list",
-        label: "tools/list",
-    },
-];
-
-const FLOW_BOOTSTRAP_PHASE_2_STEPS: &[FlowBootstrapStep] = &[
-    FlowBootstrapStep {
-        event: "server/discover",
-        label: "discover",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:run_command",
-        label: "run_command",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:start_command",
-        label: "start_command",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:poll_command",
-        label: "poll_command",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:cancel_command",
-        label: "cancel_command",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:catdesk_instruction",
-        label: "instruction",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:read",
-        label: "read",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:search",
-        label: "search",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:write",
-        label: "write",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:edit",
-        label: "edit",
-    },
-    FlowBootstrapStep {
-        event: "resources/read:delete",
-        label: "delete",
-    },
-];
-
-pub const FLOW_BOOTSTRAP_PHASES: &[FlowBootstrapPhase] = &[
-    FlowBootstrapPhase {
-        title: "Connecting",
-        steps: FLOW_BOOTSTRAP_PHASE_1_STEPS,
-    },
-    FlowBootstrapPhase {
-        title: "Loading widgets",
-        steps: FLOW_BOOTSTRAP_PHASE_2_STEPS,
-    },
-];
 
 /// Which MCP backends to enable.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -818,86 +770,16 @@ fn enqueue_flow_segment(
     }
 }
 
-fn flow_bootstrap_step(index: usize, mode: ShowDetailMode) -> Option<&'static FlowBootstrapStep> {
-    let mut offset = 0;
-    let phases_to_check = if mode == ShowDetailMode::Disable {
-        1
-    } else {
-        FLOW_BOOTSTRAP_PHASES.len()
-    };
-    for phase in &FLOW_BOOTSTRAP_PHASES[..phases_to_check] {
-        let end = offset + phase.steps.len();
-        if index < end {
-            return phase.steps.get(index - offset);
-        }
-        offset = end;
-    }
-    None
-}
-
-pub fn flow_bootstrap_steps_total(mode: ShowDetailMode) -> usize {
-    let phases_to_check = if mode == ShowDetailMode::Disable {
-        1
-    } else {
-        FLOW_BOOTSTRAP_PHASES.len()
-    };
-    FLOW_BOOTSTRAP_PHASES[..phases_to_check]
-        .iter()
-        .map(|phase| phase.steps.len())
-        .sum()
-}
-
 fn events_start_bootstrap_status(events: &[String]) -> bool {
     events.iter().any(|event| event == "server/discover")
 }
 
 fn is_bootstrap_status_event(event: &str) -> bool {
-    FLOW_BOOTSTRAP_PHASES
-        .iter()
-        .flat_map(|phase| phase.steps)
-        .any(|step| step.event == event)
+    event == "server/discover" || event == "tools/list" || event.starts_with("resources/read:")
 }
 
 fn events_are_bootstrap_status_events(events: &[String]) -> bool {
     events.iter().all(|event| is_bootstrap_status_event(event))
-}
-
-fn advance_bootstrap_progress(
-    completed_steps: &mut usize,
-    pending_steps: &mut VecDeque<usize>,
-    events: &[String],
-    direction: FlowDirection,
-    mode: ShowDetailMode,
-) {
-    match direction {
-        FlowDirection::Forward => {
-            for event in events {
-                let next_index = completed_steps.saturating_add(pending_steps.len());
-                let Some(step) = flow_bootstrap_step(next_index, mode) else {
-                    break;
-                };
-                if step.event != event {
-                    continue;
-                }
-                pending_steps.push_back(next_index);
-            }
-        }
-        FlowDirection::Backward => {
-            for event in events {
-                let Some(pending_index) = pending_steps.front().copied() else {
-                    break;
-                };
-                let Some(step) = flow_bootstrap_step(pending_index, mode) else {
-                    pending_steps.clear();
-                    break;
-                };
-                if step.event == event {
-                    pending_steps.pop_front();
-                    *completed_steps = pending_index + 1;
-                }
-            }
-        }
-    }
 }
 
 impl AppState {
@@ -1088,6 +970,23 @@ impl AppState {
             } => {
                 self.record_flow(&flow_id, &events, direction);
             }
+            ServerUiEvent::RecordBootstrapDiscoverResponse { flow_id, success } => {
+                self.record_bootstrap_discover_response(&flow_id, success);
+            }
+            ServerUiEvent::RecordBootstrapToolsListResponse {
+                flow_id,
+                success,
+                widgets,
+            } => {
+                self.record_bootstrap_tools_list_response(&flow_id, success, widgets);
+            }
+            ServerUiEvent::RecordBootstrapWidgetReadResponse {
+                flow_id,
+                uri,
+                success,
+            } => {
+                self.record_bootstrap_widget_read_response(&flow_id, &uri, success);
+            }
             ServerUiEvent::RecordTurnUsage {
                 flow_id,
                 tool_input_tokens,
@@ -1114,11 +1013,6 @@ impl AppState {
         self.last_remote_activity_ms = Some(now_ms);
         self.remote_connected = true;
         let step_ms = derive_flow_step_ms();
-        let mut bootstrap = self
-            .flow_bootstrap_progress
-            .get(flow_id)
-            .cloned()
-            .unwrap_or_default();
         let starts_bootstrap_status = events_start_bootstrap_status(events);
         let only_bootstrap_status_events = events_are_bootstrap_status_events(events);
         let starts_tool_call = direction == FlowDirection::Forward
@@ -1130,6 +1024,12 @@ impl AppState {
                 flow.turn_usage = None;
             }
             if starts_bootstrap_status {
+                if !flow.bootstrap_status_active {
+                    let progress = FlowBootstrapProgress::default();
+                    self.flow_bootstrap_progress
+                        .insert(flow_id.to_string(), progress.clone());
+                    flow.bootstrap_progress = progress;
+                }
                 flow.bootstrap_status_active = true;
             } else if flow.bootstrap_status_active && !only_bootstrap_status_events {
                 flow.bootstrap_status_active = false;
@@ -1140,19 +1040,11 @@ impl AppState {
                 let drop_n = flow.events.len() - 12;
                 flow.events.drain(0..drop_n);
             }
-            flow.bootstrap_completed_steps = bootstrap.completed_steps;
-            flow.bootstrap_pending_steps = bootstrap.pending_steps.clone();
-            advance_bootstrap_progress(
-                &mut flow.bootstrap_completed_steps,
-                &mut flow.bootstrap_pending_steps,
-                events,
-                direction,
-                self.show_detail_mode,
-            );
-            bootstrap.completed_steps = flow.bootstrap_completed_steps;
-            bootstrap.pending_steps = flow.bootstrap_pending_steps.clone();
-            self.flow_bootstrap_progress
-                .insert(flow_id.to_string(), bootstrap);
+            flow.bootstrap_progress = self
+                .flow_bootstrap_progress
+                .get(flow_id)
+                .cloned()
+                .unwrap_or_default();
             flow.closing_started_ms = None;
             flow.closing_step_ms = 0;
             flow.bootstrap_status_close_deadline_ms = None;
@@ -1162,6 +1054,11 @@ impl AppState {
             return;
         }
 
+        let bootstrap_progress = self
+            .flow_bootstrap_progress
+            .entry(flow_id.to_string())
+            .or_default()
+            .clone();
         let mut trimmed = events.to_vec();
         if trimmed.len() > 12 {
             trimmed = trimmed[trimmed.len() - 12..].to_vec();
@@ -1174,8 +1071,7 @@ impl AppState {
                 events: trimmed,
                 turn_usage: None,
                 bootstrap_status_active: starts_bootstrap_status,
-                bootstrap_completed_steps: bootstrap.completed_steps,
-                bootstrap_pending_steps: bootstrap.pending_steps.clone(),
+                bootstrap_progress,
                 bootstrap_status_close_deadline_ms: None,
                 anim_queue: VecDeque::new(),
                 last_direction: direction,
@@ -1184,19 +1080,68 @@ impl AppState {
             },
         );
         if let Some(flow) = self.flows.first_mut() {
-            advance_bootstrap_progress(
-                &mut flow.bootstrap_completed_steps,
-                &mut flow.bootstrap_pending_steps,
-                events,
-                direction,
-                self.show_detail_mode,
-            );
-            bootstrap.completed_steps = flow.bootstrap_completed_steps;
-            bootstrap.pending_steps = flow.bootstrap_pending_steps.clone();
-            self.flow_bootstrap_progress
-                .insert(flow_id.to_string(), bootstrap);
             enqueue_flow_segment(&mut flow.anim_queue, direction, now_ms, step_ms);
         }
+    }
+
+    fn sync_flow_bootstrap_progress(&mut self, flow_id: &str) {
+        let Some(progress) = self.flow_bootstrap_progress.get(flow_id).cloned() else {
+            return;
+        };
+        if let Some(flow) = self.flows.iter_mut().find(|flow| flow.flow_id == flow_id) {
+            flow.bootstrap_progress = progress;
+        }
+    }
+
+    pub fn record_bootstrap_discover_response(&mut self, flow_id: &str, success: bool) {
+        if !success {
+            return;
+        }
+        self.flow_bootstrap_progress
+            .entry(flow_id.to_string())
+            .or_default()
+            .discover_complete = true;
+        self.sync_flow_bootstrap_progress(flow_id);
+    }
+
+    pub fn record_bootstrap_tools_list_response(
+        &mut self,
+        flow_id: &str,
+        success: bool,
+        widgets: Vec<FlowBootstrapWidget>,
+    ) {
+        if !success {
+            return;
+        }
+        let mut seen_uris = HashSet::new();
+        let widgets = widgets
+            .into_iter()
+            .filter(|widget| seen_uris.insert(widget.uri.clone()))
+            .collect();
+        let progress = self
+            .flow_bootstrap_progress
+            .entry(flow_id.to_string())
+            .or_default();
+        progress.tools_list_complete = true;
+        progress.expected_widgets = widgets;
+        self.sync_flow_bootstrap_progress(flow_id);
+    }
+
+    pub fn record_bootstrap_widget_read_response(
+        &mut self,
+        flow_id: &str,
+        uri: &str,
+        success: bool,
+    ) {
+        if !success {
+            return;
+        }
+        self.flow_bootstrap_progress
+            .entry(flow_id.to_string())
+            .or_default()
+            .loaded_widget_uris
+            .insert(uri.to_string());
+        self.sync_flow_bootstrap_progress(flow_id);
     }
 
     pub fn record_flow_turn_usage(
@@ -1235,7 +1180,6 @@ impl AppState {
 
     pub fn prune_closed_flows(&mut self) {
         let now_ms = now_unix_millis();
-        let bootstrap_steps_total = flow_bootstrap_steps_total(self.show_detail_mode);
 
         for flow in &mut self.flows {
             prune_finished_segments(&mut flow.anim_queue, now_ms);
@@ -1243,8 +1187,7 @@ impl AppState {
                 flow.bootstrap_status_close_deadline_ms = None;
                 continue;
             }
-            let bootstrap_complete = flow.bootstrap_completed_steps >= bootstrap_steps_total
-                && flow.bootstrap_pending_steps.is_empty();
+            let bootstrap_complete = flow.bootstrap_progress.is_complete();
             if flow.closing_started_ms.is_none() && bootstrap_complete {
                 if flow.anim_queue.is_empty() {
                     match flow.bootstrap_status_close_deadline_ms {
@@ -1787,8 +1730,7 @@ toolCallCount = 0
 
         let flow = app.flows.first().expect("missing flow");
         assert!(!flow.bootstrap_status_active);
-        assert_eq!(flow.bootstrap_completed_steps, 0);
-        assert!(flow.bootstrap_pending_steps.is_empty());
+        assert_eq!(flow.bootstrap_progress, FlowBootstrapProgress::default());
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
@@ -1844,8 +1786,7 @@ toolCallCount = 0
 
         let flow = app.flows.first().expect("missing flow");
         assert!(flow.bootstrap_status_active);
-        assert_eq!(flow.bootstrap_completed_steps, 0);
-        assert_eq!(flow.bootstrap_pending_steps.front(), Some(&0));
+        assert_eq!(flow.bootstrap_progress, FlowBootstrapProgress::default());
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
@@ -1878,89 +1819,163 @@ toolCallCount = 0
         let _ = std::fs::remove_dir_all(workspace);
     }
 
+    fn bootstrap_widget(tool_name: &str) -> FlowBootstrapWidget {
+        FlowBootstrapWidget {
+            uri: format!("ui://widget/catdesk-dashboard.html?toolName={tool_name}"),
+            tool_name: tool_name.to_string(),
+            label: if tool_name == "catdesk_instruction" {
+                "instruction".to_string()
+            } else {
+                tool_name.to_string()
+            },
+        }
+    }
+
+    fn record_successful_bootstrap_handshake(
+        app: &mut AppState,
+        widgets: Vec<FlowBootstrapWidget>,
+    ) {
+        app.record_flow(
+            "stateless",
+            &["server/discover".to_string()],
+            FlowDirection::Forward,
+        );
+        app.record_bootstrap_discover_response("stateless", true);
+        app.record_flow(
+            "stateless",
+            &["server/discover".to_string()],
+            FlowDirection::Backward,
+        );
+        app.record_flow(
+            "stateless",
+            &["tools/list".to_string()],
+            FlowDirection::Forward,
+        );
+        app.record_bootstrap_tools_list_response("stateless", true, widgets);
+        app.record_flow(
+            "stateless",
+            &["tools/list".to_string()],
+            FlowDirection::Backward,
+        );
+    }
+
     #[test]
-    fn record_flow_bootstrap_tracks_modern_tool_and_widget_loading_sequence() {
+    fn bootstrap_completes_from_runtime_advertised_widgets() {
         let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-widgets");
+        let widgets = [
+            "run_command",
+            "start_command",
+            "poll_command",
+            "cancel_command",
+            "catdesk_instruction",
+            "read",
+            "search",
+            "write",
+            "edit",
+            "delete",
+        ]
+        .map(bootstrap_widget)
+        .to_vec();
+        record_successful_bootstrap_handshake(&mut app, widgets.clone());
 
-        let sequence = [
-            // Phase 1: Connecting
-            ("server/discover", FlowDirection::Forward),
-            ("server/discover", FlowDirection::Backward),
-            ("tools/list", FlowDirection::Forward),
-            ("tools/list", FlowDirection::Backward),
-            // Phase 2: Loading widgets
-            ("server/discover", FlowDirection::Forward),
-            ("server/discover", FlowDirection::Backward),
-            ("resources/read:run_command", FlowDirection::Forward),
-            ("resources/read:run_command", FlowDirection::Backward),
-            ("resources/read:start_command", FlowDirection::Forward),
-            ("resources/read:start_command", FlowDirection::Backward),
-            ("resources/read:poll_command", FlowDirection::Forward),
-            ("resources/read:poll_command", FlowDirection::Backward),
-            ("resources/read:cancel_command", FlowDirection::Forward),
-            ("resources/read:cancel_command", FlowDirection::Backward),
-            ("resources/read:catdesk_instruction", FlowDirection::Forward),
-            (
-                "resources/read:catdesk_instruction",
-                FlowDirection::Backward,
-            ),
-            ("resources/read:read", FlowDirection::Forward),
-            ("resources/read:read", FlowDirection::Backward),
-            ("resources/read:search", FlowDirection::Forward),
-            ("resources/read:search", FlowDirection::Backward),
-            ("resources/read:write", FlowDirection::Forward),
-            ("resources/read:write", FlowDirection::Backward),
-            ("resources/read:edit", FlowDirection::Forward),
-            ("resources/read:edit", FlowDirection::Backward),
-            ("resources/read:delete", FlowDirection::Forward),
-            ("resources/read:delete", FlowDirection::Backward),
-        ];
-
-        for (event, direction) in sequence {
-            app.record_flow("stateless", &[event.to_string()], direction);
+        for widget in &widgets {
+            let event = format!("resources/read:{}", widget.tool_name);
+            app.record_flow("stateless", &[event.clone()], FlowDirection::Forward);
+            app.record_bootstrap_widget_read_response("stateless", &widget.uri, true);
+            app.record_flow("stateless", &[event], FlowDirection::Backward);
         }
 
         let flow = app.flows.first().expect("missing flow");
         assert!(flow.bootstrap_status_active);
-        let phase_step_counts: Vec<usize> = FLOW_BOOTSTRAP_PHASES
-            .iter()
-            .map(|phase| phase.steps.len())
-            .collect();
-        assert_eq!(phase_step_counts, vec![2, 11]);
-        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Expanded), 13);
-        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Collapsed), 13);
-        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Disable), 2);
-        assert_eq!(
-            flow.bootstrap_completed_steps,
-            flow_bootstrap_steps_total(ShowDetailMode::Expanded)
-        );
-        assert!(flow.bootstrap_pending_steps.is_empty());
+        assert!(flow.bootstrap_progress.is_complete());
+        assert_eq!(flow.bootstrap_progress.expected_widgets, widgets);
+        assert_eq!(flow.bootstrap_progress.loaded_widget_uris.len(), 10);
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]
-    fn record_flow_disable_bootstrap_completes_after_discover_and_tools_list() {
-        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-disable");
-        app.show_detail_mode = ShowDetailMode::Disable;
+    fn bootstrap_widget_reads_can_complete_out_of_order() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-out-of-order");
+        let widgets = ["read", "search", "edit"].map(bootstrap_widget).to_vec();
+        record_successful_bootstrap_handshake(&mut app, widgets.clone());
 
-        let sequence = [
-            ("server/discover", FlowDirection::Forward),
-            ("server/discover", FlowDirection::Backward),
-            ("tools/list", FlowDirection::Forward),
-            ("tools/list", FlowDirection::Backward),
-        ];
-
-        for (event, direction) in sequence {
-            app.record_flow("stateless", &[event.to_string()], direction);
+        for widget in widgets.iter().rev() {
+            app.record_bootstrap_widget_read_response("stateless", &widget.uri, true);
         }
 
         let flow = app.flows.first().expect("missing flow");
+        assert!(flow.bootstrap_progress.is_complete());
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn bootstrap_ignores_optional_rediscover_without_resetting_widgets() {
+        let (mut app, workspace, config_path) =
+            test_app("catdesk-flow-bootstrap-optional-rediscover");
+        let widgets = ["run_command", "read"].map(bootstrap_widget).to_vec();
+        record_successful_bootstrap_handshake(&mut app, widgets.clone());
+
+        app.record_flow(
+            "stateless",
+            &["server/discover".to_string()],
+            FlowDirection::Forward,
+        );
+        app.record_bootstrap_discover_response("stateless", true);
+        app.record_flow(
+            "stateless",
+            &["server/discover".to_string()],
+            FlowDirection::Backward,
+        );
+
+        let flow = app.flows.first().expect("missing flow");
+        assert_eq!(flow.bootstrap_progress.expected_widgets, widgets);
+        assert!(flow.bootstrap_progress.tools_list_complete);
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn failed_widget_read_requires_successful_retry() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-read-retry");
+        let widget = bootstrap_widget("read");
+        record_successful_bootstrap_handshake(&mut app, vec![widget.clone()]);
+
+        app.record_bootstrap_widget_read_response("stateless", &widget.uri, false);
+        assert!(
+            !app.flows
+                .first()
+                .expect("missing flow")
+                .bootstrap_progress
+                .is_complete()
+        );
+
+        app.record_bootstrap_widget_read_response("stateless", &widget.uri, true);
+        assert!(
+            app.flows
+                .first()
+                .expect("missing flow")
+                .bootstrap_progress
+                .is_complete()
+        );
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn bootstrap_without_advertised_widgets_completes_after_tools_list() {
+        let (mut app, workspace, config_path) = test_app("catdesk-flow-bootstrap-no-widgets");
+        record_successful_bootstrap_handshake(&mut app, Vec::new());
+
+        let flow = app.flows.first().expect("missing flow");
         assert!(flow.bootstrap_status_active);
-        assert_eq!(flow.bootstrap_completed_steps, 2);
-        assert!(flow.bootstrap_pending_steps.is_empty());
-        assert_eq!(flow_bootstrap_steps_total(ShowDetailMode::Disable), 2);
+        assert!(flow.bootstrap_progress.is_complete());
+        assert!(flow.bootstrap_progress.expected_widgets.is_empty());
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
