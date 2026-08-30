@@ -1,5 +1,7 @@
 # CatDesk
 
+**English** | [繁體中文](README.zh-TW.md)
+
 An open-source tool that lets you use ChatGPT Chat as a local coding agent. No reverse engineering, no API, no Codex, no Work mode. A ChatGPT Plus subscription is enough.
 
 <p align="center">
@@ -108,7 +110,7 @@ If you don't want to use CatDesk, here are some similar projects you can try:
    catdesk
    ```
 
-   When CatDesk starts, choose `Control Computer`, `Control Browser`, or `Both`. If browser control is enabled, select a supported Chromium browser. On macOS, CatDesk detects standard browser app bundles in `/Applications` and `~/Applications` in addition to binaries available on `PATH`.
+   When CatDesk starts, choose `Control Computer`, `Control Browser`, or `Both`. Press `l` on the mode selection screen to switch between English and Traditional Chinese; the preference is saved in `~/.catdesk/config.toml`. If browser control is enabled, select a supported Chromium browser. On macOS, CatDesk detects standard browser app bundles in `/Applications` and `~/Applications` in addition to binaries available on `PATH`.
 
    On first launch, CatDesk will ask you to enter your **ngrok authtoken** and **ngrok static domain** (e.g. `my-app.ngrok-free.dev`). You can get both from the [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup). These are saved to `~/.catdesk/config.toml` and reused on subsequent launches.
 
