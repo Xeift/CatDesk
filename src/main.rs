@@ -33,8 +33,8 @@ use ratatui::{
 };
 use state::{
     AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, FlowLane,
-    GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, Mode, ServerUiEvent, SharedState, ShowDetailMode,
-    ToolMode, UiLanguage, UsageTotals, app_config_path, flow_anim_lit_count,
+    GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, Mode, ReasoningProfile, ServerUiEvent, SharedState,
+    ShowDetailMode, ToolMode, UiLanguage, UsageTotals, app_config_path, flow_anim_lit_count,
     load_macos_terminal_profile, load_ngrok_authtoken, load_ngrok_domain,
     save_macos_terminal_profile, save_ngrok_authtoken, save_ngrok_domain, user_home_dir,
 };
@@ -2415,8 +2415,8 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 mod tests {
     use super::state::{ToolMode, UiLanguage};
     use super::{
-        LogView, draw_chatgpt_connector_refresh_notice, draw_mode_select, draw_tui_header,
-        export_logs_to_dir, key_is_clipboard_paste, mask_mcp_path_in_log,
+        LogView, draw_chatgpt_connector_refresh_notice, draw_mode_select, draw_settings,
+        draw_tui_header, export_logs_to_dir, key_is_clipboard_paste, mask_mcp_path_in_log,
         normalize_ngrok_authtoken_input, parse_terminal_profile_choice, text_input_key_is_cancel,
         wrap_log_message,
     };
@@ -2518,6 +2518,50 @@ mod tests {
         assert!(!text_input_key_is_cancel(KeyCode::Char('q')));
         assert!(!text_input_key_is_cancel(KeyCode::Char('Q')));
         assert!(text_input_key_is_cancel(KeyCode::Esc));
+    }
+
+    #[test]
+    fn settings_render_reasoning_profiles_and_pro_hint() {
+        let mut terminal = Terminal::new(TestBackend::new(110, 80)).expect("create test terminal");
+        let theme = super::theme::all()[0];
+        let selected_row = super::theme::all().len()
+            + super::ToolMode::all().len()
+            + super::ShowDetailMode::all().len()
+            + super::ReasoningProfile::all().len()
+            - 1;
+
+        terminal
+            .draw(|frame| {
+                draw_settings(
+                    frame,
+                    &theme,
+                    super::ToolMode::MultiTools,
+                    super::ShowDetailMode::Expanded,
+                    super::ReasoningProfile::Pro,
+                    false,
+                    "secret-slug",
+                    Some("example.ngrok.app"),
+                    &super::UsageTotals::default(),
+                    selected_row,
+                    false,
+                )
+            })
+            .expect("draw settings");
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("ChatGPT reasoning profile"));
+        assert!(text.contains("PRO"));
+        assert!(text.contains("[Pro]"));
+        assert!(text.contains("[current]"));
     }
 
     #[test]
@@ -2795,18 +2839,25 @@ async fn run_settings(
     let themes = theme::all();
     let tool_modes = ToolMode::all();
     let show_detail_modes = ShowDetailMode::all();
+    let reasoning_profiles = ReasoningProfile::all();
     let mut confirm_reset_token_billing = false;
     let mut selected_row = {
         let app = state.lock().await;
         themes.iter().position(|t| t.id == app.theme).unwrap_or(0)
     };
-    let total_rows = themes.len() + tool_modes.len() + show_detail_modes.len() + 1 + 3;
+    let total_rows = themes.len()
+        + tool_modes.len()
+        + show_detail_modes.len()
+        + reasoning_profiles.len()
+        + 1
+        + 3;
 
     loop {
         let (
             current_theme,
             current_tool_mode,
             current_show_detail_mode,
+            current_reasoning_profile,
             usage_totals,
             set_catdesk_as_co_author,
             mcp_slug,
@@ -2817,6 +2868,7 @@ async fn run_settings(
                 app.current_theme(),
                 app.tool_mode,
                 app.show_detail_mode,
+                app.reasoning_profile,
                 app.all_time_usage_totals(),
                 app.set_catdesk_as_co_author,
                 app.mcp_slug.clone(),
@@ -2829,6 +2881,7 @@ async fn run_settings(
                 current_theme,
                 current_tool_mode,
                 current_show_detail_mode,
+                current_reasoning_profile,
                 set_catdesk_as_co_author,
                 &mcp_slug,
                 ngrok_domain.as_deref(),
@@ -2870,6 +2923,9 @@ async fn run_settings(
                             let tool_mode_end = tool_mode_start + tool_modes.len();
                             let detail_mode_start = tool_mode_end;
                             let detail_mode_end = detail_mode_start + show_detail_modes.len();
+                            let reasoning_profile_start = detail_mode_end;
+                            let reasoning_profile_end =
+                                reasoning_profile_start + reasoning_profiles.len();
 
                             if selected_row < tool_mode_end {
                                 let picked = tool_modes[selected_row - tool_mode_start];
@@ -2888,7 +2944,18 @@ async fn run_settings(
                                     );
                                     app.persist_state_with_log();
                                 }
-                            } else if selected_row == detail_mode_end {
+                            } else if selected_row < reasoning_profile_end {
+                                let picked =
+                                    reasoning_profiles[selected_row - reasoning_profile_start];
+                                if app.reasoning_profile != picked {
+                                    app.reasoning_profile = picked;
+                                    app.log(
+                                        "INFO",
+                                        format!("Reasoning profile: {}", picked.label()),
+                                    );
+                                    app.persist_state_with_log();
+                                }
+                            } else if selected_row == reasoning_profile_end {
                                 app.set_catdesk_as_co_author = !app.set_catdesk_as_co_author;
                                 let enabled = app.set_catdesk_as_co_author;
                                 app.log(
@@ -2899,13 +2966,13 @@ async fn run_settings(
                                     ),
                                 );
                                 app.persist_state_with_log();
-                            } else if selected_row == detail_mode_end + 1 {
+                            } else if selected_row == reasoning_profile_end + 1 {
                                 // Keep existing slug, do nothing
-                            } else if selected_row == detail_mode_end + 2 {
+                            } else if selected_row == reasoning_profile_end + 2 {
                                 app.regenerate_mcp_slug();
                                 app.log("INFO", "Generated new random MCP slug".into());
                                 app.persist_state_with_log();
-                            } else if selected_row == detail_mode_end + 3 {
+                            } else if selected_row == reasoning_profile_end + 3 {
                                 let current_domain = app.ngrok_domain.clone().unwrap_or_default();
                                 drop(app);
                                 if let Some(new_domain) = run_prompt(terminal, "Enter ngrok static domain (with/without https://, empty to clear):", &current_domain).await? {
@@ -2949,6 +3016,7 @@ fn draw_settings(
     current_theme: &theme::ThemeDef,
     current_tool_mode: ToolMode,
     current_show_detail_mode: ShowDetailMode,
+    current_reasoning_profile: ReasoningProfile,
     set_catdesk_as_co_author: bool,
     mcp_slug: &str,
     ngrok_domain: Option<&str>,
@@ -2959,6 +3027,7 @@ fn draw_settings(
     let themes = theme::all();
     let tool_modes = ToolMode::all();
     let show_detail_modes = ShowDetailMode::all();
+    let reasoning_profiles = ReasoningProfile::all();
     let palette = current_theme.palette;
     let area = f.area();
     let chunks = Layout::default()
@@ -3096,7 +3165,59 @@ fn draw_settings(
         )]));
     }
 
-    let co_author_row = themes.len() + tool_modes.len() + show_detail_modes.len();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "  ChatGPT reasoning profile",
+        Style::default()
+            .fg(palette.title_fg)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        "     Manual tool-workflow hint only; keep it in sync with ChatGPT yourself.",
+        Style::default().fg(palette.muted_fg),
+    )]));
+    for (idx, profile) in reasoning_profiles.iter().enumerate() {
+        let row_idx = themes.len() + tool_modes.len() + show_detail_modes.len() + idx;
+        let selected = row_idx == selected_row;
+        let marker = if selected { ">" } else { " " };
+        let name_style = if selected {
+            Style::default()
+                .fg(palette.key_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.primary_fg)
+        };
+        lines.push(Line::from(""));
+        if selected {
+            selected_line_idx = lines.len();
+        }
+        let mut spans = vec![Span::styled(
+            format!(" {} [{}] {}", marker, row_idx + 1, profile.label()),
+            name_style,
+        )];
+        if profile.pro_tier_hint() {
+            spans.push(Span::styled(
+                "  [Pro]",
+                Style::default().fg(palette.warning_fg),
+            ));
+        }
+        if *profile == current_reasoning_profile {
+            spans.push(Span::styled(
+                "  [current]",
+                Style::default()
+                    .fg(palette.secondary_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(spans));
+        lines.push(Line::from(vec![Span::styled(
+            format!("     {}", profile.description()),
+            Style::default().fg(palette.muted_fg),
+        )]));
+    }
+
+    let co_author_row =
+        themes.len() + tool_modes.len() + show_detail_modes.len() + reasoning_profiles.len();
     let co_author_selected = co_author_row == selected_row;
     let co_author_marker = if co_author_selected { ">" } else { " " };
     let co_author_name_style = if co_author_selected {
@@ -3296,7 +3417,7 @@ fn draw_settings(
 
     let body = Paragraph::new(lines).scroll((scroll_y, 0)).block(
         Block::default()
-            .title(" Theme, Tool Mode & Billing ")
+            .title(" Theme, Tool Mode, Reasoning & Billing ")
             .borders(Borders::ALL)
             .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),

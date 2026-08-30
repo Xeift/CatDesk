@@ -112,6 +112,8 @@ If you don't want to use CatDesk, here are some similar projects you can try:
 
    When CatDesk starts, choose `Control Computer`, `Control Browser`, or `Both`. Press `l` on the mode selection screen to switch between English and Traditional Chinese; the preference is saved in `~/.catdesk/config.toml`. If browser control is enabled, select a supported Chromium browser. On macOS, CatDesk detects standard browser app bundles in `/Applications` and `~/Applications` in addition to binaries available on `PATH`.
 
+   In `Settings`, you can manually sync CatDesk's ChatGPT reasoning profile with the level you selected in ChatGPT: `Low`, `Medium`, `High`, `Extra High`, or `PRO`. The profile only changes CatDesk's tool-workflow guidance; it does not change the ChatGPT model or reasoning setting. `High` is the default, and the choice is saved in `~/.catdesk/config.toml`. `Extra High` and `PRO` are marked as Pro-oriented profiles but are not account-gated by CatDesk.
+
    On first launch, CatDesk will ask you to enter your **ngrok authtoken** and **ngrok static domain** (e.g. `my-app.ngrok-free.dev`). You can get both from the [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup). These are saved to `~/.catdesk/config.toml` and reused on subsequent launches.
 
    By default, CatDesk listens on port `3200`. You can override it with `PORT`. The workspace root defaults to the current working directory and can be overridden with `WORKSPACE_ROOT`.

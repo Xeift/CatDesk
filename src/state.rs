@@ -230,6 +230,78 @@ impl UiLanguage {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningProfile {
+    Low,
+    Medium,
+    #[default]
+    High,
+    ExtraHigh,
+    Pro,
+}
+
+impl ReasoningProfile {
+    pub fn all() -> &'static [Self] {
+        const PROFILES: [ReasoningProfile; 5] = [
+            ReasoningProfile::Low,
+            ReasoningProfile::Medium,
+            ReasoningProfile::High,
+            ReasoningProfile::ExtraHigh,
+            ReasoningProfile::Pro,
+        ];
+        &PROFILES
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::ExtraHigh => "Extra High",
+            Self::Pro => "PRO",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Low => "Keep CatDesk workflows narrow, short, and quick to validate.",
+            Self::Medium => "Balance context gathering, tool batching, and validation.",
+            Self::High => {
+                "Use broader context and complete multi-step coding tasks before reporting."
+            }
+            Self::ExtraHigh => {
+                "Explore related code proactively and validate changes more broadly."
+            }
+            Self::Pro => "Use long-horizon, repo-wide workflows with minimal unnecessary handoffs.",
+        }
+    }
+
+    pub fn workflow_instruction(self) -> &'static str {
+        match self {
+            Self::Low => {
+                "Keep CatDesk tool workflows narrow and short. Prefer targeted reads and searches, small edits, and quick validation."
+            }
+            Self::Medium => {
+                "Balance context gathering, batching closely related reads and searches, and validation before finishing."
+            }
+            Self::High => {
+                "Gather broader context before editing, batch related reads and searches, and complete multi-step coding tasks before reporting back."
+            }
+            Self::ExtraHigh => {
+                "Explore related code and dependencies proactively, batch independent context gathering, and run both targeted and broader validation when useful."
+            }
+            Self::Pro => {
+                "Use long-horizon, repo-wide workflows: proactively trace cross-file dependencies, batch tool calls where practical, avoid unnecessary user handoffs, and finish implementation plus validation end-to-end when safe."
+            }
+        }
+    }
+
+    pub fn pro_tier_hint(self) -> bool {
+        matches!(self, Self::ExtraHigh | Self::Pro)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -246,6 +318,8 @@ pub struct AppConfig {
     pub token_stats_layout: TokenStatsLayout,
     #[serde(default)]
     pub show_detail_mode: ShowDetailMode,
+    #[serde(default)]
+    pub reasoning_profile: ReasoningProfile,
     #[serde(default)]
     pub macos_terminal_profile: Option<bool>,
     #[serde(default)]
@@ -273,6 +347,7 @@ impl Default for AppConfig {
             agents_path_mode: AgentsPathMode::Default,
             token_stats_layout: TokenStatsLayout::Right,
             show_detail_mode: ShowDetailMode::Expanded,
+            reasoning_profile: ReasoningProfile::High,
             macos_terminal_profile: None,
             ui_language: UiLanguage::English,
             partner_binagotchy_seed: None,
@@ -511,6 +586,7 @@ pub struct AppState {
     pub tool_mode: ToolMode,
     pub show_detail_mode: ShowDetailMode,
     pub ui_language: UiLanguage,
+    pub reasoning_profile: ReasoningProfile,
     pub mcp_slug: String,
     pub ngrok_domain: Option<String>,
     pub is_returning_user: bool,
@@ -882,6 +958,7 @@ impl AppState {
             tool_mode: config.tool_mode,
             show_detail_mode: config.show_detail_mode,
             ui_language: config.ui_language,
+            reasoning_profile: config.reasoning_profile,
             mcp_slug,
             ngrok_domain: config.ngrok_domain.clone(),
             is_returning_user,
@@ -959,6 +1036,7 @@ impl AppState {
         config.tool_mode = self.tool_mode;
         config.show_detail_mode = self.show_detail_mode;
         config.ui_language = self.ui_language;
+        config.reasoning_profile = self.reasoning_profile;
         config.usage_by_model = self.usage_by_model.clone();
         config.selected_browser = self.selected_browser.clone();
         Ok(config.normalized())
@@ -1683,6 +1761,30 @@ toolCallCount = 1
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
         assert!(matches!(saved.show_detail_mode, ShowDetailMode::Collapsed));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_config_round_trips_reasoning_profile() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace =
+            std::env::temp_dir().join(format!("catdesk-config-reasoning-profile-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp config dir");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let config = AppConfig {
+            reasoning_profile: ReasoningProfile::Pro,
+            ..AppConfig::default()
+        };
+        config.save_to_path(&config_path).expect("save config");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("load config");
+        assert_eq!(saved.reasoning_profile, ReasoningProfile::Pro);
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);

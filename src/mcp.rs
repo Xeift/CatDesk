@@ -17,8 +17,8 @@ use crate::command_jobs::{
 use crate::devtools::DevtoolsBridge;
 use crate::mascot;
 use crate::state::{
-    AgentsPathMode, Mode, ShowDetailMode, TokenStatsLayout, ToolMode, app_config_path,
-    load_app_config, user_home_dir,
+    AgentsPathMode, Mode, ReasoningProfile, ShowDetailMode, TokenStatsLayout, ToolMode,
+    app_config_path, load_app_config, user_home_dir,
 };
 use crate::workspace_tools;
 
@@ -2075,6 +2075,14 @@ fn widget_path_strings(path: &Path) -> (String, String) {
     )
 }
 
+fn reasoning_profile_instruction(profile: ReasoningProfile) -> String {
+    format!(
+        "CatDesk reasoning profile is a user-selected tool-workflow hint and does not change the ChatGPT model or reasoning setting. Current profile: {}. {}",
+        profile.label(),
+        profile.workflow_instruction()
+    )
+}
+
 fn catdesk_instruction_text(
     workspace_root: &str,
     mode: Mode,
@@ -2137,6 +2145,10 @@ Always specify the branch explicitly when using `git push`."#
                 .to_string(),
         );
     }
+
+    let reasoning_profile = load_app_config()?.reasoning_profile;
+    lines.push("".to_string());
+    lines.push(reasoning_profile_instruction(reasoning_profile));
 
     if let Some(agents_text) = preferred_agents_text(workspace_root)? {
         lines.push("".to_string());
@@ -3599,6 +3611,15 @@ fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn pro_reasoning_profile_instruction_is_explicitly_advisory() {
+        let text = reasoning_profile_instruction(ReasoningProfile::Pro);
+        assert!(text.contains("does not change the ChatGPT model or reasoning setting"));
+        assert!(text.contains("Current profile: PRO"));
+        assert!(text.contains("long-horizon, repo-wide workflows"));
+        assert!(text.contains("avoid unnecessary user handoffs"));
+    }
 
     fn resources_list_request() -> JsonRpcRequest {
         JsonRpcRequest {

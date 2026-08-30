@@ -112,6 +112,8 @@ ChatGPT Web + CatDesk
 
    CatDesk 啟動後，可以選擇 `Control Computer`、`Control Browser` 或 `Both`。在模式選擇畫面按 `l` 可以在 English 與繁體中文之間切換；語言偏好會儲存在 `~/.catdesk/config.toml`。如果啟用了瀏覽器控制，請選擇一個支援的 Chromium 瀏覽器。在 macOS 上，除了 `PATH` 中的 binary，CatDesk 也會偵測 `/Applications` 與 `~/Applications` 裡的標準瀏覽器 App bundle。
 
+   在 `Settings` 裡，也可以手動把 CatDesk 的 ChatGPT reasoning profile 與你在 ChatGPT 中選擇的推理等級同步：`Low`、`Medium`、`High`、`Extra High` 或 `PRO`。這個 profile 只會調整 CatDesk 提供給模型的工具工作流程指引，不會切換 ChatGPT 模型或推理設定。預設為 `High`，選擇會儲存在 `~/.catdesk/config.toml`。`Extra High` 與 `PRO` 會標示為偏向 Pro 使用的 profile，但 CatDesk 不會檢查或限制帳號方案。
+
    第一次啟動時，CatDesk 會要求你輸入 **ngrok authtoken** 和 **ngrok static domain**（例如 `my-app.ngrok-free.dev`）。這兩項都可以從 [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup) 取得，並會儲存在 `~/.catdesk/config.toml`，之後啟動時自動重用。
 
    CatDesk 預設監聽 `3200` port。可以用 `PORT` 覆寫。Workspace root 預設為你啟動 CatDesk 時所在的目錄，也可以用 `WORKSPACE_ROOT` 覆寫。
