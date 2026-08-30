@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DetectedBrowser {
@@ -125,11 +128,12 @@ pub fn detect_browsers() -> Vec<DetectedBrowser> {
         }
 
         let normalized = normalize_path(&path);
-        if !seen_paths.insert(normalized) {
+        if !seen_paths.insert(normalized.clone()) {
             continue;
         }
 
-        let active_remote = find_active_remote_debug_for_binary(candidate.binary, &processes);
+        let active_remote =
+            find_active_remote_debug_for_binary(candidate.binary, &normalized, &processes);
 
         found.push(DetectedBrowser {
             name: candidate.name.to_string(),
@@ -158,14 +162,53 @@ fn resolve_binary(binary: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            return Some(candidate);
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(binary);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    if let Some(candidate) = resolve_macos_application_binary(binary) {
+        return Some(candidate);
+    }
+
     None
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_application_binary(binary: &str) -> Option<PathBuf> {
+    let relative = macos_application_binary_relative_path(binary)?;
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+
+    roots
+        .into_iter()
+        .map(|root| root.join(relative))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_application_binary_relative_path(binary: &str) -> Option<&'static str> {
+    match binary {
+        "google-chrome-stable" | "google-chrome" => {
+            Some("Google Chrome.app/Contents/MacOS/Google Chrome")
+        }
+        "chromium" | "chromium-browser" => Some("Chromium.app/Contents/MacOS/Chromium"),
+        "microsoft-edge-stable" | "microsoft-edge" => {
+            Some("Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+        }
+        "brave-browser" => Some("Brave Browser.app/Contents/MacOS/Brave Browser"),
+        "vivaldi" => Some("Vivaldi.app/Contents/MacOS/Vivaldi"),
+        "opera" => Some("Opera.app/Contents/MacOS/Opera"),
+        "firefox" => Some("Firefox.app/Contents/MacOS/firefox"),
+        _ => None,
+    }
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -178,6 +221,7 @@ fn normalize_path(path: &Path) -> String {
 struct ProcessInfo {
     pid: u32,
     cmdline: Vec<String>,
+    command_line: String,
 }
 
 struct ActiveRemoteDebug {
@@ -185,6 +229,7 @@ struct ActiveRemoteDebug {
     target: String,
 }
 
+#[cfg(target_os = "linux")]
 fn collect_processes() -> Vec<ProcessInfo> {
     let mut processes = Vec::new();
     let Ok(entries) = fs::read_dir("/proc") else {
@@ -214,18 +259,69 @@ fn collect_processes() -> Vec<ProcessInfo> {
         if args.is_empty() {
             continue;
         }
-        processes.push(ProcessInfo { pid, cmdline: args });
+        let command_line = args.join(" ");
+        processes.push(ProcessInfo {
+            pid,
+            cmdline: args,
+            command_line,
+        });
     }
 
     processes
 }
 
+#[cfg(target_os = "macos")]
+fn collect_processes() -> Vec<ProcessInfo> {
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    parse_macos_ps_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_ps_output(output: &str) -> Vec<ProcessInfo> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let separator = line.find(char::is_whitespace)?;
+            let pid = line[..separator].parse::<u32>().ok()?;
+            let command_line = line[separator..].trim_start();
+            if command_line.is_empty() {
+                return None;
+            }
+            let cmdline = command_line
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            Some(ProcessInfo {
+                pid,
+                cmdline,
+                command_line: command_line.to_string(),
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn collect_processes() -> Vec<ProcessInfo> {
+    Vec::new()
+}
+
 fn find_active_remote_debug_for_binary(
     binary: &str,
+    resolved_path: &str,
     processes: &[ProcessInfo],
 ) -> Option<ActiveRemoteDebug> {
     for p in processes {
-        if !process_matches_binary(p, binary) {
+        if !process_matches_binary(p, binary, resolved_path) {
             continue;
         }
         let Some(target) = extract_remote_debug_target(&p.cmdline) else {
@@ -236,11 +332,24 @@ fn find_active_remote_debug_for_binary(
     None
 }
 
-fn process_matches_binary(process: &ProcessInfo, binary: &str) -> bool {
+fn process_matches_binary(process: &ProcessInfo, binary: &str, resolved_path: &str) -> bool {
     process
         .cmdline
         .iter()
         .any(|arg| command_matches_binary(arg, binary))
+        || command_line_starts_with_executable(&process.command_line, resolved_path)
+}
+
+fn command_line_starts_with_executable(command_line: &str, executable: &str) -> bool {
+    if command_line == executable {
+        return true;
+    }
+    command_line
+        .strip_prefix(executable)
+        .is_some_and(|rest| {
+            rest.chars().next().is_some_and(char::is_whitespace)
+                && rest.trim_start().starts_with('-')
+        })
 }
 
 fn command_matches_binary(arg: &str, binary: &str) -> bool {
@@ -341,4 +450,64 @@ pub fn format_active_remote_debug_names(browsers: &[DetectedBrowser]) -> String 
         return "--".into();
     }
     active.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_application_paths_cover_supported_chromium_browsers() {
+        assert_eq!(
+            macos_application_binary_relative_path("google-chrome"),
+            Some("Google Chrome.app/Contents/MacOS/Google Chrome")
+        );
+        assert_eq!(
+            macos_application_binary_relative_path("chromium"),
+            Some("Chromium.app/Contents/MacOS/Chromium")
+        );
+        assert_eq!(
+            macos_application_binary_relative_path("microsoft-edge"),
+            Some("Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+        );
+        assert_eq!(
+            macos_application_binary_relative_path("brave-browser"),
+            Some("Brave Browser.app/Contents/MacOS/Brave Browser")
+        );
+        assert_eq!(
+            macos_application_binary_relative_path("vivaldi"),
+            Some("Vivaldi.app/Contents/MacOS/Vivaldi")
+        );
+        assert_eq!(
+            macos_application_binary_relative_path("opera"),
+            Some("Opera.app/Contents/MacOS/Opera")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_ps_parser_matches_app_bundle_executable_with_spaces() {
+        let executable = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+        let processes = parse_macos_ps_output(&format!(
+            "  4242 {executable} --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222\n"
+        ));
+
+        let active = find_active_remote_debug_for_binary("google-chrome", executable, &processes)
+            .expect("detect active Chrome remote debugging process");
+        assert_eq!(active.pid, 4242);
+        assert_eq!(active.target, "127.0.0.1:9222");
+    }
+
+    #[test]
+    fn executable_prefix_requires_argument_boundary() {
+        assert!(command_line_starts_with_executable(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --flag",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        ));
+        assert!(!command_line_starts_with_executable(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper --flag",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        ));
+    }
 }
