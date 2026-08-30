@@ -219,6 +219,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub show_detail_mode: ShowDetailMode,
     #[serde(default)]
+    pub macos_terminal_profile: Option<bool>,
+    #[serde(default)]
     pub partner_binagotchy_seed: Option<String>,
     #[serde(default)]
     pub set_catdesk_as_co_author: bool,
@@ -241,6 +243,7 @@ impl Default for AppConfig {
             agents_path_mode: AgentsPathMode::Default,
             token_stats_layout: TokenStatsLayout::Right,
             show_detail_mode: ShowDetailMode::Expanded,
+            macos_terminal_profile: None,
             partner_binagotchy_seed: None,
             set_catdesk_as_co_author: false,
             theme: theme::DEFAULT_THEME_ID.to_string(),
@@ -614,6 +617,18 @@ pub fn save_show_detail_mode(mode: ShowDetailMode) -> std::io::Result<PathBuf> {
     let path = app_config_path()?;
     let mut config = AppConfig::load_from_path(&path)?;
     config.show_detail_mode = mode;
+    config.save_to_path(&path)?;
+    Ok(path)
+}
+
+pub fn load_macos_terminal_profile() -> std::io::Result<Option<bool>> {
+    Ok(load_app_config()?.macos_terminal_profile)
+}
+
+pub fn save_macos_terminal_profile(enabled: bool) -> std::io::Result<PathBuf> {
+    let path = app_config_path()?;
+    let mut config = AppConfig::load_from_path(&path)?;
+    config.macos_terminal_profile = Some(enabled);
     config.save_to_path(&path)?;
     Ok(path)
 }
@@ -1611,6 +1626,30 @@ toolCallCount = 1
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
         assert!(matches!(saved.show_detail_mode, ShowDetailMode::Collapsed));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_config_round_trips_macos_terminal_profile_preference() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace =
+            std::env::temp_dir().join(format!("catdesk-config-terminal-profile-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp config dir");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let config = AppConfig {
+            macos_terminal_profile: Some(false),
+            ..AppConfig::default()
+        };
+        config.save_to_path(&config_path).expect("save config");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("load config");
+        assert_eq!(saved.macos_terminal_profile, Some(false));
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
