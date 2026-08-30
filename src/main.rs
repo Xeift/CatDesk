@@ -34,9 +34,9 @@ use ratatui::{
 use state::{
     AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, FlowLane,
     GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, Mode, ServerUiEvent, SharedState, ShowDetailMode,
-    ToolMode, UsageTotals, app_config_path, flow_anim_lit_count, load_macos_terminal_profile,
-    load_ngrok_authtoken, load_ngrok_domain, save_macos_terminal_profile, save_ngrok_authtoken,
-    save_ngrok_domain, user_home_dir,
+    ToolMode, UiLanguage, UsageTotals, app_config_path, flow_anim_lit_count,
+    load_macos_terminal_profile, load_ngrok_authtoken, load_ngrok_domain,
+    save_macos_terminal_profile, save_ngrok_authtoken, save_ngrok_domain, user_home_dir,
 };
 use std::collections::HashMap;
 use std::io::{Write, stdout};
@@ -1277,11 +1277,12 @@ async fn run_app(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Draw mode selection screen
     loop {
-        let (current_theme, current_tool_mode) = {
+        let (current_theme, current_tool_mode, current_ui_language) = {
             let app = state.lock().await;
-            (app.current_theme(), app.tool_mode)
+            (app.current_theme(), app.tool_mode, app.ui_language)
         };
-        terminal.draw(|f| draw_mode_select(f, current_theme, current_tool_mode))?;
+        terminal
+            .draw(|f| draw_mode_select(f, current_theme, current_tool_mode, current_ui_language))?;
 
         if event::poll(UI_POLL_INTERVAL)? {
             if let Event::Key(key) = event::read()? {
@@ -1293,6 +1294,14 @@ async fn run_app(
                     KeyCode::Char('2') => Mode::Browser,
                     KeyCode::Char('3') => Mode::Both,
                     KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('l') | KeyCode::Char('L') => {
+                        let mut app = state.lock().await;
+                        app.ui_language = app.ui_language.toggled();
+                        let language = app.ui_language.label();
+                        app.log("INFO", format!("UI language: {language}"));
+                        app.persist_state_with_log();
+                        continue;
+                    }
                     KeyCode::Char('s') => {
                         run_settings(terminal, state.clone()).await?;
                         continue;
@@ -1360,9 +1369,14 @@ async fn run_chatgpt_connector_refresh_notice(
             }
         }
 
-        let (current_theme, current_tool_mode, mcp_url) = {
+        let (current_theme, current_tool_mode, current_ui_language, mcp_url) = {
             let app = state.lock().await;
-            (app.current_theme(), app.tool_mode, app.public_mcp_url())
+            (
+                app.current_theme(),
+                app.tool_mode,
+                app.ui_language,
+                app.public_mcp_url(),
+            )
         };
         let reveal_remaining = mcp_url_revealed_until
             .and_then(|deadline| deadline.checked_duration_since(Instant::now()));
@@ -1375,7 +1389,7 @@ async fn run_chatgpt_connector_refresh_notice(
             .map(|(message, position, _)| (*message, *position));
         let mut mcp_url_click_area = Rect::default();
         terminal.draw(|f| {
-            draw_mode_select(f, current_theme, current_tool_mode);
+            draw_mode_select(f, current_theme, current_tool_mode, current_ui_language);
             mcp_url_click_area = chatgpt_connector_refresh_mcp_url_area(f.area());
             draw_chatgpt_connector_refresh_notice(
                 f,
@@ -1643,15 +1657,21 @@ fn draw_tui_header(f: &mut Frame, area: Rect, palette: &theme::Palette, title: &
     );
 }
 
-fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode) {
+fn draw_mode_select(
+    f: &mut Frame,
+    theme: &theme::ThemeDef,
+    tool_mode: ToolMode,
+    ui_language: UiLanguage,
+) {
     let palette = theme.palette;
     let area = f.area();
+    let zh = ui_language.is_traditional_chinese();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // Header
-            Constraint::Length(16), // Mode selection
+            Constraint::Length(17), // Mode selection
             Constraint::Min(0),     // Spacer
         ])
         .split(area);
@@ -1660,13 +1680,32 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
         f,
         chunks[0],
         &palette,
-        "CatDesk - Turns ChatGPT Web into a coding agent =w=",
+        if zh {
+            "CatDesk - 讓 ChatGPT Web 成為程式開發代理 =w="
+        } else {
+            "CatDesk - Turns ChatGPT Web into a coding agent =w="
+        },
     );
+
+    let settings_detail = if zh {
+        format!(" (主題 {}, 工具模式 {})", theme.label, tool_mode.label())
+    } else {
+        format!(" (theme {}, tool mode {})", theme.label, tool_mode.label())
+    };
+    let language_hint = if zh {
+        " (切換至 English)"
+    } else {
+        " (switch to 繁體中文)"
+    };
 
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  Select mode",
+            if zh {
+                "  選擇模式"
+            } else {
+                "  Select mode"
+            },
             Style::default()
                 .fg(palette.title_fg)
                 .add_modifier(Modifier::BOLD),
@@ -1680,10 +1719,21 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Control Computer   ",
+                if zh {
+                    "控制電腦   "
+                } else {
+                    "Control Computer   "
+                },
                 Style::default().fg(palette.primary_fg),
             ),
-            Span::styled("(local tools)", Style::default().fg(palette.muted_fg)),
+            Span::styled(
+                if zh {
+                    "(本機工具)"
+                } else {
+                    "(local tools)"
+                },
+                Style::default().fg(palette.muted_fg),
+            ),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1693,7 +1743,11 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Control Browser    ",
+                if zh {
+                    "控制瀏覽器   "
+                } else {
+                    "Control Browser    "
+                },
                 Style::default().fg(palette.primary_fg),
             ),
             Span::styled(
@@ -1708,7 +1762,29 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
                     .fg(palette.key_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Both", Style::default().fg(palette.primary_fg)),
+            Span::styled(
+                if zh { "兩者皆用" } else { "Both" },
+                Style::default().fg(palette.primary_fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  [l] ",
+                Style::default()
+                    .fg(palette.key_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if zh { "語言：" } else { "Language: " },
+                Style::default().fg(palette.primary_fg),
+            ),
+            Span::styled(
+                ui_language.label(),
+                Style::default()
+                    .fg(palette.secondary_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(language_hint, Style::default().fg(palette.muted_fg)),
         ]),
         Line::from(vec![
             Span::styled(
@@ -1717,22 +1793,25 @@ fn draw_mode_select(f: &mut Frame, theme: &theme::ThemeDef, tool_mode: ToolMode)
                     .fg(palette.key_fg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Settings", Style::default().fg(palette.primary_fg)),
             Span::styled(
-                format!(" (theme {}, tool mode {})", theme.label, tool_mode.label()),
-                Style::default().fg(palette.muted_fg),
+                if zh { "設定" } else { "Settings" },
+                Style::default().fg(palette.primary_fg),
             ),
+            Span::styled(settings_detail, Style::default().fg(palette.muted_fg)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  [q] ", Style::default().fg(palette.danger_fg)),
-            Span::styled("Quit", Style::default().fg(palette.muted_fg)),
+            Span::styled(
+                if zh { "離開" } else { "Quit" },
+                Style::default().fg(palette.muted_fg),
+            ),
         ]),
     ];
 
     let select = Paragraph::new(lines).block(
         Block::default()
-            .title(" Mode ")
+            .title(if zh { " 模式 " } else { " Mode " })
             .borders(Borders::ALL)
             .border_type(palette.border_type)
             .border_style(Style::default().fg(palette.border_fg)),
@@ -1761,11 +1840,19 @@ async fn run_ngrok_auth_setup(
             }
         }
 
-        let (current_theme, current_tool_mode, current_mode, browsers, selected_browser) = {
+        let (
+            current_theme,
+            current_tool_mode,
+            current_ui_language,
+            current_mode,
+            browsers,
+            selected_browser,
+        ) = {
             let app = state.lock().await;
             (
                 app.current_theme(),
                 app.tool_mode,
+                app.ui_language,
                 app.mode,
                 app.detected_browsers.clone(),
                 app.selected_browser.clone(),
@@ -1799,7 +1886,7 @@ async fn run_ngrok_auth_setup(
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(3),
-                        Constraint::Length(16),
+                        Constraint::Length(17),
                         Constraint::Min(0),
                     ])
                     .split(f.area())[1]
@@ -1814,7 +1901,7 @@ async fn run_ngrok_auth_setup(
                     current_theme,
                 );
             } else {
-                draw_mode_select(f, current_theme, current_tool_mode);
+                draw_mode_select(f, current_theme, current_tool_mode, current_ui_language);
             }
             draw_ngrok_auth_setup(
                 f,
@@ -1920,11 +2007,19 @@ async fn run_ngrok_domain_setup(
     let mut error_message: Option<String> = None;
 
     loop {
-        let (current_theme, current_tool_mode, current_mode, browsers, selected_browser) = {
+        let (
+            current_theme,
+            current_tool_mode,
+            current_ui_language,
+            current_mode,
+            browsers,
+            selected_browser,
+        ) = {
             let app = state.lock().await;
             (
                 app.current_theme(),
                 app.tool_mode,
+                app.ui_language,
                 app.mode,
                 app.detected_browsers.clone(),
                 app.selected_browser.clone(),
@@ -1953,7 +2048,7 @@ async fn run_ngrok_domain_setup(
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(3),
-                        Constraint::Length(16),
+                        Constraint::Length(17),
                         Constraint::Min(0),
                     ])
                     .split(f.area())[1]
@@ -1967,7 +2062,7 @@ async fn run_ngrok_domain_setup(
                     current_theme,
                 );
             } else {
-                draw_mode_select(f, current_theme, current_tool_mode);
+                draw_mode_select(f, current_theme, current_tool_mode, current_ui_language);
             }
             draw_ngrok_domain_setup(
                 f,
@@ -2318,13 +2413,63 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 
 #[cfg(test)]
 mod tests {
+    use super::state::{ToolMode, UiLanguage};
     use super::{
-        LogView, draw_chatgpt_connector_refresh_notice, draw_tui_header, export_logs_to_dir,
-        key_is_clipboard_paste, mask_mcp_path_in_log, normalize_ngrok_authtoken_input,
-        parse_terminal_profile_choice, text_input_key_is_cancel, wrap_log_message,
+        LogView, draw_chatgpt_connector_refresh_notice, draw_mode_select, draw_tui_header,
+        export_logs_to_dir, key_is_clipboard_paste, mask_mcp_path_in_log,
+        normalize_ngrok_authtoken_input, parse_terminal_profile_choice, text_input_key_is_cancel,
+        wrap_log_message,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    fn terminal_buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        (0..area.height)
+            .map(|row| {
+                (0..area.width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn mode_select_renders_english_and_traditional_chinese() {
+        let theme = super::theme::all()[0];
+
+        let mut english = Terminal::new(TestBackend::new(100, 24)).expect("create terminal");
+        english
+            .draw(|frame| {
+                draw_mode_select(frame, &theme, ToolMode::MultiTools, UiLanguage::English)
+            })
+            .expect("draw english mode selection");
+        let english_text = terminal_buffer_text(&english);
+        assert!(english_text.contains("Select mode"));
+        assert!(english_text.contains("Control Computer"));
+        assert!(english_text.contains("Language: English"));
+
+        let mut chinese = Terminal::new(TestBackend::new(100, 24)).expect("create terminal");
+        chinese
+            .draw(|frame| {
+                draw_mode_select(
+                    frame,
+                    &theme,
+                    ToolMode::MultiTools,
+                    UiLanguage::TraditionalChinese,
+                )
+            })
+            .expect("draw traditional chinese mode selection");
+        let chinese_text = terminal_buffer_text(&chinese);
+        let chinese_compact = chinese_text.replace(' ', "");
+        assert!(chinese_compact.contains("選擇模式"));
+        assert!(chinese_compact.contains("控制電腦"));
+        assert!(chinese_compact.contains("控制瀏覽器"));
+        assert!(chinese_compact.contains("語言：繁體中文"));
+        assert!(chinese_compact.contains("離開"));
+    }
 
     #[test]
     fn parses_terminal_profile_choice() {

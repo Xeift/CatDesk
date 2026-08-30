@@ -202,6 +202,34 @@ impl ShowDetailMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiLanguage {
+    #[default]
+    English,
+    TraditionalChinese,
+}
+
+impl UiLanguage {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::English => Self::TraditionalChinese,
+            Self::TraditionalChinese => Self::English,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::TraditionalChinese => "繁體中文",
+        }
+    }
+
+    pub fn is_traditional_chinese(self) -> bool {
+        matches!(self, Self::TraditionalChinese)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -220,6 +248,8 @@ pub struct AppConfig {
     pub show_detail_mode: ShowDetailMode,
     #[serde(default)]
     pub macos_terminal_profile: Option<bool>,
+    #[serde(default)]
+    pub ui_language: UiLanguage,
     #[serde(default)]
     pub partner_binagotchy_seed: Option<String>,
     #[serde(default)]
@@ -244,6 +274,7 @@ impl Default for AppConfig {
             token_stats_layout: TokenStatsLayout::Right,
             show_detail_mode: ShowDetailMode::Expanded,
             macos_terminal_profile: None,
+            ui_language: UiLanguage::English,
             partner_binagotchy_seed: None,
             set_catdesk_as_co_author: false,
             theme: theme::DEFAULT_THEME_ID.to_string(),
@@ -479,6 +510,7 @@ pub struct AppState {
     pub mode: Mode,
     pub tool_mode: ToolMode,
     pub show_detail_mode: ShowDetailMode,
+    pub ui_language: UiLanguage,
     pub mcp_slug: String,
     pub ngrok_domain: Option<String>,
     pub is_returning_user: bool,
@@ -849,6 +881,7 @@ impl AppState {
             mode: config.mode,
             tool_mode: config.tool_mode,
             show_detail_mode: config.show_detail_mode,
+            ui_language: config.ui_language,
             mcp_slug,
             ngrok_domain: config.ngrok_domain.clone(),
             is_returning_user,
@@ -925,6 +958,7 @@ impl AppState {
         config.mode = self.mode;
         config.tool_mode = self.tool_mode;
         config.show_detail_mode = self.show_detail_mode;
+        config.ui_language = self.ui_language;
         config.usage_by_model = self.usage_by_model.clone();
         config.selected_browser = self.selected_browser.clone();
         Ok(config.normalized())
@@ -1603,6 +1637,29 @@ toolCallCount = 1
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
         assert!(matches!(saved.token_stats_layout, TokenStatsLayout::Bottom));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_config_round_trips_ui_language() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-ui-language-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp config dir");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let config = AppConfig {
+            ui_language: UiLanguage::TraditionalChinese,
+            ..AppConfig::default()
+        };
+        config.save_to_path(&config_path).expect("save config");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("load config");
+        assert_eq!(saved.ui_language, UiLanguage::TraditionalChinese);
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
