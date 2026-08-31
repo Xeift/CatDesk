@@ -361,7 +361,7 @@ mod tests {
         assert!(rendered.contains("<!-- catdesk-handoff:v1 -->"));
         assert!(rendered.contains("## Goal\n\nFinish the parser"));
         assert!(rendered.contains("- Branch: `feat/parser`"));
-        assert!(rendered.contains("    M src/parser.rs"));
+        assert!(rendered.contains("     M src/parser.rs"));
         assert!(rendered.contains("## Next steps\n\n- Handle comments"));
         assert!(rendered.contains("Watch the CRLF fixture."));
     }
