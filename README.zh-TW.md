@@ -156,7 +156,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
-- 為了提升效能並避免記憶體使用量過高，我強烈建議**每個小功能都開一個新 session**。如果需要上下文，可以請 ChatGPT 建立 handoff note，再貼到新的 session。工具呼叫超過 50 次之後，畫面可能會開始非常卡。
+- 為了提升效能並避免記憶體使用量過高，我強烈建議**每個小功能都開一個新 session**。切換聊天前，可以請 ChatGPT 使用 `create_handoff`。CatDesk 會把目前目標、已完成工作、重要決策、驗證結果、下一步以及 Git 狀態整理到目前 workspace 裡的 `.catdesk/handoff.md`。下一個 session 呼叫 `catdesk_instruction` 時會偵測這份 handoff，並提醒 ChatGPT 先讀取後再繼續。不要把憑證、token、密碼或其他秘密寫進 handoff。CatDesk 不會修改 `.gitignore`；如果希望 handoff 永遠維持未追蹤狀態，可以自行把 `.catdesk/` 加進 ignore 規則。工具呼叫超過 50 次之後，畫面可能會開始非常卡。
 <p align="center">
   <img src="docs/images/high_ram_usage.png" alt="3.9 GB Memory usage🥹" width="300"><br>
   <em>3.9 GB 記憶體用量🥹</em>
@@ -193,7 +193,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 # 工具
 
-CatDesk 有兩種本機工具模式：`multi-tools` 提供 10 個工具，`read-only` 提供 3 個工具。
+CatDesk 有兩種本機工具模式：`multi-tools` 提供 11 個工具，`read-only` 提供 3 個工具。
 
 在 `multi-tools` 模式下，CatDesk 的本機工具如下：
 
@@ -204,6 +204,7 @@ CatDesk 有兩種本機工具模式：`multi-tools` 提供 10 個工具，`read-
 | `search`                | 讀取  | 使用 `rg`、`grep` 或內建搜尋器搜尋 workspace 文字                        |
 | `write`                 | 寫入  | 建立或覆寫檔案                                                           |
 | `edit`                  | 寫入  | 原子化套用受保護的 replace/range 編輯                                   |
+| `create_handoff`        | 寫入  | 儲存結構化 session 上下文與目前 Git 狀態，供下一個聊天接續               |
 | `delete`                | 寫入  | 刪除檔案或目錄                                                           |
 | `run_command`           | Shell | 執行短時間 Shell 指令並等待完成                                          |
 | `start_command`         | Job   | 啟動長時間指令，並立即回傳 job ID                                        |
