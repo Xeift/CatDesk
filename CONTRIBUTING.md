@@ -2,6 +2,8 @@
 
 Thanks for contributing!
 
+Write issues and PRs in whatever language you're comfortable with. It's 2026. We have LLMs. We'll manage.
+
 ## Development
 
 1. Fork and clone the repository.
