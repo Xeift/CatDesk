@@ -77,6 +77,129 @@ fn runtime_read_paths() -> BTreeSet<PathBuf> {
     paths
 }
 
+/// Directories at or above `workspace` that may legitimately hold its git
+/// metadata: an ancestor's own `.git` (worktrees and submodules point their
+/// `gitdir:` there) or `.repo` (a `repo` client keeps every checkout's git
+/// directory and the shared object store under it).
+///
+/// A `.git` pointer is workspace-controlled input, so whatever it resolves to
+/// is confined to these roots before being granted. Without that, a crafted
+/// checkout could name `$HOME`, `/etc`, or an unrelated checkout and have the
+/// sandbox bind it writable.
+fn trusted_git_metadata_roots(workspace: &Path) -> BTreeSet<PathBuf> {
+    let mut roots = BTreeSet::new();
+    // Strict ancestors only: the workspace's own `.git` is the pointer being
+    // validated, so canonicalising it here would let a `.git` symlink nominate
+    // its own target as trusted.
+    for ancestor in workspace.ancestors().skip(1) {
+        insert_existing(&mut roots, ancestor.join(".git"));
+        insert_existing(&mut roots, ancestor.join(".repo"));
+    }
+    roots
+}
+
+/// Whether `path` (already canonical) sits at or beneath one of `roots`.
+fn within_trusted_root(path: &Path, roots: &BTreeSet<PathBuf>) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+/// Canonicalise `path` and insert it only when it lands inside a trusted root.
+fn insert_trusted(paths: &mut BTreeSet<PathBuf>, path: &Path, roots: &BTreeSet<PathBuf>) {
+    if let Ok(canonical) = path.canonicalize()
+        && within_trusted_root(&canonical, roots)
+    {
+        paths.insert(canonical);
+    }
+}
+
+/// Paths holding the workspace's git metadata when it lives outside the
+/// workspace itself.
+///
+/// A plain checkout keeps `.git` inside the workspace, which is already
+/// writable, so this returns nothing. Three common layouts put it elsewhere:
+///
+///   * `repo` checkouts symlink `.git` into `.repo/projects/<name>.git`, whose
+///     `objects`, `hooks` and `rr-cache` are themselves symlinks into a shared
+///     `.repo/project-objects` tree.
+///   * git worktrees and submodules replace `.git` with a file containing a
+///     `gitdir:` line, and that directory's `commondir` points at the main one.
+///
+/// Without these, every git command inside the sandbox fails with "not a git
+/// repository", because the target is simply absent. They are writable rather
+/// than read-only for parity with a plain checkout, where `.git` sits in the
+/// writable workspace and commands like `git commit` work.
+///
+/// Every resolved path is checked against [`trusted_git_metadata_roots`]; a
+/// pointer that escapes them is ignored entirely, so this can only ever widen
+/// the sandbox to an ancestor's `.git`/`.repo`, never to an arbitrary directory
+/// the checkout names.
+fn workspace_git_paths(workspace: &Path) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+
+    let dot_git = workspace.join(".git");
+    let metadata = match std::fs::symlink_metadata(&dot_git) {
+        Ok(metadata) => metadata,
+        Err(_) => return paths,
+    };
+
+    // A real directory already sits inside the writable workspace.
+    if metadata.is_dir() {
+        return paths;
+    }
+
+    let roots = trusted_git_metadata_roots(workspace);
+
+    let git_dir = if metadata.is_file() {
+        // "gitdir: <path>", possibly relative to the workspace.
+        let contents = match std::fs::read_to_string(&dot_git) {
+            Ok(contents) => contents,
+            Err(_) => return paths,
+        };
+        let Some(target) = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("gitdir:"))
+            .map(str::trim)
+        else {
+            return paths;
+        };
+        match workspace.join(target).canonicalize() {
+            Ok(path) => path,
+            Err(_) => return paths,
+        }
+    } else {
+        match dot_git.canonicalize() {
+            Ok(path) => path,
+            Err(_) => return paths,
+        }
+    };
+
+    // The git directory itself must resolve inside a trusted root; if it does
+    // not, the checkout is pointing somewhere it has no business pointing and
+    // nothing further is trusted either.
+    if !within_trusted_root(&git_dir, &roots) {
+        return paths;
+    }
+    paths.insert(git_dir.clone());
+
+    // Entries inside the git directory may point outside it again -- `repo`
+    // shares objects between checkouts this way -- so each is re-checked.
+    if let Ok(entries) = std::fs::read_dir(&git_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_symlink()) {
+                insert_trusted(&mut paths, &path, &roots);
+            }
+        }
+    }
+
+    // Worktrees keep shared state in the directory named by `commondir`.
+    if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
+        insert_trusted(&mut paths, &git_dir.join(common.trim()), &roots);
+    }
+
+    paths
+}
+
 /// Locate an executable `bwrap` on PATH. Bubblewrap confines through mount
 /// namespaces rather than an LSM, so it works on kernels far older than
 /// Landlock's 5.13 baseline -- RHEL 8 / Rocky 8 (4.18), Ubuntu 20.04 (5.4) and
@@ -100,11 +223,11 @@ fn bubblewrap_executable() -> Option<PathBuf> {
 /// private `scratch` directory.
 ///
 /// The namespace contains only what [`runtime_read_paths`] returns plus the
-/// workspace and scratch directories, so an unbound path is simply absent
-/// rather than merely denied. `--dev /dev` supplies a minimal set of device
-/// nodes (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/tty` and the like),
-/// `--tmpfs /tmp` keeps the host's `/tmp` out of reach, and `--unshare-pid`
-/// hides host processes.
+/// workspace, scratch and any external git metadata directories, so an unbound
+/// path is simply absent rather than merely denied. `--dev /dev` supplies a
+/// minimal set of device nodes (`/dev/null`, `/dev/zero`, `/dev/random`,
+/// `/dev/tty` and the like), `--tmpfs /tmp` keeps the host's `/tmp` out of
+/// reach, and `--unshare-pid` hides host processes.
 ///
 /// `--new-session` is deliberately omitted: it detaches the controlling
 /// terminal, which would make `/dev/tty` unusable.
@@ -145,6 +268,12 @@ fn bubblewrap_command(
         if let Ok(target) = std::fs::read_link(link) {
             bwrap_command.arg("--symlink").arg(target).arg(link);
         }
+    }
+
+    // Git metadata that lives outside the workspace (repo checkouts, worktrees,
+    // submodules). Empty for a plain checkout.
+    for path in workspace_git_paths(&workspace) {
+        bwrap_command.arg("--bind-try").arg(&path).arg(&path);
     }
 
     for path in [&workspace, &scratch] {
@@ -265,5 +394,86 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o700);
         std::fs::remove_dir_all(scratch).expect("remove scratch directory");
+    }
+
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("catdesk-gitpaths-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("create temp tree");
+            Self(dir.canonicalize().expect("canonical temp tree"))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn workspace_git_paths_empty_for_plain_checkout() {
+        let tree = TempTree::new();
+        let workspace = tree.path().join("repo");
+        std::fs::create_dir_all(workspace.join(".git")).expect("create .git dir");
+        assert!(workspace_git_paths(&workspace).is_empty());
+    }
+
+    #[test]
+    fn workspace_git_paths_follows_gitdir_into_an_ancestor() {
+        // super/                <- ancestor holding the real .git
+        //   .git/modules/sub/
+        //   sub/.git            <- file: "gitdir: ../.git/modules/sub"
+        let tree = TempTree::new();
+        let module_dir = tree.path().join("super/.git/modules/sub");
+        std::fs::create_dir_all(&module_dir).expect("create module dir");
+        let workspace = tree.path().join("super/sub");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::write(workspace.join(".git"), "gitdir: ../.git/modules/sub\n")
+            .expect("write .git file");
+
+        let resolved = workspace_git_paths(&workspace);
+        assert!(resolved.contains(&module_dir.canonicalize().expect("canonical module dir")));
+    }
+
+    #[test]
+    fn workspace_git_paths_rejects_a_gitdir_pointing_at_an_external_canary() {
+        // The workspace names a directory that no ancestor .git/.repo covers.
+        // It must be excluded so the sandbox never binds it writable.
+        let tree = TempTree::new();
+        let canary = tree.path().join("canary");
+        std::fs::create_dir_all(&canary).expect("create canary");
+        std::fs::write(canary.join("secret"), b"do not touch").expect("write canary file");
+
+        let workspace = tree.path().join("super/work");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let canary_abs = canary.to_string_lossy().into_owned();
+        std::fs::write(workspace.join(".git"), format!("gitdir: {canary_abs}\n"))
+            .expect("write .git file");
+
+        let resolved = workspace_git_paths(&workspace);
+        assert!(
+            resolved.is_empty(),
+            "expected no paths, canary leaked: {resolved:?}"
+        );
+        assert!(!resolved.iter().any(|p| p.starts_with(&canary)));
+    }
+
+    #[test]
+    fn workspace_git_paths_rejects_a_symlinked_gitdir_escaping_trusted_roots() {
+        let tree = TempTree::new();
+        let canary = tree.path().join("canary");
+        std::fs::create_dir_all(&canary).expect("create canary");
+
+        let workspace = tree.path().join("super/work");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::os::unix::fs::symlink(&canary, workspace.join(".git")).expect("symlink .git");
+
+        assert!(workspace_git_paths(&workspace).is_empty());
     }
 }
