@@ -1,69 +1,8 @@
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use landlock::{
-    ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, path_beneath_rules,
-};
-
-pub const HELPER_ARG: &str = "__catdesk_landlock_exec";
-
-// ABI v3 is the minimum safe baseline for filesystem confinement because it
-// adds control over truncate(2). Older ABIs could otherwise leave an outside
-// file truncatable even when ordinary write opens are denied.
-const LANDLOCK_ABI: ABI = ABI::V3;
-
-pub fn is_helper_invocation() -> bool {
-    std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == OsStr::new(HELPER_ARG))
-}
-
-pub fn exec_helper() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args_os();
-    let _program = args.next();
-    let helper = args
-        .next()
-        .ok_or_else(|| io::Error::other("missing Landlock helper marker"))?;
-    if helper != OsStr::new(HELPER_ARG) {
-        return Err(io::Error::other("invalid Landlock helper invocation").into());
-    }
-
-    let workspace = PathBuf::from(
-        args.next()
-            .ok_or_else(|| io::Error::other("missing Landlock workspace path"))?,
-    );
-    let scratch = PathBuf::from(
-        args.next()
-            .ok_or_else(|| io::Error::other("missing Landlock scratch path"))?,
-    );
-    let command = args
-        .next()
-        .ok_or_else(|| io::Error::other("missing Landlock shell command"))?;
-    if args.next().is_some() {
-        return Err(io::Error::other("unexpected Landlock helper arguments").into());
-    }
-
-    apply_workspace_landlock(&workspace, &scratch)?;
-
-    let error = Command::new("/bin/bash")
-        .arg("-c")
-        .arg(command)
-        .env("TMPDIR", &scratch)
-        .env("TMP", &scratch)
-        .env("TEMP", &scratch)
-        .exec();
-    Err(io::Error::new(
-        error.kind(),
-        format!("failed to exec /bin/bash after applying Landlock: {error}"),
-    )
-    .into())
-}
 
 fn canonical_existing(path: &Path) -> io::Result<PathBuf> {
     path.canonicalize().map_err(|error| {
@@ -138,80 +77,108 @@ fn runtime_read_paths() -> BTreeSet<PathBuf> {
     paths
 }
 
-fn runtime_write_paths() -> BTreeSet<PathBuf> {
-    let mut paths = BTreeSet::new();
+/// Locate an executable `bwrap` on PATH. Bubblewrap confines through mount
+/// namespaces rather than an LSM, so it works on kernels far older than
+/// Landlock's 5.13 baseline -- RHEL 8 / Rocky 8 (4.18), Ubuntu 20.04 (5.4) and
+/// Debian 11 (5.10) included.
+///
+/// A non-executable file named `bwrap` earlier in PATH must not shadow a real
+/// one later, so the execute bit is checked rather than just the file type.
+fn bubblewrap_executable() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
 
-    for path in [
-        "/dev/null",
-        "/dev/zero",
-        "/dev/full",
-        "/dev/random",
-        "/dev/urandom",
-        "/dev/tty",
-    ] {
-        insert_existing(&mut paths, path);
-    }
-
-    paths
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("bwrap"))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
 }
 
-pub fn apply_workspace_landlock(
+/// Build a bubblewrap invocation that confines `command` to `workspace` plus its
+/// private `scratch` directory.
+///
+/// The namespace contains only what [`runtime_read_paths`] returns plus the
+/// workspace and scratch directories, so an unbound path is simply absent
+/// rather than merely denied. `--dev /dev` supplies a minimal set of device
+/// nodes (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/tty` and the like),
+/// `--tmpfs /tmp` keeps the host's `/tmp` out of reach, and `--unshare-pid`
+/// hides host processes.
+///
+/// `--new-session` is deliberately omitted: it detaches the controlling
+/// terminal, which would make `/dev/tty` unusable.
+fn bubblewrap_command(
+    bwrap: &Path,
+    command: &str,
     workspace: &Path,
     scratch: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> io::Result<Command> {
     let workspace = canonical_existing(workspace)?;
-    if !workspace.is_dir() {
-        return Err(io::Error::other(format!(
-            "Landlock workspace is not a directory: {}",
-            workspace.display()
-        ))
-        .into());
-    }
     let scratch = canonical_existing(scratch)?;
-    if !scratch.is_dir() {
-        return Err(io::Error::other(format!(
-            "Landlock scratch path is not a directory: {}",
-            scratch.display()
-        ))
-        .into());
+
+    let mut bwrap_command = Command::new(bwrap);
+    bwrap_command
+        .arg("--unshare-user")
+        .arg("--unshare-pid")
+        .arg("--unshare-ipc")
+        .arg("--unshare-uts")
+        .arg("--die-with-parent")
+        .arg("--proc")
+        .arg("/proc")
+        .arg("--dev")
+        .arg("/dev")
+        .arg("--tmpfs")
+        .arg("/tmp");
+
+    for path in runtime_read_paths() {
+        bwrap_command.arg("--ro-bind-try").arg(&path).arg(&path);
     }
 
-    let access_all = AccessFs::from_all(LANDLOCK_ABI);
-    let access_read = AccessFs::from_read(LANDLOCK_ABI);
-
-    let read_paths = runtime_read_paths();
-    let mut write_paths = runtime_write_paths();
-    write_paths.insert(workspace);
-    write_paths.insert(scratch);
-
-    let ruleset = Ruleset::default()
-        .set_compatibility(CompatLevel::HardRequirement)
-        .handle_access(access_all)?
-        .create()?
-        .add_rules(path_beneath_rules(&read_paths, access_read))?
-        .add_rules(path_beneath_rules(&write_paths, access_all))?
-        .no_new_privs(true)
-        .restrict_self()?;
-
-    if ruleset.ruleset != RulesetStatus::FullyEnforced {
-        return Err(io::Error::other(format!(
-            "Landlock sandbox was not fully enforced: {:?}",
-            ruleset.ruleset
-        ))
-        .into());
+    // Replicate merged-/usr symlinks. runtime_read_paths canonicalises, so on
+    // distributions where /bin, /sbin, /lib and /lib64 are symlinks into /usr
+    // it yields only the /usr targets. Bubblewrap builds a fresh namespace:
+    // without these links /bin/bash does not exist and every sandboxed command
+    // fails with "execvp /bin/bash: No such file or directory".
+    for link in ["/bin", "/sbin", "/lib", "/lib64"] {
+        let link = Path::new(link);
+        if let Ok(target) = std::fs::read_link(link) {
+            bwrap_command.arg("--symlink").arg(target).arg(link);
+        }
     }
 
-    Ok(())
+    for path in [&workspace, &scratch] {
+        bwrap_command.arg("--bind").arg(path).arg(path);
+    }
+
+    bwrap_command
+        .arg("--chdir")
+        .arg(&workspace)
+        .arg("--setenv")
+        .arg("TMPDIR")
+        .arg(&scratch)
+        .arg("--setenv")
+        .arg("TMP")
+        .arg(&scratch)
+        .arg("--setenv")
+        .arg("TEMP")
+        .arg(&scratch)
+        .arg("/bin/bash")
+        .arg("-c")
+        .arg(command);
+
+    Ok(bwrap_command)
 }
 
+/// Build the command that runs `command` confined to `workspace`, together with
+/// the private scratch directory created for it.
+///
+/// Confinement is through bubblewrap, which builds a fresh mount namespace
+/// containing only the allowlisted paths. When `bwrap` is not on `PATH` the
+/// error says so, since the caller cannot run anything unconfined.
+///
+/// The scratch directory is removed again if the command could not be prepared.
 pub fn helper_command(command: &str, workspace: &Path) -> io::Result<(Command, PathBuf)> {
-    let executable = std::env::current_exe().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to locate CatDesk executable for Landlock helper: {error}"),
-        )
-    })?;
-
     let scratch_dir =
         std::env::temp_dir().join(format!("catdesk-sandbox-{}", uuid::Uuid::new_v4()));
     let mut dir_builder = std::fs::DirBuilder::new();
@@ -222,19 +189,27 @@ pub fn helper_command(command: &str, workspace: &Path) -> io::Result<(Command, P
             io::Error::new(
                 error.kind(),
                 format!(
-                    "failed to create Landlock scratch directory {}: {error}",
+                    "failed to create sandbox scratch directory {}: {error}",
                     scratch_dir.display()
                 ),
             )
         })?;
 
-    let mut helper = Command::new(executable);
-    helper
-        .arg(HELPER_ARG)
-        .arg(workspace)
-        .arg(&scratch_dir)
-        .arg(command);
-    Ok((helper, scratch_dir))
+    let prepared = match bubblewrap_executable() {
+        Some(bwrap) => bubblewrap_command(&bwrap, command, workspace, &scratch_dir),
+        None => Err(io::Error::other(
+            "no usable sandbox: bwrap was not found on PATH. Install bubblewrap to run \
+             commands confined.",
+        )),
+    };
+
+    match prepared {
+        Ok(prepared) => Ok((prepared, scratch_dir)),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&scratch_dir);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -271,17 +246,18 @@ mod tests {
     }
 
     #[test]
-    fn helper_marker_detection_is_exact() {
-        assert_ne!(HELPER_ARG, "");
-        assert!(!HELPER_ARG.contains(char::is_whitespace));
-    }
-
-    #[test]
     fn helper_command_creates_private_scratch_directory() {
         use std::os::unix::fs::PermissionsExt;
 
+        // bwrap may not be installed in every environment. helper_command
+        // reports that rather than returning a command, so there is nothing to
+        // assert about the scratch directory here.
+        if bubblewrap_executable().is_none() {
+            return;
+        }
+
         let (_command, scratch) =
-            helper_command("true", Path::new(".")).expect("prepare Landlock helper command");
+            helper_command("true", Path::new(".")).expect("prepare sandbox helper command");
         let mode = std::fs::metadata(&scratch)
             .expect("scratch metadata")
             .permissions()
@@ -289,11 +265,5 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o700);
         std::fs::remove_dir_all(scratch).expect("remove scratch directory");
-    }
-
-    #[test]
-    fn runtime_write_paths_do_not_grant_global_tmp() {
-        let tmp = Path::new("/tmp").canonicalize().expect("canonical /tmp");
-        assert!(!runtime_write_paths().contains(&tmp));
     }
 }

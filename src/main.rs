@@ -1107,12 +1107,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An error means a provider was already installed, which is equally fine.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    #[cfg(target_os = "linux")]
-    if linux_sandbox::is_helper_invocation() {
-        linux_sandbox::exec_helper()?;
-        unreachable!("Landlock helper returned after exec");
-    }
-
     match macos_terminal::maybe_relaunch_in_terminal_profile() {
         Ok(macos_terminal::LaunchAction::Continue) => {}
         #[cfg(target_os = "macos")]
