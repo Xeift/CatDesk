@@ -1144,6 +1144,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout().execute(EnableBracketedPaste)?;
     stdout().execute(EnableMouseCapture)?;
 
+    // Restore the terminal if the thread driving the TUI panics. The normal
+    // teardown below only runs on the ordinary exit path, so without this a
+    // panic leaves raw mode and mouse capture enabled: the terminal keeps
+    // emitting SGR mouse reports such as `35;81;24M` that nothing consumes, and
+    // the shell stays unusable until the user runs `reset`.
+    //
+    // The hook is process-global, but tokio catches panics in spawned tasks and
+    // keeps the rest of the runtime alive. start_services launches axum before
+    // the TUI, so tearing the terminal down for any panic would corrupt a
+    // display that is still running. Restore only when the panicking thread is
+    // the one that set the terminal up.
+    {
+        let terminal_thread = std::thread::current().id();
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if std::thread::current().id() == terminal_thread {
+                let _ = stdout().execute(DisableBracketedPaste);
+                let _ = stdout().execute(DisableMouseCapture);
+                let _ = disable_raw_mode();
+                let _ = stdout().execute(LeaveAlternateScreen);
+            }
+            default_hook(info);
+        }));
+    }
+
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
