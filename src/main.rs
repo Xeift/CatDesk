@@ -1097,6 +1097,16 @@ fn drain_server_ui_events(app: &mut AppState, ui_events: &mut UnboundedReceiver<
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // rustls 0.23 refuses to pick a process-level CryptoProvider when more than
+    // one provider feature is enabled, and panics on first use. Both end up
+    // enabled here through feature unification: ngrok requires aws-lc-rs, while
+    // reqwest's rustls-tls pulls in ring. Install one explicitly instead of
+    // relying on automatic selection. aws-lc-rs is chosen because ngrok already
+    // requires it, so it is always present.
+    //
+    // An error means a provider was already installed, which is equally fine.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     #[cfg(target_os = "linux")]
     if linux_sandbox::is_helper_invocation() {
         linux_sandbox::exec_helper()?;
@@ -1139,6 +1149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout().execute(EnterAlternateScreen)?;
     stdout().execute(EnableBracketedPaste)?;
     stdout().execute(EnableMouseCapture)?;
+
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 

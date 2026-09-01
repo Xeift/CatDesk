@@ -11,7 +11,10 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 ratatui = "0.29"
 crossterm = "0.28"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "http2", "charset", "rustls-tls"] }
+# Direct dependency so the process-level CryptoProvider can be installed
+# explicitly; see the install_default call in main.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 tokio-stream = "0.1"
 base64 = "0.22"
 tiktoken-rs = "0.9.1"
