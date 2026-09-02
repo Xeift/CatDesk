@@ -156,7 +156,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
-- To improve performance and avoid high memory usage, I strongly recommend **opening a new session for every small feature**. Before switching chats, ask ChatGPT to use `create_handoff`. CatDesk writes `.catdesk/handoff.md` inside the current workspace with the current goal, completed work, important decisions, validation, next steps, and Git context. On the next session, `catdesk_instruction` detects the handoff and tells ChatGPT to read it before continuing. Do not put credentials, tokens, passwords, or other secrets in the handoff. CatDesk does not modify `.gitignore`; add `.catdesk/` to your ignore rules if you want handoffs to stay untracked. CatDesk can become extremely laggy after 50+ tool calls.
+- To improve performance and avoid high memory usage, I strongly recommend **opening a new session for every small feature**. Before switching chats, ask ChatGPT to use `create_handoff`. CatDesk stores a workspace-specific handoff under `~/.catdesk/handoffs/` with the current goal, completed work, important decisions, validation, next steps, and Git context. On the next session, `catdesk_instruction` loads that handoff and includes it as session context before continuing. Handoffs stay outside the repository, so they cannot be committed accidentally. Do not put credentials, tokens, passwords, or other secrets in the handoff. CatDesk can become extremely laggy after 50+ tool calls.
 <p align="center">
   <img src="docs/images/high_ram_usage.png" alt="3.9 GB Memory usage🥹" width="300"><br>
   <em>3.9 GB Memory usage🥹</em>
