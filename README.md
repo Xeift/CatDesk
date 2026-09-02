@@ -156,7 +156,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
-- To improve performance and avoid high memory usage, I strongly recommend **opening a new session for every small feature**. If you need context, you can ask ChatGPT to create a handoff note and paste it into the new session. It will become extremely laggy after 50+ tool calls.
+- To improve performance and avoid high memory usage, I strongly recommend **opening a new session for every small feature**. Before switching chats, ask ChatGPT to use `create_handoff`. CatDesk prepares a `catdesk_handoff_<workspace-name>_<short-id>.md` artifact containing the current goal, completed work, important decisions, validation, next steps, and Git context; ChatGPT then saves it to the persistent Library instead of writing the workspace. On the next session, `catdesk_instruction` tells ChatGPT to search Library for matching handoffs. With one match it reads the handoff and deletes it only after a successful read; with multiple matches it asks which one to use first. **Library Search must be enabled** to recover handoffs. Do not put credentials, tokens, passwords, or other secrets in a handoff. CatDesk can become extremely laggy after 50+ tool calls.
 <p align="center">
   <img src="docs/images/high_ram_usage.png" alt="3.9 GB Memory usage🥹" width="300"><br>
   <em>3.9 GB Memory usage🥹</em>
@@ -193,7 +193,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 # Tools
 
-CatDesk has two local tool modes: `multi-tools` exposes 10 tools, and `read-only` exposes 3 tools.
+CatDesk has two local tool modes: `multi-tools` exposes 11 tools, and `read-only` exposes 4 tools.
 
 CatDesk's local tools in `multi-tools` mode are:
 
@@ -204,6 +204,7 @@ CatDesk's local tools in `multi-tools` mode are:
 | `search`              | Read  | Searches workspace text with `rg`, `grep`, or built-in search              |
 | `write`               | Write | Creates or overwrites a file                                               |
 | `edit`                | Write | Applies guarded replace/range edits atomically                             |
+| `create_handoff`      | Read  | Prepares a workspace-specific Library handoff without changing the workspace |
 | `delete`              | Write | Deletes a file or directory                                                |
 | `run_command`         | Shell | Runs a short shell command and waits for completion                        |
 | `start_command`       | Job   | Starts a long-running shell command and immediately returns a job ID       |

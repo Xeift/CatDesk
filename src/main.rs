@@ -4,6 +4,7 @@ mod change_tracking;
 mod command;
 mod command_jobs;
 mod devtools;
+mod handoff;
 #[cfg(target_os = "linux")]
 mod linux_sandbox;
 mod macos_terminal;

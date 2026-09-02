@@ -1686,7 +1686,7 @@ mod tests {
         }
         let (success, widgets) = tracked.expect("missing bootstrap tools/list event");
         assert!(success);
-        assert_eq!(widgets.len(), 10);
+        assert_eq!(widgets.len(), 11);
         assert_eq!(
             widgets
                 .iter()
@@ -1702,6 +1702,7 @@ mod tests {
                 "search",
                 "write",
                 "edit",
+                "create_handoff",
                 "delete",
             ]
         );
