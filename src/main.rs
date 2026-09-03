@@ -1183,11 +1183,15 @@ fn macos_terminal_profile_enabled() -> std::io::Result<bool> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(target_os = "linux")]
-    if linux_sandbox::is_helper_invocation() {
-        linux_sandbox::exec_helper()?;
-        unreachable!("Landlock helper returned after exec");
-    }
+    // rustls 0.23 refuses to pick a process-level CryptoProvider when more than
+    // one provider feature is enabled, and panics on first use. Both end up
+    // enabled here through feature unification: ngrok requires aws-lc-rs, while
+    // reqwest's rustls-tls pulls in ring. Install one explicitly instead of
+    // relying on automatic selection. aws-lc-rs is chosen because ngrok already
+    // requires it, so it is always present.
+    //
+    // An error means a provider was already installed, which is equally fine.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let terminal_profile_enabled = macos_terminal_profile_enabled()?;
     match macos_terminal::maybe_relaunch_in_terminal_profile(terminal_profile_enabled) {
@@ -1226,6 +1230,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout().execute(EnterAlternateScreen)?;
     stdout().execute(EnableBracketedPaste)?;
     stdout().execute(EnableMouseCapture)?;
+
+    // Restore the terminal if the thread driving the TUI panics. The normal
+    // teardown below only runs on the ordinary exit path, so without this a
+    // panic leaves raw mode and mouse capture enabled: the terminal keeps
+    // emitting SGR mouse reports such as `35;81;24M` that nothing consumes, and
+    // the shell stays unusable until the user runs `reset`.
+    //
+    // The hook is process-global, but tokio catches panics in spawned tasks and
+    // keeps the rest of the runtime alive. start_services launches axum before
+    // the TUI, so tearing the terminal down for any panic would corrupt a
+    // display that is still running. Restore only when the panicking thread is
+    // the one that set the terminal up.
+    {
+        let terminal_thread = std::thread::current().id();
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if std::thread::current().id() == terminal_thread {
+                let _ = stdout().execute(DisableBracketedPaste);
+                let _ = stdout().execute(DisableMouseCapture);
+                let _ = disable_raw_mode();
+                let _ = stdout().execute(LeaveAlternateScreen);
+            }
+            default_hook(info);
+        }));
+    }
+
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
