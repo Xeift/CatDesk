@@ -1,69 +1,8 @@
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use landlock::{
-    ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, path_beneath_rules,
-};
-
-pub const HELPER_ARG: &str = "__catdesk_landlock_exec";
-
-// ABI v3 is the minimum safe baseline for filesystem confinement because it
-// adds control over truncate(2). Older ABIs could otherwise leave an outside
-// file truncatable even when ordinary write opens are denied.
-const LANDLOCK_ABI: ABI = ABI::V3;
-
-pub fn is_helper_invocation() -> bool {
-    std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == OsStr::new(HELPER_ARG))
-}
-
-pub fn exec_helper() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args_os();
-    let _program = args.next();
-    let helper = args
-        .next()
-        .ok_or_else(|| io::Error::other("missing Landlock helper marker"))?;
-    if helper != OsStr::new(HELPER_ARG) {
-        return Err(io::Error::other("invalid Landlock helper invocation").into());
-    }
-
-    let workspace = PathBuf::from(
-        args.next()
-            .ok_or_else(|| io::Error::other("missing Landlock workspace path"))?,
-    );
-    let scratch = PathBuf::from(
-        args.next()
-            .ok_or_else(|| io::Error::other("missing Landlock scratch path"))?,
-    );
-    let command = args
-        .next()
-        .ok_or_else(|| io::Error::other("missing Landlock shell command"))?;
-    if args.next().is_some() {
-        return Err(io::Error::other("unexpected Landlock helper arguments").into());
-    }
-
-    apply_workspace_landlock(&workspace, &scratch)?;
-
-    let error = Command::new("/bin/bash")
-        .arg("-c")
-        .arg(command)
-        .env("TMPDIR", &scratch)
-        .env("TMP", &scratch)
-        .env("TEMP", &scratch)
-        .exec();
-    Err(io::Error::new(
-        error.kind(),
-        format!("failed to exec /bin/bash after applying Landlock: {error}"),
-    )
-    .into())
-}
 
 fn canonical_existing(path: &Path) -> io::Result<PathBuf> {
     path.canonicalize().map_err(|error| {
@@ -138,80 +77,237 @@ fn runtime_read_paths() -> BTreeSet<PathBuf> {
     paths
 }
 
-fn runtime_write_paths() -> BTreeSet<PathBuf> {
+/// Directories at or above `workspace` that may legitimately hold its git
+/// metadata: an ancestor's own `.git` (worktrees and submodules point their
+/// `gitdir:` there) or `.repo` (a `repo` client keeps every checkout's git
+/// directory and the shared object store under it).
+///
+/// A `.git` pointer is workspace-controlled input, so whatever it resolves to
+/// is confined to these roots before being granted. Without that, a crafted
+/// checkout could name `$HOME`, `/etc`, or an unrelated checkout and have the
+/// sandbox bind it writable.
+fn trusted_git_metadata_roots(workspace: &Path) -> BTreeSet<PathBuf> {
+    let mut roots = BTreeSet::new();
+    // Strict ancestors only: the workspace's own `.git` is the pointer being
+    // validated, so canonicalising it here would let a `.git` symlink nominate
+    // its own target as trusted.
+    for ancestor in workspace.ancestors().skip(1) {
+        insert_existing(&mut roots, ancestor.join(".git"));
+        insert_existing(&mut roots, ancestor.join(".repo"));
+    }
+    roots
+}
+
+/// Whether `path` (already canonical) sits at or beneath one of `roots`.
+fn within_trusted_root(path: &Path, roots: &BTreeSet<PathBuf>) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+/// Canonicalise `path` and insert it only when it lands inside a trusted root.
+fn insert_trusted(paths: &mut BTreeSet<PathBuf>, path: &Path, roots: &BTreeSet<PathBuf>) {
+    if let Ok(canonical) = path.canonicalize()
+        && within_trusted_root(&canonical, roots)
+    {
+        paths.insert(canonical);
+    }
+}
+
+/// Paths holding the workspace's git metadata when it lives outside the
+/// workspace itself.
+///
+/// A plain checkout keeps `.git` inside the workspace, which is already
+/// writable, so this returns nothing. Three common layouts put it elsewhere:
+///
+///   * `repo` checkouts symlink `.git` into `.repo/projects/<name>.git`, whose
+///     `objects`, `hooks` and `rr-cache` are themselves symlinks into a shared
+///     `.repo/project-objects` tree.
+///   * git worktrees and submodules replace `.git` with a file containing a
+///     `gitdir:` line, and that directory's `commondir` points at the main one.
+///
+/// Without these, every git command inside the sandbox fails with "not a git
+/// repository", because the target is simply absent. They are writable rather
+/// than read-only for parity with a plain checkout, where `.git` sits in the
+/// writable workspace and commands like `git commit` work.
+///
+/// Every resolved path is checked against [`trusted_git_metadata_roots`]; a
+/// pointer that escapes them is ignored entirely, so this can only ever widen
+/// the sandbox to an ancestor's `.git`/`.repo`, never to an arbitrary directory
+/// the checkout names.
+fn workspace_git_paths(workspace: &Path) -> BTreeSet<PathBuf> {
     let mut paths = BTreeSet::new();
 
-    for path in [
-        "/dev/null",
-        "/dev/zero",
-        "/dev/full",
-        "/dev/random",
-        "/dev/urandom",
-        "/dev/tty",
-    ] {
-        insert_existing(&mut paths, path);
+    let dot_git = workspace.join(".git");
+    let metadata = match std::fs::symlink_metadata(&dot_git) {
+        Ok(metadata) => metadata,
+        Err(_) => return paths,
+    };
+
+    // A real directory already sits inside the writable workspace.
+    if metadata.is_dir() {
+        return paths;
+    }
+
+    let roots = trusted_git_metadata_roots(workspace);
+
+    let git_dir = if metadata.is_file() {
+        // "gitdir: <path>", possibly relative to the workspace.
+        let contents = match std::fs::read_to_string(&dot_git) {
+            Ok(contents) => contents,
+            Err(_) => return paths,
+        };
+        let Some(target) = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("gitdir:"))
+            .map(str::trim)
+        else {
+            return paths;
+        };
+        match workspace.join(target).canonicalize() {
+            Ok(path) => path,
+            Err(_) => return paths,
+        }
+    } else {
+        match dot_git.canonicalize() {
+            Ok(path) => path,
+            Err(_) => return paths,
+        }
+    };
+
+    // The git directory itself must resolve inside a trusted root; if it does
+    // not, the checkout is pointing somewhere it has no business pointing and
+    // nothing further is trusted either.
+    if !within_trusted_root(&git_dir, &roots) {
+        return paths;
+    }
+    paths.insert(git_dir.clone());
+
+    // Entries inside the git directory may point outside it again -- `repo`
+    // shares objects between checkouts this way -- so each is re-checked.
+    if let Ok(entries) = std::fs::read_dir(&git_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_symlink()) {
+                insert_trusted(&mut paths, &path, &roots);
+            }
+        }
+    }
+
+    // Worktrees keep shared state in the directory named by `commondir`.
+    if let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) {
+        insert_trusted(&mut paths, &git_dir.join(common.trim()), &roots);
     }
 
     paths
 }
 
-pub fn apply_workspace_landlock(
-    workspace: &Path,
-    scratch: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let workspace = canonical_existing(workspace)?;
-    if !workspace.is_dir() {
-        return Err(io::Error::other(format!(
-            "Landlock workspace is not a directory: {}",
-            workspace.display()
-        ))
-        .into());
-    }
-    let scratch = canonical_existing(scratch)?;
-    if !scratch.is_dir() {
-        return Err(io::Error::other(format!(
-            "Landlock scratch path is not a directory: {}",
-            scratch.display()
-        ))
-        .into());
-    }
+/// Locate an executable `bwrap` on PATH. Bubblewrap confines through mount
+/// namespaces rather than an LSM, so it works on kernels far older than
+/// Landlock's 5.13 baseline -- RHEL 8 / Rocky 8 (4.18), Ubuntu 20.04 (5.4) and
+/// Debian 11 (5.10) included.
+///
+/// A non-executable file named `bwrap` earlier in PATH must not shadow a real
+/// one later, so the execute bit is checked rather than just the file type.
+fn bubblewrap_executable() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
 
-    let access_all = AccessFs::from_all(LANDLOCK_ABI);
-    let access_read = AccessFs::from_read(LANDLOCK_ABI);
-
-    let read_paths = runtime_read_paths();
-    let mut write_paths = runtime_write_paths();
-    write_paths.insert(workspace);
-    write_paths.insert(scratch);
-
-    let ruleset = Ruleset::default()
-        .set_compatibility(CompatLevel::HardRequirement)
-        .handle_access(access_all)?
-        .create()?
-        .add_rules(path_beneath_rules(&read_paths, access_read))?
-        .add_rules(path_beneath_rules(&write_paths, access_all))?
-        .no_new_privs(true)
-        .restrict_self()?;
-
-    if ruleset.ruleset != RulesetStatus::FullyEnforced {
-        return Err(io::Error::other(format!(
-            "Landlock sandbox was not fully enforced: {:?}",
-            ruleset.ruleset
-        ))
-        .into());
-    }
-
-    Ok(())
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("bwrap"))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
 }
 
-pub fn helper_command(command: &str, workspace: &Path) -> io::Result<(Command, PathBuf)> {
-    let executable = std::env::current_exe().map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to locate CatDesk executable for Landlock helper: {error}"),
-        )
-    })?;
+/// Build a bubblewrap invocation that confines `command` to `workspace` plus its
+/// private `scratch` directory.
+///
+/// The namespace contains only what [`runtime_read_paths`] returns plus the
+/// workspace, scratch and any external git metadata directories, so an unbound
+/// path is simply absent rather than merely denied. `--dev /dev` supplies a
+/// minimal set of device nodes (`/dev/null`, `/dev/zero`, `/dev/random`,
+/// `/dev/tty` and the like), `--tmpfs /tmp` keeps the host's `/tmp` out of
+/// reach, and `--unshare-pid` hides host processes.
+///
+/// `--new-session` is deliberately omitted: it detaches the controlling
+/// terminal, which would make `/dev/tty` unusable.
+fn bubblewrap_command(
+    bwrap: &Path,
+    command: &str,
+    workspace: &Path,
+    scratch: &Path,
+) -> io::Result<Command> {
+    let workspace = canonical_existing(workspace)?;
+    let scratch = canonical_existing(scratch)?;
 
+    let mut bwrap_command = Command::new(bwrap);
+    bwrap_command
+        .arg("--unshare-user")
+        .arg("--unshare-pid")
+        .arg("--unshare-ipc")
+        .arg("--unshare-uts")
+        .arg("--die-with-parent")
+        .arg("--proc")
+        .arg("/proc")
+        .arg("--dev")
+        .arg("/dev")
+        .arg("--tmpfs")
+        .arg("/tmp");
+
+    for path in runtime_read_paths() {
+        bwrap_command.arg("--ro-bind-try").arg(&path).arg(&path);
+    }
+
+    // Replicate merged-/usr symlinks. runtime_read_paths canonicalises, so on
+    // distributions where /bin, /sbin, /lib and /lib64 are symlinks into /usr
+    // it yields only the /usr targets. Bubblewrap builds a fresh namespace:
+    // without these links /bin/bash does not exist and every sandboxed command
+    // fails with "execvp /bin/bash: No such file or directory".
+    for link in ["/bin", "/sbin", "/lib", "/lib64"] {
+        let link = Path::new(link);
+        if let Ok(target) = std::fs::read_link(link) {
+            bwrap_command.arg("--symlink").arg(target).arg(link);
+        }
+    }
+
+    // Git metadata that lives outside the workspace (repo checkouts, worktrees,
+    // submodules). Empty for a plain checkout.
+    for path in workspace_git_paths(&workspace) {
+        bwrap_command.arg("--bind-try").arg(&path).arg(&path);
+    }
+
+    for path in [&workspace, &scratch] {
+        bwrap_command.arg("--bind").arg(path).arg(path);
+    }
+
+    bwrap_command
+        .arg("--chdir")
+        .arg(&workspace)
+        .arg("--setenv")
+        .arg("TMPDIR")
+        .arg(&scratch)
+        .arg("--setenv")
+        .arg("TMP")
+        .arg(&scratch)
+        .arg("--setenv")
+        .arg("TEMP")
+        .arg(&scratch)
+        .arg("/bin/bash")
+        .arg("-c")
+        .arg(command);
+
+    Ok(bwrap_command)
+}
+
+/// Build the command that runs `command` confined to `workspace`, together with
+/// the private scratch directory created for it.
+///
+/// Confinement is through bubblewrap, which builds a fresh mount namespace
+/// containing only the allowlisted paths. When `bwrap` is not on `PATH` the
+/// error says so, since the caller cannot run anything unconfined.
+///
+/// The scratch directory is removed again if the command could not be prepared.
+pub fn helper_command(command: &str, workspace: &Path) -> io::Result<(Command, PathBuf)> {
     let scratch_dir =
         std::env::temp_dir().join(format!("catdesk-sandbox-{}", uuid::Uuid::new_v4()));
     let mut dir_builder = std::fs::DirBuilder::new();
@@ -222,19 +318,27 @@ pub fn helper_command(command: &str, workspace: &Path) -> io::Result<(Command, P
             io::Error::new(
                 error.kind(),
                 format!(
-                    "failed to create Landlock scratch directory {}: {error}",
+                    "failed to create sandbox scratch directory {}: {error}",
                     scratch_dir.display()
                 ),
             )
         })?;
 
-    let mut helper = Command::new(executable);
-    helper
-        .arg(HELPER_ARG)
-        .arg(workspace)
-        .arg(&scratch_dir)
-        .arg(command);
-    Ok((helper, scratch_dir))
+    let prepared = match bubblewrap_executable() {
+        Some(bwrap) => bubblewrap_command(&bwrap, command, workspace, &scratch_dir),
+        None => Err(io::Error::other(
+            "no usable sandbox: bwrap was not found on PATH. Install bubblewrap to run \
+             commands confined.",
+        )),
+    };
+
+    match prepared {
+        Ok(prepared) => Ok((prepared, scratch_dir)),
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&scratch_dir);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -271,17 +375,18 @@ mod tests {
     }
 
     #[test]
-    fn helper_marker_detection_is_exact() {
-        assert_ne!(HELPER_ARG, "");
-        assert!(!HELPER_ARG.contains(char::is_whitespace));
-    }
-
-    #[test]
     fn helper_command_creates_private_scratch_directory() {
         use std::os::unix::fs::PermissionsExt;
 
+        // bwrap may not be installed in every environment. helper_command
+        // reports that rather than returning a command, so there is nothing to
+        // assert about the scratch directory here.
+        if bubblewrap_executable().is_none() {
+            return;
+        }
+
         let (_command, scratch) =
-            helper_command("true", Path::new(".")).expect("prepare Landlock helper command");
+            helper_command("true", Path::new(".")).expect("prepare sandbox helper command");
         let mode = std::fs::metadata(&scratch)
             .expect("scratch metadata")
             .permissions()
@@ -291,9 +396,84 @@ mod tests {
         std::fs::remove_dir_all(scratch).expect("remove scratch directory");
     }
 
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("catdesk-gitpaths-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).expect("create temp tree");
+            Self(dir.canonicalize().expect("canonical temp tree"))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
-    fn runtime_write_paths_do_not_grant_global_tmp() {
-        let tmp = Path::new("/tmp").canonicalize().expect("canonical /tmp");
-        assert!(!runtime_write_paths().contains(&tmp));
+    fn workspace_git_paths_empty_for_plain_checkout() {
+        let tree = TempTree::new();
+        let workspace = tree.path().join("repo");
+        std::fs::create_dir_all(workspace.join(".git")).expect("create .git dir");
+        assert!(workspace_git_paths(&workspace).is_empty());
+    }
+
+    #[test]
+    fn workspace_git_paths_follows_gitdir_into_an_ancestor() {
+        // super/                <- ancestor holding the real .git
+        //   .git/modules/sub/
+        //   sub/.git            <- file: "gitdir: ../.git/modules/sub"
+        let tree = TempTree::new();
+        let module_dir = tree.path().join("super/.git/modules/sub");
+        std::fs::create_dir_all(&module_dir).expect("create module dir");
+        let workspace = tree.path().join("super/sub");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::write(workspace.join(".git"), "gitdir: ../.git/modules/sub\n")
+            .expect("write .git file");
+
+        let resolved = workspace_git_paths(&workspace);
+        assert!(resolved.contains(&module_dir.canonicalize().expect("canonical module dir")));
+    }
+
+    #[test]
+    fn workspace_git_paths_rejects_a_gitdir_pointing_at_an_external_canary() {
+        // The workspace names a directory that no ancestor .git/.repo covers.
+        // It must be excluded so the sandbox never binds it writable.
+        let tree = TempTree::new();
+        let canary = tree.path().join("canary");
+        std::fs::create_dir_all(&canary).expect("create canary");
+        std::fs::write(canary.join("secret"), b"do not touch").expect("write canary file");
+
+        let workspace = tree.path().join("super/work");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let canary_abs = canary.to_string_lossy().into_owned();
+        std::fs::write(workspace.join(".git"), format!("gitdir: {canary_abs}\n"))
+            .expect("write .git file");
+
+        let resolved = workspace_git_paths(&workspace);
+        assert!(
+            resolved.is_empty(),
+            "expected no paths, canary leaked: {resolved:?}"
+        );
+        assert!(!resolved.iter().any(|p| p.starts_with(&canary)));
+    }
+
+    #[test]
+    fn workspace_git_paths_rejects_a_symlinked_gitdir_escaping_trusted_roots() {
+        let tree = TempTree::new();
+        let canary = tree.path().join("canary");
+        std::fs::create_dir_all(&canary).expect("create canary");
+
+        let workspace = tree.path().join("super/work");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::os::unix::fs::symlink(&canary, workspace.join(".git")).expect("symlink .git");
+
+        assert!(workspace_git_paths(&workspace).is_empty());
     }
 }

@@ -38,10 +38,12 @@ jobs:
         include:
           - runner: ubuntu-22.04
             asset: catdesk-linux-x64
-            binary: target/release/catdesk
+            target: x86_64-unknown-linux-musl
+            binary: target/x86_64-unknown-linux-musl/release/catdesk
           - runner: ubuntu-22.04-arm
             asset: catdesk-linux-arm64
-            binary: target/release/catdesk
+            target: aarch64-unknown-linux-musl
+            binary: target/aarch64-unknown-linux-musl/release/catdesk
           - runner: macos-15-intel
             asset: catdesk-darwin-x64
             binary: target/release/catdesk
@@ -58,8 +60,21 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
 
+      - name: Install musl toolchain
+        if: matrix.target != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add --toolchain stable "${{ matrix.target }}"
+
       - name: Build release binary
-        run: cargo +stable build --release --locked
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo +stable build --release --locked --target "${{ matrix.target }}"
+          else
+            cargo +stable build --release --locked
+          fi
 
       - name: Stage binary
         shell: bash
