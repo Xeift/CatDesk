@@ -2884,6 +2884,258 @@
           grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
+
+      /* ChatGPT-aligned surface treatment.
+         Keep CatDesk's information density while matching the host's compact
+         inline tool-card hierarchy and neutral surface treatment. */
+      :root {
+        /* ChatGPT currently embeds the widget in a host-controlled surface.
+           Do not key off the OS theme: that can disagree with ChatGPT itself
+           (for example, light ChatGPT on a dark desktop). */
+        color-scheme: light;
+        --bg: #f7f7f8;
+        --panel: #ffffff;
+        --panel-2: #f7f7f8;
+        --line: rgba(0, 0, 0, 0.10);
+        --text: #0d0d0d;
+        --text-2: #424242;
+        --text-3: #737373;
+        --muted: #737373;
+        --text-inverted: #ffffff;
+        --accent: #0d6efd;
+        --ok: #17803d;
+        --warn: #b45309;
+        --err: #c92a2a;
+        --chip: #f1f1f1;
+        --code: #f7f7f8;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color-scheme: dark;
+          --bg: #171717;
+          --panel: #212121;
+          --panel-2: #2a2a2a;
+          --line: rgba(255, 255, 255, 0.10);
+          --text: #f5f5f5;
+          --text-2: #d1d1d1;
+          --text-3: #9b9b9b;
+          --muted: #9b9b9b;
+          --text-inverted: #0d0d0d;
+          --accent: #4da3ff;
+          --ok: #58c783;
+          --warn: #f0a66a;
+          --err: #ff8b8b;
+          --chip: #2a2a2a;
+          --code: #171717;
+        }
+      }
+
+      body {
+        font:
+          13px/1.45 ui-sans-serif,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+      }
+
+      .root {
+        gap: 6px;
+        border-radius: 12px;
+      }
+
+      .section {
+        border-color: var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.035);
+      }
+
+      .section h2 {
+        padding: 8px 12px;
+        background: transparent;
+      }
+
+      .section-body {
+        padding: 0;
+      }
+
+      .main-stack {
+        gap: 6px;
+      }
+
+      .command-panel,
+      .read-panel,
+      .change-panel,
+      .search-panel {
+        min-height: 42px;
+        padding: 9px 12px;
+      }
+
+      .command-target,
+      .read-target,
+      .change-target,
+      .search-target {
+        gap: 8px;
+      }
+
+      .command-label,
+      .read-label,
+      .change-label,
+      .search-label,
+      .search-backend {
+        color: var(--text-3);
+        font-weight: 500;
+      }
+
+      .command-value,
+      .read-name,
+      .change-name,
+      .search-value {
+        color: var(--text);
+        font-weight: 560;
+      }
+
+      .command-meta,
+      .read-meta,
+      .change-meta,
+      .search-meta {
+        color: var(--text-3);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .command-card[open] > summary,
+      details.file[open] > summary {
+        border-bottom-color: var(--line);
+      }
+
+      .command-output,
+      .command-line,
+      .diff,
+      .dline {
+        font-family:
+          "SFMono-Regular",
+          Menlo,
+          Consolas,
+          "Liberation Mono",
+          monospace;
+      }
+
+      .command-output {
+        max-height: 300px;
+        padding: 10px 12px 11px;
+        border-top: 0;
+        background: var(--code);
+        color: var(--text-2);
+        line-height: 1.5;
+      }
+
+      .files-token-row {
+        grid-template-columns: minmax(0, 1fr) minmax(108px, 132px);
+        gap: 6px;
+        align-items: stretch;
+      }
+
+      .token-side {
+        border-color: var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        padding: 8px 10px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.035);
+      }
+
+      .token-side-hover {
+        min-height: 0;
+      }
+
+      .token-side-hover:hover,
+      .token-side-hover:focus-within {
+        border-color: var(--line);
+        background: var(--panel-2);
+        box-shadow: none;
+      }
+
+      .token-side-hover::after {
+        display: none;
+      }
+
+      .token-face {
+        gap: 4px;
+      }
+
+      .token-face-label {
+        margin-bottom: 3px;
+        color: var(--text-3);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        text-transform: none;
+      }
+
+      .token-line {
+        gap: 8px;
+        color: var(--text-2);
+        font-size: 11px;
+      }
+
+      .token-side-footer {
+        margin-top: 0;
+        border-radius: 0 0 12px 12px;
+        box-shadow: none;
+      }
+
+      .token-side-footer::before {
+        background: var(--line);
+      }
+
+      .completion-shell {
+        border-radius: 12px;
+        padding: 0;
+      }
+
+      .completion-shell.is-playing {
+        box-shadow: none;
+        animation: none;
+      }
+
+      .completion-shell.is-playing::before,
+      .completion-shell.is-playing::after {
+        display: none;
+      }
+
+      .completion-shell.is-playing .section,
+      .completion-shell.is-playing .token-side {
+        border-color: var(--line);
+        box-shadow: none;
+      }
+
+      details.file,
+      .file-static,
+      .change-files {
+        border-color: var(--line);
+      }
+
+      @media (max-width: 520px) {
+        .files-token-row {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .token-side {
+          border-radius: 10px;
+        }
+
+        .token-face {
+          grid-template-columns: repeat(5, minmax(0, 1fr));
+          gap: 8px;
+          align-items: center;
+        }
+
+        .token-face-label {
+          grid-column: 1 / -1;
+        }
+      }
+
     </style>
   </head>
   <body>
