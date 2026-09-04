@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use landlock::{
-    ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, path_beneath_rules,
+    path_beneath_rules, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetStatus, ABI,
 };
 
 pub const HELPER_ARG: &str = "__catdesk_landlock_exec";
@@ -204,13 +204,26 @@ pub fn apply_workspace_landlock(
     Ok(())
 }
 
-pub fn helper_command(command: &str, workspace: &Path) -> io::Result<(Command, PathBuf)> {
-    let executable = std::env::current_exe().map_err(|error| {
+fn helper_executable() -> io::Result<PathBuf> {
+    let proc_self_exe = PathBuf::from("/proc/self/exe");
+    if proc_self_exe.metadata().is_ok() {
+        // Keep self-reexec working when the on-disk CatDesk binary is replaced
+        // while this process is still running. current_exe() may then resolve
+        // to a deleted pathname, while /proc/self/exe still references the
+        // live executable inode.
+        return Ok(proc_self_exe);
+    }
+
+    std::env::current_exe().map_err(|error| {
         io::Error::new(
             error.kind(),
             format!("failed to locate CatDesk executable for Landlock helper: {error}"),
         )
-    })?;
+    })
+}
+
+pub fn helper_command(command: &str, workspace: &Path) -> io::Result<(Command, PathBuf)> {
+    let executable = helper_executable()?;
 
     let scratch_dir =
         std::env::temp_dir().join(format!("catdesk-sandbox-{}", uuid::Uuid::new_v4()));
@@ -274,6 +287,16 @@ mod tests {
     fn helper_marker_detection_is_exact() {
         assert_ne!(HELPER_ARG, "");
         assert!(!HELPER_ARG.contains(char::is_whitespace));
+    }
+
+    #[test]
+    fn helper_command_prefers_proc_self_exe_when_available() {
+        let (command, scratch) =
+            helper_command("true", Path::new(".")).expect("prepare Landlock helper command");
+        if Path::new("/proc/self/exe").metadata().is_ok() {
+            assert_eq!(command.get_program(), OsStr::new("/proc/self/exe"));
+        }
+        std::fs::remove_dir_all(scratch).expect("remove scratch directory");
     }
 
     #[test]
