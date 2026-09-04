@@ -91,6 +91,9 @@ pub struct SearchTextOutput {
     pub path: String,
     pub backend: String,
     pub backend_note: String,
+    /// Set when the pattern could not compile as a regex and was searched as a
+    /// literal instead. Empty otherwise.
+    pub pattern_note: String,
     pub match_count: usize,
     pub truncated: bool,
     pub limit: usize,
@@ -105,6 +108,9 @@ impl SearchTextOutput {
         out.push_str(&format!("backend: {}\n", self.backend));
         if !self.backend_note.is_empty() {
             out.push_str(&format!("backend_note: {}\n", self.backend_note));
+        }
+        if !self.pattern_note.is_empty() {
+            out.push_str(&format!("pattern_note: {}\n", self.pattern_note));
         }
         out.push_str(&format!("matches: {}\n\n", self.match_count));
         out.push_str(
@@ -690,20 +696,57 @@ pub fn search_text(
         no_ignore: options.no_ignore,
     };
 
+    let rejected = match search_with_backend(&root, &start, resolved) {
+        Ok(output) => return Ok(output),
+        Err(error) => error,
+    };
+    if resolved.fixed_strings {
+        return Err(rejected);
+    }
+
+    // Searching for a call site is written `foo(`, which no backend accepts as
+    // a regex. Handing that back costs a round trip to learn what the pattern
+    // already said, so the search is retried as a literal.
+    //
+    // Retried rather than pre-checked on purpose: each backend has its own
+    // dialect -- ripgrep searches bytes and takes expressions the regex crate
+    // rejects, grep is POSIX ERE -- so the only reliable test of whether a
+    // pattern works is whether the backend that will run it accepted it.
+    let mut literal = resolved;
+    literal.fixed_strings = true;
+    match search_with_backend(&root, &start, literal) {
+        // The note quotes the failure rather than calling it a bad pattern: a
+        // backend can also fail to start or to produce readable output, and
+        // this retry cannot tell those apart from a rejected expression.
+        Ok(mut output) => {
+            output.pattern_note = format!("regex search failed ({rejected}); searched literally");
+            Ok(output)
+        }
+        // Nothing was learned from the retry, so report the attempt that was
+        // asked for rather than the consolation one.
+        Err(_) => Err(rejected),
+    }
+}
+
+fn search_with_backend(
+    root: &Path,
+    start: &Path,
+    resolved: ResolvedSearchTextOptions<'_>,
+) -> Result<SearchTextOutput, String> {
     if command_available("rg") {
-        return search_text_rg(&root, &start, resolved).map_err(|e| match e {
+        return search_text_rg(root, start, resolved).map_err(|e| match e {
             SearchBackendError::Unavailable => "ripgrep disappeared while running search".into(),
             SearchBackendError::Failed(message) => message,
         });
     }
     if command_available("grep") {
-        match search_text_grep(&root, &start, resolved) {
+        match search_text_grep(root, start, resolved) {
             Ok(output) => return Ok(output),
             Err(SearchBackendError::Unavailable) => {}
             Err(SearchBackendError::Failed(message)) => {
                 return search_text_rust(
-                    &root,
-                    &start,
+                    root,
+                    start,
                     resolved,
                     format!("rg not found; grep failed ({message}); used built-in search"),
                 );
@@ -712,8 +755,8 @@ pub fn search_text(
     }
 
     search_text_rust(
-        &root,
-        &start,
+        root,
+        start,
         resolved,
         "rg and grep not found; used built-in search".into(),
     )
@@ -854,6 +897,7 @@ fn search_text_rg(
         path: to_workspace_relative(root, start),
         backend: "rg".into(),
         backend_note: String::new(),
+        pattern_note: String::new(),
         match_count: returned_matches,
         truncated,
         limit: options.max_matches,
@@ -959,6 +1003,7 @@ fn search_text_grep(
         path: to_workspace_relative(root, start),
         backend: "grep".into(),
         backend_note: "rg not found; used grep".into(),
+        pattern_note: String::new(),
         match_count: returned_matches,
         truncated,
         limit: options.max_matches,
@@ -1022,6 +1067,7 @@ fn search_text_rust(
         path: to_workspace_relative(root, start),
         backend: "rust".into(),
         backend_note,
+        pattern_note: String::new(),
         match_count: returned_matches,
         truncated,
         limit: options.max_matches,
@@ -1539,6 +1585,151 @@ mod tests {
 
     fn test_workspace(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("catdesk-workspace-tools-{name}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn search_falls_back_to_a_literal_instead_of_rejecting_a_call_site_pattern() {
+        let workspace_root = test_workspace("search-literal-fallback");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+        fs::write(
+            workspace_root.join("a.rs"),
+            "assertByteLength(x)\nassertByteLengthOther\n",
+        )
+        .expect("write source");
+        let root = workspace_root.to_string_lossy().into_owned();
+
+        // Both patterns are taken verbatim from a session that spent a round
+        // trip on the rejection and then repeated the search with
+        // fixed_strings.
+        for pattern in ["assertByteLength(", "Into("] {
+            let output = search_text(
+                &root,
+                SearchTextOptions {
+                    pattern,
+                    path: None,
+                    glob: None,
+                    fixed_strings: false,
+                    case_insensitive: false,
+                    context: None,
+                    before: None,
+                    after: None,
+                    max_matches: None,
+                    max_matches_per_file: None,
+                    include_hidden: false,
+                    no_ignore: false,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{pattern} must not be rejected: {error}"));
+            assert!(
+                output.pattern_note.contains("searched literally"),
+                "{pattern} must say the results came from a literal search, got {:?}",
+                output.pattern_note
+            );
+        }
+
+        let output = search_text(
+            &root,
+            SearchTextOptions {
+                pattern: "assertByteLength(",
+                path: None,
+                glob: None,
+                fixed_strings: false,
+                case_insensitive: false,
+                context: None,
+                before: None,
+                after: None,
+                max_matches: None,
+                max_matches_per_file: None,
+                include_hidden: false,
+                no_ignore: false,
+            },
+        )
+        .expect("search");
+        assert_eq!(
+            output
+                .results
+                .iter()
+                .filter(|entry| !entry.is_context)
+                .map(|entry| entry.line)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "the literal must still match the call site and not the bare name"
+        );
+        let _ = fs::remove_dir_all(&workspace_root);
+    }
+
+    #[test]
+    fn search_does_not_downgrade_a_regex_its_backend_accepts() {
+        // rg searches bytes and accepts expressions the regex crate rejects,
+        // so pre-checking the pattern against that crate would turn a working
+        // search into a literal one that finds nothing. Only rg can say.
+        if !command_available("rg") {
+            return;
+        }
+        let workspace_root = test_workspace("search-rg-dialect");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+        fs::write(workspace_root.join("a.rs"), "a b\n").expect("write source");
+
+        let output = search_text(
+            &workspace_root.to_string_lossy(),
+            SearchTextOptions {
+                pattern: r"(?-u:\W)",
+                path: None,
+                glob: None,
+                fixed_strings: false,
+                case_insensitive: false,
+                context: None,
+                before: None,
+                after: None,
+                max_matches: None,
+                max_matches_per_file: None,
+                include_hidden: false,
+                no_ignore: false,
+            },
+        )
+        .expect("rg accepts this pattern");
+
+        assert_eq!(
+            output.match_count, 1,
+            "the space must match, which a literal search for the pattern text cannot do"
+        );
+        assert!(
+            output.pattern_note.is_empty(),
+            "nothing was downgraded, so there is nothing to report"
+        );
+        let _ = fs::remove_dir_all(&workspace_root);
+    }
+
+    #[test]
+    fn search_leaves_a_valid_regex_alone() {
+        let workspace_root = test_workspace("search-regex-untouched");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+        fs::write(workspace_root.join("a.rs"), "alpha1\nalpha2\n").expect("write source");
+
+        let output = search_text(
+            &workspace_root.to_string_lossy(),
+            SearchTextOptions {
+                pattern: "alpha[0-9]",
+                path: None,
+                glob: None,
+                fixed_strings: false,
+                case_insensitive: false,
+                context: None,
+                before: None,
+                after: None,
+                max_matches: None,
+                max_matches_per_file: None,
+                include_hidden: false,
+                no_ignore: false,
+            },
+        )
+        .expect("search");
+        assert_eq!(output.match_count, 2, "a valid pattern stays a regex");
+        assert!(
+            output.pattern_note.is_empty(),
+            "nothing to report when the backend accepted the pattern"
+        );
+        let _ = fs::remove_dir_all(&workspace_root);
     }
 
     #[test]
