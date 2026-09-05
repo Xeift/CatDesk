@@ -43,10 +43,6 @@ const INITIAL_TOKEN_STATS_LAYOUT_PLACEHOLDER: &str =
 const INITIAL_TOOL_NAME_PLACEHOLDER: &str = "__catdeskInitialToolNamePlaceholder__";
 const INITIAL_MASCOT_OUTLINE_PLACEHOLDER: &str = "__catdeskInitialMascotOutlinePlaceholder__";
 const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
-const CATDESK_INSTRUCTION_REQUIRED_MESSAGE: &str =
-    "Call catdesk_instruction successfully before using any other CatDesk tool.";
-const CATDESK_INSTRUCTION_REQUIRED_WIDGET_MESSAGE: &str = "ChatGPT didn’t call catdesk_instruction. CatDesk is asking it to call it now. You can ignore this message. It will retry automatically.";
-const CATDESK_INSTRUCTION_REQUIRED_CODE: &str = "CATDESK_INSTRUCTION_REQUIRED";
 
 // ── JSON-RPC types ──────────────────────────────────────────
 
@@ -121,35 +117,6 @@ struct AutoWidgetContext {
 
 // ── Handler ─────────────────────────────────────────────────
 
-#[cfg(test)]
-pub async fn handle_request(
-    req: &JsonRpcRequest,
-    workspace_root: &str,
-    mascot_seed: u64,
-    public_base_url: Option<&str>,
-    mode: Mode,
-    tool_mode: ToolMode,
-    set_catdesk_as_co_author: bool,
-    catdesk_instruction_called: bool,
-    command_jobs: &CommandJobManager,
-    devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
-) -> Option<JsonRpcResponse> {
-    handle_request_with_show_detail_mode(
-        req,
-        workspace_root,
-        mascot_seed,
-        public_base_url,
-        mode,
-        tool_mode,
-        set_catdesk_as_co_author,
-        catdesk_instruction_called,
-        command_jobs,
-        devtools,
-        current_show_detail_mode(),
-    )
-    .await
-}
-
 pub(crate) async fn handle_request_with_show_detail_mode(
     req: &JsonRpcRequest,
     workspace_root: &str,
@@ -158,13 +125,18 @@ pub(crate) async fn handle_request_with_show_detail_mode(
     mode: Mode,
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
-    catdesk_instruction_called: bool,
     command_jobs: &CommandJobManager,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
     show_detail_mode: ShowDetailMode,
 ) -> Option<JsonRpcResponse> {
     match req.method.as_str() {
-        "server/discover" => Some(handle_server_discover(req, show_detail_mode)),
+        "server/discover" => Some(handle_server_discover(
+            req,
+            workspace_root,
+            mode,
+            tool_mode,
+            show_detail_mode,
+        )),
         m if m.starts_with("notifications/") => None,
         "tools/list" => Some(
             handle_tools_list_with_show_detail_mode(
@@ -176,30 +148,20 @@ pub(crate) async fn handle_request_with_show_detail_mode(
             )
             .await,
         ),
-        "tools/call" => {
-            let tool_name = tool_name_from_request(req);
-            if tool_name != "catdesk_instruction" && !catdesk_instruction_called {
-                Some(catdesk_instruction_required_response_with_show_detail_mode(
-                    req,
-                    show_detail_mode,
-                ))
-            } else {
-                Some(
-                    handle_tools_call_with_show_detail_mode(
-                        req,
-                        workspace_root,
-                        mascot_seed,
-                        mode,
-                        tool_mode,
-                        set_catdesk_as_co_author,
-                        command_jobs,
-                        devtools,
-                        show_detail_mode,
-                    )
-                    .await,
-                )
-            }
-        }
+        "tools/call" => Some(
+            handle_tools_call_with_show_detail_mode(
+                req,
+                workspace_root,
+                mascot_seed,
+                mode,
+                tool_mode,
+                set_catdesk_as_co_author,
+                command_jobs,
+                devtools,
+                show_detail_mode,
+            )
+            .await,
+        ),
         "resources/list" => Some(handle_resources_list_with_show_detail_mode(
             req,
             public_base_url,
@@ -220,6 +182,29 @@ pub(crate) async fn handle_request_with_show_detail_mode(
     }
 }
 
+/// The connect-time copy of the guidance, which is why AGENTS.md belongs in it:
+/// anything left out here is something a conversation has to spend a tool call
+/// to get.
+///
+/// A workspace that cannot be resolved falls back to the part that does not
+/// depend on it and says so. Dropping it quietly would be worse than the call
+/// this field saves -- `catdesk_instruction` reports that failure, so a caller
+/// that never sees it would act on partial guidance with no reason to suspect
+/// it.
+fn discover_instructions(
+    workspace: std::io::Result<String>,
+    base: impl FnOnce() -> String,
+) -> String {
+    match workspace {
+        Ok(text) => text,
+        Err(error) => format!(
+            "{}\n\nWorkspace-specific instructions could not be resolved ({error}). \
+             Call catdesk_instruction to retry.",
+            base()
+        ),
+    }
+}
+
 fn server_capabilities(show_detail_mode: ShowDetailMode) -> Value {
     if show_detail_mode == ShowDetailMode::Disable {
         json!({
@@ -235,11 +220,19 @@ fn server_capabilities(show_detail_mode: ShowDetailMode) -> Value {
 
 fn handle_server_discover(
     req: &JsonRpcRequest,
+    workspace_root: &str,
+    mode: Mode,
+    tool_mode: ToolMode,
     show_detail_mode: ShowDetailMode,
 ) -> JsonRpcResponse {
+    let instructions = discover_instructions(
+        catdesk_instruction_text(workspace_root, mode, tool_mode),
+        || catdesk_instruction_base_text(mode, tool_mode),
+    );
     let mut result = json!({
         "supportedVersions": [MODERN_MCP_PROTOCOL_VERSION],
         "capabilities": server_capabilities(show_detail_mode),
+        "instructions": instructions,
     });
     decorate_modern_result("server/discover", &mut result);
     JsonRpcResponse::success(req.id.clone(), result)
@@ -539,6 +532,13 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
             properties.insert("searchBackend".to_string(), json!({ "type": "string" }));
             properties.insert("searchBackendNote".to_string(), json!({ "type": "string" }));
             properties.insert(
+                "searchPatternNote".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Present when the regex search failed and the pattern was searched as a literal instead. It quotes the failure, which is not always a rejected expression."
+                }),
+            );
+            properties.insert(
                 "matchCount".to_string(),
                 json!({ "type": "integer", "minimum": 0 }),
             );
@@ -692,6 +692,54 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
         _ => return None,
     }
 
+    // Any tool can change the workspace, so this is not part of the match.
+    properties.insert(
+        "changedFiles".to_string(),
+        json!({
+            "type": "array",
+            "description": format!(
+                "Changes this result reports, so they do not have to be read back with git. For a background command this is everything the job has changed so far, not only what arrived in this call. At most {} files, with changedFilesAtCap saying when that limit was reached, and absent entirely when the web widget is disabled, which turns change tracking off.",
+                crate::change_tracking::MAX_DIFF_FILES
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "status": { "type": "string" },
+                    "added": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": format!(
+                            "Lines added, counted over the first {} bytes of the file. A change past that point is detected but does not reach these counts.",
+                            crate::change_tracking::MAX_FILE_CAPTURE_BYTES
+                        )
+                    },
+                    "removed": { "type": "integer", "minimum": 0 },
+                    "diff": {
+                        "type": "string",
+                        "description": "Unified diff, empty when it did not fit the budget."
+                    }
+                },
+                "required": ["path", "status", "added", "removed", "diff"]
+            }
+        }),
+    );
+    properties.insert(
+        "changedFileDiffsOmitted".to_string(),
+        json!({
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many of the listed files had their diff left out for size. Read the file for the content. This does not count files missing from the list because it hit its cap; changedFilesAtCap says when that happened."
+        }),
+    );
+    properties.insert(
+        "changedFilesAtCap".to_string(),
+        json!({
+            "type": "boolean",
+            "description": "The list reached its limit, so more files may have changed than it names. Ask git when this is true."
+        }),
+    );
+
     Some(json!({
         "type": "object",
         "properties": properties,
@@ -723,7 +771,7 @@ fn catdesk_instruction_tool_descriptor() -> Value {
     json!({
         "name": "catdesk_instruction",
         "title": "Get usage instructions",
-        "description": "Read CatDesk operating guidance. You must call this tool successfully once after CatDesk starts before calling any other CatDesk tool.",
+        "description": "Re-read CatDesk operating guidance. The same text is already provided when the connection is established, so calling this is only useful to read it again, for example after AGENTS.md changes.",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -1154,6 +1202,9 @@ async fn handle_tools_call_with_show_detail_mode(
     };
 
     let tool_name = tool_name_from_request(req);
+    if has_turn_changes && let Some(result) = response.result.as_mut() {
+        attach_changed_files(result, &widget_context.turn_files);
+    }
     if let Some(result) = response.result.take() {
         if has_turn_changes {
             response.result = Some(enrich_tool_result_with_show_detail_mode(
@@ -1845,59 +1896,6 @@ fn tool_error_response(req: &JsonRpcRequest, text: String) -> JsonRpcResponse {
     tool_response(req, text, None, true)
 }
 
-fn catdesk_instruction_required_widget_payload(req: &JsonRpcRequest) -> Value {
-    let tool_name = tool_name_from_request(req);
-    let mut payload = base_widget_payload("tool_call", &tool_name, "failed", Some(&tool_name));
-    payload.insert("payloadKind".to_string(), json!("instruction_required"));
-    payload.insert(
-        "detail".to_string(),
-        json!(CATDESK_INSTRUCTION_REQUIRED_WIDGET_MESSAGE),
-    );
-    payload.insert("changedFiles".to_string(), json!([]));
-    payload.insert("hasChanges".to_string(), json!(false));
-    Value::Object(payload)
-}
-
-fn catdesk_instruction_required_response_with_show_detail_mode(
-    req: &JsonRpcRequest,
-    show_detail_mode: ShowDetailMode,
-) -> JsonRpcResponse {
-    let tool_name = tool_name_from_request(req);
-    let structured = json!({
-        "toolName": tool_name,
-        "message": CATDESK_INSTRUCTION_REQUIRED_MESSAGE,
-        "success": false,
-        "errorCode": CATDESK_INSTRUCTION_REQUIRED_CODE,
-    });
-    let mut response = tool_success_response_with_structured(
-        req,
-        CATDESK_INSTRUCTION_REQUIRED_MESSAGE.into(),
-        structured,
-    );
-    if show_detail_mode == ShowDetailMode::Disable {
-        return response;
-    }
-    if let Some(result) = response.result.as_mut() {
-        attach_widget_payload_meta(result, catdesk_instruction_required_widget_payload(req));
-    }
-    if let Some(result) = response.result.take() {
-        response.result = Some(enrich_tool_result_with_show_detail_mode(
-            req,
-            result,
-            None,
-            show_detail_mode,
-        ));
-    }
-    if let Some(result) = response.result.as_mut() {
-        if widget_payload_meta_mut(result).is_some() {
-            let turn_token_usage = estimate_turn_token_usage(req, &tool_name, result);
-            attach_turn_token_usage(result, &turn_token_usage);
-            attach_tool_call_count(result, 1);
-        }
-    }
-    response
-}
-
 fn read_only_blocked_response(req: &JsonRpcRequest, tool_name: &str) -> JsonRpcResponse {
     tool_error_response(
         req,
@@ -2080,6 +2078,17 @@ fn catdesk_instruction_text(
     mode: Mode,
     tool_mode: ToolMode,
 ) -> std::io::Result<String> {
+    let mut text = catdesk_instruction_base_text(mode, tool_mode);
+    if let Some(agents_text) = preferred_agents_text(workspace_root)? {
+        text.push_str("\n\nWorkspace-specific instructions from AGENTS.md:\n");
+        text.push_str(&agents_text);
+    }
+    Ok(text)
+}
+
+/// Everything in the guidance that does not depend on the workspace, so it can
+/// be handed over at connect time instead of costing a tool call to fetch.
+fn catdesk_instruction_base_text(mode: Mode, tool_mode: ToolMode) -> String {
     let mut lines: Vec<String> = r#"CatDesk usage instructions
 
 Prefer dedicated MCP tools whenever a dedicated tool can complete the task.
@@ -2138,12 +2147,7 @@ Always specify the branch explicitly when using `git push`."#
         );
     }
 
-    if let Some(agents_text) = preferred_agents_text(workspace_root)? {
-        lines.push("".to_string());
-        lines.push("Workspace-specific instructions from AGENTS.md:".to_string());
-        lines.push(agents_text);
-    }
-    Ok(lines.join("\n"))
+    lines.join("\n")
 }
 
 fn catdesk_instruction_structured(
@@ -2544,6 +2548,62 @@ fn file_entry_json(file: &FileChange) -> Value {
         "removed": file.removed,
         "diff": file.diff,
     })
+}
+
+/// Total diff text attached to a tool result for the model. Smaller than the
+/// widget's own cap because this rides along on every call that changes a file,
+/// and is sized to confirm an edit landed rather than to carry a rewrite.
+const MAX_MODEL_DIFF_BYTES: usize = 4_000;
+
+/// Puts the changes the widget already receives into the result the model reads.
+///
+/// The tool result otherwise says only how many operations applied, so the
+/// model has no way to see what its own edit did and spends a round trip
+/// asking git -- for something CatDesk had already computed and sent to the
+/// widget instead.
+///
+/// Counts go in for every file because they are small. A diff goes in whole or
+/// not at all -- half a diff reads like a complete one and would be worse than
+/// none -- and `changedFileDiffsOmitted` says how many were left out.
+fn attach_changed_files(result: &mut Value, files: &[FileChange]) {
+    let Some(structured) = result
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    let mut remaining = MAX_MODEL_DIFF_BYTES;
+    let mut omitted = 0_usize;
+    let entries = files
+        .iter()
+        .map(|file| {
+            let diff = if file.diff.len() <= remaining {
+                remaining -= file.diff.len();
+                file.diff.as_str()
+            } else {
+                omitted += 1;
+                ""
+            };
+            json!({
+                "path": file.path,
+                "status": file.status,
+                "added": file.added,
+                "removed": file.removed,
+                "diff": diff,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // Change tracking stops collecting at its own cap, and a list of exactly
+    // that many files is indistinguishable from a complete one. Saying which it
+    // was is the difference between the model trusting this and having to ask
+    // git anyway.
+    let at_cap = files.len() >= crate::change_tracking::MAX_DIFF_FILES;
+
+    structured.insert("changedFiles".to_string(), Value::Array(entries));
+    structured.insert("changedFileDiffsOmitted".to_string(), json!(omitted));
+    structured.insert("changedFilesAtCap".to_string(), json!(at_cap));
 }
 
 fn widget_state(is_error: bool, widget_context: Option<&AutoWidgetContext>) -> &'static str {
@@ -3511,6 +3571,7 @@ fn handle_search_text(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
                 "searchPath": output.path,
                 "searchBackend": output.backend,
                 "searchBackendNote": output.backend_note,
+                "searchPatternNote": output.pattern_note,
                 "matchCount": output.match_count,
                 "searchTruncated": output.truncated,
                 "searchLimit": output.limit,
@@ -3598,6 +3659,254 @@ fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discover_says_so_when_the_workspace_guidance_cannot_be_resolved() {
+        let failed = discover_instructions(Err(std::io::Error::other("config unreadable")), || {
+            "BASE".to_string()
+        });
+        assert!(
+            failed.starts_with("BASE"),
+            "the rest of the guidance still ships"
+        );
+        assert!(
+            failed.contains("could not be resolved (config unreadable)"),
+            "the failure the tool would have reported must not vanish, got {failed:?}"
+        );
+        assert!(
+            failed.contains("catdesk_instruction"),
+            "a caller that reads this needs to know what can retry it"
+        );
+
+        assert_eq!(
+            discover_instructions(Ok("FULL".to_string()), || panic!("base is not built")),
+            "FULL",
+            "the fallback must not be paid for when nothing failed"
+        );
+    }
+
+    #[test]
+    fn discover_carries_the_whole_guidance_including_the_workspace_part() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-discover-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("AGENTS.md"), "always use tabs\n").expect("AGENTS.md");
+        let root = workspace_root.to_string_lossy().into_owned();
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-discover")),
+            method: "server/discover".into(),
+            params: json!({}),
+        };
+        let response = handle_server_discover(
+            &req,
+            &root,
+            Mode::Computer,
+            ToolMode::MultiTools,
+            ShowDetailMode::Expanded,
+        );
+        let instructions = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("instructions"))
+            .and_then(Value::as_str)
+            .expect("discover carries instructions");
+
+        assert_eq!(
+            instructions,
+            catdesk_instruction_text(&root, Mode::Computer, ToolMode::MultiTools)
+                .expect("instruction text"),
+            "the connect-time copy must be everything the tool would return"
+        );
+        assert!(
+            instructions.contains("always use tabs"),
+            "AGENTS.md must reach the client without a tool call"
+        );
+        assert!(
+            instructions.contains("Name every file you need in one read call."),
+            "mode-dependent guidance must survive the split"
+        );
+        let _ = std::fs::remove_dir_all(&workspace_root);
+    }
+
+    #[test]
+    fn the_instruction_tool_still_appends_workspace_guidance() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-agents-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("AGENTS.md"), "always use tabs\n").expect("AGENTS.md");
+        let root = workspace_root.to_string_lossy().into_owned();
+
+        let full = catdesk_instruction_text(&root, Mode::Computer, ToolMode::MultiTools)
+            .expect("instruction text");
+        let base = catdesk_instruction_base_text(Mode::Computer, ToolMode::MultiTools);
+
+        let agents_text = preferred_agents_text(&root)
+            .expect("read AGENTS.md")
+            .expect("AGENTS.md is present");
+        // Before the split this was built by pushing an empty line, then the
+        // header, then the text onto a Vec joined with "\n". Asserting the
+        // exact result is the only way to catch that becoming "similar".
+        assert_eq!(
+            full,
+            format!("{base}\n\nWorkspace-specific instructions from AGENTS.md:\n{agents_text}"),
+            "the split must join the two halves exactly as the Vec did"
+        );
+        assert!(
+            full.contains("always use tabs"),
+            "the tool is how AGENTS.md is re-read after it changes"
+        );
+        let _ = std::fs::remove_dir_all(&workspace_root);
+    }
+
+    fn change(path: &str, diff: &str) -> FileChange {
+        FileChange {
+            path: path.to_string(),
+            status: "modified".to_string(),
+            added: 1,
+            removed: 1,
+            diff: diff.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_edit_carries_its_changes_through_the_whole_request_path() {
+        // The unit tests above call attach_changed_files directly, so deleting
+        // the call site would not break them. This goes through the dispatcher
+        // that makes the call.
+        let workspace_root = std::env::temp_dir().join(format!("catdesk-wired-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::write(workspace_root.join("notes.txt"), "alpha\nbeta\n").expect("write file");
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-edit")),
+            method: "tools/call".into(),
+            params: json!({
+                "name": "edit",
+                "arguments": {
+                    "path": "notes.txt",
+                    "edits": [{ "type": "replace", "old_string": "beta", "new_string": "BETA" }]
+                }
+            }),
+        };
+        let response = handle_request_with_show_detail_mode(
+            &req,
+            &workspace_root.to_string_lossy(),
+            1,
+            None,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+            ShowDetailMode::Expanded,
+        )
+        .await
+        .expect("edit is handled");
+
+        let structured = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("structuredContent"))
+            .expect("structured content");
+        assert_eq!(
+            structured["changedFiles"][0]["path"],
+            json!("notes.txt"),
+            "the model's copy of the result must name what changed"
+        );
+        assert!(
+            structured["changedFiles"][0]["diff"]
+                .as_str()
+                .is_some_and(|diff| diff.contains("BETA")),
+            "the diff is the part that saves the follow-up git call, got {:?}",
+            structured["changedFiles"][0]["diff"]
+        );
+        assert_eq!(structured["changedFilesAtCap"], json!(false));
+        assert_eq!(structured["changedFileDiffsOmitted"], json!(0));
+
+        let _ = std::fs::remove_dir_all(&workspace_root);
+    }
+
+    #[test]
+    fn changed_files_reach_the_model_not_only_the_widget() {
+        let mut result = json!({ "structuredContent": { "toolName": "edit" } });
+        attach_changed_files(&mut result, &[change("a.rs", "@@ -1 +1 @@\n-a\n+b\n")]);
+
+        let structured = &result["structuredContent"];
+        assert_eq!(structured["changedFiles"][0]["path"], json!("a.rs"));
+        assert_eq!(
+            structured["changedFiles"][0]["diff"],
+            json!("@@ -1 +1 @@\n-a\n+b\n"),
+            "a diff within budget is passed through unchanged"
+        );
+        assert_eq!(structured["changedFileDiffsOmitted"], json!(0));
+    }
+
+    #[test]
+    fn an_oversized_diff_is_dropped_whole_and_does_not_starve_the_others() {
+        let huge = "x".repeat(MAX_MODEL_DIFF_BYTES + 1);
+        let mut result = json!({ "structuredContent": { "toolName": "run_command" } });
+        // The big one is first on purpose: an individually oversized diff must
+        // not spend budget, or it would starve a later one that fits. The
+        // greedy allocation stays order-dependent when several diffs each fit
+        // but do not fit together; that is not what this pins.
+        attach_changed_files(
+            &mut result,
+            &[change("big.rs", &huge), change("small.rs", "@@\n+x\n")],
+        );
+
+        let files = &result["structuredContent"]["changedFiles"];
+        assert_eq!(
+            files[0]["diff"],
+            json!(""),
+            "an over-budget diff is dropped, never cut"
+        );
+        assert_eq!(
+            files[0]["added"],
+            json!(1),
+            "dropping the diff must not drop the counts with it"
+        );
+        assert_eq!(files[1]["diff"], json!("@@\n+x\n"));
+        assert_eq!(
+            result["structuredContent"]["changedFileDiffsOmitted"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn a_full_list_says_it_is_full_rather_than_reading_as_complete() {
+        let full: Vec<FileChange> = (0..crate::change_tracking::MAX_DIFF_FILES)
+            .map(|i| change(&format!("f{i}.rs"), "@@\n+x\n"))
+            .collect();
+        let mut result = json!({ "structuredContent": { "toolName": "run_command" } });
+        attach_changed_files(&mut result, &full);
+        assert_eq!(
+            result["structuredContent"]["changedFilesAtCap"],
+            json!(true),
+            "a list of exactly the cap is indistinguishable from a complete one"
+        );
+
+        let mut under = json!({ "structuredContent": { "toolName": "edit" } });
+        attach_changed_files(&mut under, &full[..full.len() - 1]);
+        assert_eq!(
+            under["structuredContent"]["changedFilesAtCap"],
+            json!(false),
+            "one short of the cap is complete and must not send the model to git"
+        );
+    }
+
+    #[test]
+    fn changed_files_are_skipped_when_there_is_no_structured_content() {
+        let mut result = json!({ "content": [] });
+        attach_changed_files(&mut result, &[change("a.rs", "@@\n+x\n")]);
+        assert_eq!(
+            result,
+            json!({ "content": [] }),
+            "nothing to attach them to"
+        );
+    }
     use uuid::Uuid;
 
     fn resources_list_request() -> JsonRpcRequest {
@@ -3679,7 +3988,8 @@ mod tests {
         };
 
         for mode in [ShowDetailMode::Expanded, ShowDetailMode::Collapsed] {
-            let response = handle_server_discover(&req, mode);
+            let response =
+                handle_server_discover(&req, ".", Mode::Computer, ToolMode::MultiTools, mode);
             let result = response.result.as_ref().expect("missing discover result");
             assert_eq!(
                 result
@@ -3705,7 +4015,13 @@ mod tests {
             );
         }
 
-        let disabled = handle_server_discover(&req, ShowDetailMode::Disable);
+        let disabled = handle_server_discover(
+            &req,
+            ".",
+            Mode::Computer,
+            ToolMode::MultiTools,
+            ShowDetailMode::Disable,
+        );
         let disabled_capabilities = disabled
             .result
             .as_ref()
@@ -4335,7 +4651,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_only_tools_list_exposes_required_catdesk_instruction() {
+    async fn browser_only_tools_list_still_exposes_catdesk_instruction() {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: Some(json!("req-tools-list")),
@@ -4360,160 +4676,23 @@ mod tests {
             instruction
                 .get("description")
                 .and_then(Value::as_str)
-                .is_some_and(|description| description.contains("must call this tool successfully"))
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_request_requires_instruction_before_other_tools() {
-        let workspace_root =
-            std::env::temp_dir().join(format!("catdesk-mcp-instruction-gate-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&workspace_root).expect("create workspace");
-        std::fs::write(workspace_root.join("notes.txt"), "hello\n").expect("write file");
-        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
-        let req = tool_call_request("read", json!({ "paths": ["notes.txt"] }));
-
-        let blocked = handle_request(
-            &req,
-            &workspace_root_str,
-            1,
-            None,
-            Mode::Both,
-            ToolMode::MultiTools,
-            false,
-            false,
-            &CommandJobManager::new(),
-            &None,
-        )
-        .await
-        .expect("blocked tool response");
-        assert_eq!(
-            blocked
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool),
-            None
-        );
-        let blocked_structured = blocked
-            .result
-            .as_ref()
-            .and_then(|result| result.get("structuredContent"))
-            .expect("missing blocked structured content");
-        assert_eq!(
-            blocked_structured.get("success").and_then(Value::as_bool),
-            Some(false)
-        );
-        assert_eq!(
-            blocked_structured.get("errorCode").and_then(Value::as_str),
-            Some(CATDESK_INSTRUCTION_REQUIRED_CODE)
-        );
-        assert_eq!(
-            blocked_structured.get("message").and_then(Value::as_str),
-            Some(CATDESK_INSTRUCTION_REQUIRED_MESSAGE)
-        );
-        assert!(result_text(&blocked).contains("Call catdesk_instruction successfully"));
-        let blocked_widget = blocked
-            .result
-            .as_ref()
-            .and_then(|result| result.get("_meta"))
-            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
-            .expect("missing instruction-required widget payload");
-        assert_eq!(
-            blocked_widget.get("payloadKind").and_then(Value::as_str),
-            Some("instruction_required")
-        );
-        assert_eq!(
-            blocked_widget.get("title").and_then(Value::as_str),
-            Some("read")
-        );
-        assert_eq!(
-            blocked_widget.get("state").and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            blocked_widget.get("toolName").and_then(Value::as_str),
-            Some("read")
-        );
-        assert_eq!(
-            blocked_widget.get("title").and_then(Value::as_str),
-            Some("read")
-        );
-        assert!(blocked_widget.get("call").is_none());
-        assert_eq!(
-            blocked_widget.get("detail").and_then(Value::as_str),
-            Some(CATDESK_INSTRUCTION_REQUIRED_WIDGET_MESSAGE)
-        );
-        assert_eq!(
-            blocked_widget.get("hasChanges").and_then(Value::as_bool),
-            Some(false)
-        );
-
-        let allowed = handle_request(
-            &req,
-            &workspace_root_str,
-            1,
-            None,
-            Mode::Both,
-            ToolMode::MultiTools,
-            false,
-            true,
-            &CommandJobManager::new(),
-            &None,
-        )
-        .await
-        .expect("allowed tool response");
-        assert_eq!(
-            allowed
-                .result
-                .as_ref()
-                .and_then(|result| result.get("isError"))
-                .and_then(Value::as_bool),
-            None
-        );
-        assert_eq!(result_text(&allowed), "hello\n");
-
-        let _ = std::fs::remove_dir_all(workspace_root);
-    }
-
-    #[test]
-    fn instruction_required_disable_skips_widget_payload() {
-        let req = tool_call_request("read", json!({ "paths": ["notes.txt"] }));
-        let response = catdesk_instruction_required_response_with_show_detail_mode(
-            &req,
-            ShowDetailMode::Disable,
-        );
-        let result = response.result.as_ref().expect("missing result");
-        let structured = result
-            .get("structuredContent")
-            .expect("missing structured content");
-
-        assert_eq!(
-            structured.get("errorCode").and_then(Value::as_str),
-            Some(CATDESK_INSTRUCTION_REQUIRED_CODE)
-        );
-        assert_eq!(
-            structured.get("success").and_then(Value::as_bool),
-            Some(false)
-        );
-        assert!(
-            result
-                .get("_meta")
-                .and_then(Value::as_object)
-                .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
-                .is_none(),
-            "Disable must not attach the instruction-required widget payload"
+                .is_some_and(|description| description
+                    .contains("already provided when the connection is established")),
+            "the description must not send the model to fetch what it already has"
         );
     }
 
     #[test]
-    fn instruction_required_widget_uses_dedicated_detail_renderer() {
+    fn the_widget_still_renders_instruction_required_results_it_can_no_longer_cause() {
+        // The gate that produced these is gone, but older conversations still
+        // hold results carrying the payload, and the widget draws from those.
         assert!(CATDESK_WIDGET_HTML.contains("payloadKind === \"instruction_required\""));
         assert!(CATDESK_WIDGET_HTML.contains("renderInstructionRequiredPanel(view)"));
         assert!(CATDESK_WIDGET_HTML.contains("esc(current.toolName)"));
         assert!(CATDESK_WIDGET_HTML.contains("instruction-required-message"));
         assert!(
-            CATDESK_WIDGET_HTML.contains("!isInstructionRequired && (view.call || view.detail)")
+            CATDESK_WIDGET_HTML.contains("!isInstructionRequired && (view.call || view.detail)"),
+            "the guards are what keep a legacy payload out of the wrong tool's panel"
         );
     }
 

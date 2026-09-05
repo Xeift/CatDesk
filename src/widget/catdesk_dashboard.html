@@ -3429,6 +3429,12 @@
           next.call = call;
           next.detail = detail;
 
+          // Nothing produces this any more: the gate that did was removed. It
+          // stays because the widget renders results already stored in older
+          // conversations, and the schema string did not change, so such a
+          // payload still arrives claiming to be valid. Without this branch it
+          // would fall through to the panel for whichever tool was blocked,
+          // find none of that tool's fields, and render as invalid.
           if (data.payloadKind === "instruction_required") {
             if (!next.detail) {
               return invalidPayload(
