@@ -34,10 +34,11 @@ use ratatui::{
 };
 use state::{
     AppState, FLOW_ANIM_CELLS, FlowAnimKind, FlowAnimSegment, FlowDirection, FlowLane,
-    GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, Mode, ServerUiEvent, SharedState, ShowDetailMode,
-    ToolMode, UiLanguage, UsageTotals, app_config_path, flow_anim_lit_count,
-    load_macos_terminal_profile, load_ngrok_authtoken, load_ngrok_domain,
-    save_macos_terminal_profile, save_ngrok_authtoken, save_ngrok_domain, user_home_dir,
+    GPT_5_6_AND_EARLIER_USAGE_BUCKET, LogEntry, MAX_INSTANCE_SLOT, MIN_INSTANCE_SLOT, Mode,
+    ServerUiEvent, SharedState, ShowDetailMode, ToolMode, UiLanguage, UsageTotals, app_config_path,
+    connector_display_name, flow_anim_lit_count, load_macos_terminal_profile, load_ngrok_authtoken,
+    load_ngrok_domain, process_instance_slot, save_macos_terminal_profile, save_ngrok_authtoken,
+    save_ngrok_domain, set_process_instance_slot, user_home_dir,
 };
 use std::collections::HashMap;
 use std::io::{Write, stdout};
@@ -1182,6 +1183,56 @@ fn macos_terminal_profile_enabled() -> std::io::Result<bool> {
     Ok(enabled)
 }
 
+fn parse_instance_slot_value(value: &str) -> Result<u8, String> {
+    value
+        .parse::<u8>()
+        .ok()
+        .filter(|slot| (MIN_INSTANCE_SLOT..=MAX_INSTANCE_SLOT).contains(slot))
+        .ok_or_else(|| {
+            format!(
+                "Invalid CatDesk instance `{value}`. Use {MIN_INSTANCE_SLOT} through {MAX_INSTANCE_SLOT}."
+            )
+        })
+}
+
+fn parse_instance_slot(args: &[String]) -> Result<Option<u8>, String> {
+    let mut instance_slot = None;
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        let parsed = if argument == "--instance" {
+            index += 1;
+            let value = args.get(index).ok_or_else(|| {
+                format!(
+                    "Missing value for --instance. Use --instance {MIN_INSTANCE_SLOT} through {MAX_INSTANCE_SLOT}."
+                )
+            })?;
+            parse_instance_slot_value(value)?
+        } else if let Some(value) = argument.strip_prefix("--instance=") {
+            parse_instance_slot_value(value)?
+        } else if argument.len() == 2
+            && argument.starts_with('-')
+            && argument.as_bytes()[1].is_ascii_digit()
+        {
+            parse_instance_slot_value(&argument[1..])?
+        } else {
+            return Err(format!(
+                "Unknown CatDesk argument `{argument}`. Use -1 through -9 or --instance 1 through 9."
+            ));
+        };
+
+        if instance_slot.replace(parsed).is_some() {
+            return Err("CatDesk instance was specified more than once".to_string());
+        }
+        index += 1;
+    }
+    Ok(instance_slot)
+}
+
+fn default_port_for_instance(instance_slot: Option<u8>) -> u16 {
+    3200 + u16::from(instance_slot.unwrap_or(0))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // rustls 0.23 refuses to pick a process-level CryptoProvider when more than
@@ -1193,6 +1244,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // An error means a provider was already installed, which is equally fine.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let cli_args = std::env::args().skip(1).collect::<Vec<_>>();
+    let instance_slot = parse_instance_slot(&cli_args).map_err(std::io::Error::other)?;
+    set_process_instance_slot(instance_slot).map_err(std::io::Error::other)?;
 
     let terminal_profile_enabled = macos_terminal_profile_enabled()?;
     match macos_terminal::maybe_relaunch_in_terminal_profile(terminal_profile_enabled) {
@@ -1215,7 +1270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(3200);
+        .unwrap_or_else(|| default_port_for_instance(instance_slot));
     let workspace_root = match std::env::var("WORKSPACE_ROOT") {
         Ok(path) => path,
         Err(_) => std::env::current_dir()?.to_string_lossy().into_owned(),
@@ -1567,7 +1622,10 @@ fn draw_chatgpt_connector_refresh_notice(
             format!("1. Open {CHATGPT_PLUGIN_SETTINGS_URL}"),
             normal,
         )),
-        Line::from(Span::styled("2. Find CatDesk and click it", normal)),
+        Line::from(Span::styled(
+            format!("2. Find {} and click it", connector_display_name()),
+            normal,
+        )),
         Line::from(Span::styled(
             "3. Click the ... button on upper right corner",
             normal,
@@ -1585,7 +1643,10 @@ fn draw_chatgpt_connector_refresh_notice(
             Span::styled("7. Fill in the form: ", normal),
             Span::styled("(URL reveals before copy)", muted),
         ]),
-        Line::from(Span::styled("   Name           │ CatDesk", muted)),
+        Line::from(Span::styled(
+            format!("   Name           │ {}", connector_display_name()),
+            muted,
+        )),
         {
             let mut spans = vec![
                 Span::styled("   MCP Server URL │ ", muted),
@@ -2446,10 +2507,10 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 mod tests {
     use super::state::{ToolMode, UiLanguage};
     use super::{
-        LogView, draw_chatgpt_connector_refresh_notice, draw_mode_select, draw_tui_header,
-        export_logs_to_dir, key_is_clipboard_paste, mask_mcp_path_in_log,
-        normalize_ngrok_authtoken_input, parse_terminal_profile_choice, text_input_key_is_cancel,
-        wrap_log_message,
+        LogView, default_port_for_instance, draw_chatgpt_connector_refresh_notice,
+        draw_mode_select, draw_tui_header, export_logs_to_dir, key_is_clipboard_paste,
+        mask_mcp_path_in_log, normalize_ngrok_authtoken_input, parse_instance_slot,
+        parse_terminal_profile_choice, text_input_key_is_cancel, wrap_log_message,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
@@ -2510,6 +2571,39 @@ mod tests {
         assert_eq!(parse_terminal_profile_choice("n"), Some(false));
         assert_eq!(parse_terminal_profile_choice(" No "), Some(false));
         assert_eq!(parse_terminal_profile_choice("maybe"), None);
+    }
+
+    #[test]
+    fn parses_numbered_instance_cli_forms() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(parse_instance_slot(&args(&[])).unwrap(), None);
+        assert_eq!(parse_instance_slot(&args(&["-1"])).unwrap(), Some(1));
+        assert_eq!(parse_instance_slot(&args(&["-9"])).unwrap(), Some(9));
+        assert_eq!(
+            parse_instance_slot(&args(&["--instance", "4"])).unwrap(),
+            Some(4)
+        );
+        assert_eq!(
+            parse_instance_slot(&args(&["--instance=7"])).unwrap(),
+            Some(7)
+        );
+        assert!(parse_instance_slot(&args(&["-0"])).is_err());
+        assert!(parse_instance_slot(&args(&["--instance", "10"])).is_err());
+        assert!(parse_instance_slot(&args(&["-1", "--instance=2"])).is_err());
+        assert!(parse_instance_slot(&args(&["--unknown"])).is_err());
+    }
+
+    #[test]
+    fn numbered_instances_get_distinct_default_ports() {
+        assert_eq!(default_port_for_instance(None), 3200);
+        assert_eq!(default_port_for_instance(Some(1)), 3201);
+        assert_eq!(default_port_for_instance(Some(9)), 3209);
     }
 
     #[test]
@@ -3788,9 +3882,13 @@ async fn ensure_selected_browser_remote_debugging(
         return Some(selected);
     };
 
+    let instance_suffix = process_instance_slot()
+        .map(|slot| format!("-instance-{slot}"))
+        .unwrap_or_default();
     let user_data_dir = format!(
-        "/tmp/catdesk-remote-debug-{}",
-        sanitize_for_filename(&selected.binary)
+        "/tmp/catdesk-remote-debug-{}{}",
+        sanitize_for_filename(&selected.binary),
+        instance_suffix
     );
     if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
         state.lock().await.log(
@@ -4346,7 +4444,7 @@ async fn run_tui(
                                         .or_else(|| {
                                             if line.contains("\u{2502}") {
                                                 if line.contains("Name") {
-                                                    Some("CatDesk".to_string())
+                                                    Some(connector_display_name())
                                                 } else if line.contains("Authentication") {
                                                     Some("None".to_string())
                                                 } else {
@@ -4853,7 +4951,7 @@ fn draw_ui(
                 Line::from(vec![
                     Span::styled("     Name          ", guide_detail_style),
                     Span::styled(" │ ", guide_separator_style),
-                    Span::styled("CatDesk", guide_copyable_style),
+                    Span::styled(connector_display_name(), guide_copyable_style),
                 ]),
                 {
                     let mut spans = vec![

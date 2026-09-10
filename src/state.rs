@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -67,6 +67,10 @@ impl FlowBootstrapProgress {
 
 const APP_CONFIG_DIR_NAME: &str = ".catdesk";
 const APP_CONFIG_FILE_NAME: &str = "config.toml";
+const APP_INSTANCES_DIR_NAME: &str = "instances";
+pub const MIN_INSTANCE_SLOT: u8 = 1;
+pub const MAX_INSTANCE_SLOT: u8 = 9;
+static PROCESS_INSTANCE_SLOT: OnceLock<Option<u8>> = OnceLock::new();
 pub const GPT_5_6_AND_EARLIER_USAGE_BUCKET: &str = "through-gpt-5.6";
 pub const CURRENT_USAGE_BUCKET: &str = GPT_5_6_AND_EARLIER_USAGE_BUCKET;
 /// Bump only when an existing ChatGPT connector must be removed and added again.
@@ -595,10 +599,50 @@ pub fn user_home_dir() -> std::io::Result<PathBuf> {
     ))
 }
 
+fn app_config_path_for_home(home: &Path, instance_slot: Option<u8>) -> PathBuf {
+    let root = home.join(APP_CONFIG_DIR_NAME);
+    match instance_slot {
+        Some(slot) => root
+            .join(APP_INSTANCES_DIR_NAME)
+            .join(slot.to_string())
+            .join(APP_CONFIG_FILE_NAME),
+        None => root.join(APP_CONFIG_FILE_NAME),
+    }
+}
+
+fn default_app_config_path() -> std::io::Result<PathBuf> {
+    Ok(app_config_path_for_home(&user_home_dir()?, None))
+}
+
+pub fn set_process_instance_slot(instance_slot: Option<u8>) -> Result<(), String> {
+    if let Some(slot) = instance_slot
+        && !(MIN_INSTANCE_SLOT..=MAX_INSTANCE_SLOT).contains(&slot)
+    {
+        return Err(format!(
+            "CatDesk instance must be between {MIN_INSTANCE_SLOT} and {MAX_INSTANCE_SLOT}"
+        ));
+    }
+    PROCESS_INSTANCE_SLOT
+        .set(instance_slot)
+        .map_err(|_| "CatDesk instance slot was already initialized".to_string())
+}
+
+pub fn process_instance_slot() -> Option<u8> {
+    PROCESS_INSTANCE_SLOT.get().copied().flatten()
+}
+
+pub fn connector_display_name() -> String {
+    match process_instance_slot() {
+        Some(slot) => format!("CatDesk {slot}"),
+        None => "CatDesk".to_string(),
+    }
+}
+
 pub fn app_config_path() -> std::io::Result<PathBuf> {
-    Ok(user_home_dir()?
-        .join(APP_CONFIG_DIR_NAME)
-        .join(APP_CONFIG_FILE_NAME))
+    Ok(app_config_path_for_home(
+        &user_home_dir()?,
+        process_instance_slot(),
+    ))
 }
 
 pub fn load_app_config() -> std::io::Result<AppConfig> {
@@ -606,11 +650,11 @@ pub fn load_app_config() -> std::io::Result<AppConfig> {
 }
 
 pub fn load_ngrok_authtoken() -> std::io::Result<Option<String>> {
-    Ok(load_app_config()?.ngrok_authtoken)
+    Ok(AppConfig::load_from_path(&default_app_config_path()?)?.ngrok_authtoken)
 }
 
 pub fn save_ngrok_authtoken(token: &str) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
+    let path = default_app_config_path()?;
     let mut config = AppConfig::load_from_path(&path)?;
     config.ngrok_authtoken = Some(token.to_string());
     config.save_to_path(&path)?;
@@ -654,11 +698,11 @@ pub fn save_show_detail_mode(mode: ShowDetailMode) -> std::io::Result<PathBuf> {
 }
 
 pub fn load_macos_terminal_profile() -> std::io::Result<Option<bool>> {
-    Ok(load_app_config()?.macos_terminal_profile)
+    Ok(AppConfig::load_from_path(&default_app_config_path()?)?.macos_terminal_profile)
 }
 
 pub fn save_macos_terminal_profile(enabled: bool) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
+    let path = default_app_config_path()?;
     let mut config = AppConfig::load_from_path(&path)?;
     config.macos_terminal_profile = Some(enabled);
     config.save_to_path(&path)?;
@@ -1282,6 +1326,23 @@ mod tests {
     use super::*;
 
     const LEGACY_CONFIG_FIXTURE: &str = include_str!("../tests/fixtures/legacy_config.toml");
+
+    #[test]
+    fn numbered_instance_config_paths_are_isolated_from_default_config() {
+        let home = Path::new("/tmp/catdesk-instance-home");
+        assert_eq!(
+            app_config_path_for_home(home, None),
+            home.join(".catdesk/config.toml")
+        );
+        assert_eq!(
+            app_config_path_for_home(home, Some(1)),
+            home.join(".catdesk/instances/1/config.toml")
+        );
+        assert_eq!(
+            app_config_path_for_home(home, Some(9)),
+            home.join(".catdesk/instances/9/config.toml")
+        );
+    }
 
     fn test_app(name: &str) -> (AppState, PathBuf, PathBuf) {
         let unique = SystemTime::now()

@@ -177,6 +177,28 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
+# 多個 CatDesk instance
+
+CatDesk 可以同時執行多個彼此隔離的編號 instance。這適合需要讓同一個 ChatGPT 對話操作多個專案，但又不想讓單一 CatDesk process 擁有過大 workspace 範圍的情境。
+
+例如：
+
+```bash
+cd ~/ProjectA
+catdesk -1
+
+cd ~/ProjectB
+catdesk -2
+```
+
+`catdesk -1` 到 `catdesk -9` 是 `catdesk --instance 1` 到 `catdesk --instance 9` 的快捷寫法，也支援 `--instance=N`。
+
+每個編號 instance 都會綁定啟動時所在的目錄（或 `WORKSPACE_ROOT`）作為自己的 workspace，並預設使用不同的本機 port：instance 1 使用 `3201`、instance 2 使用 `3202`，依此類推直到 `3209`。`PORT` 仍然可以覆寫預設值。檔案與指令工具會繼續使用 CatDesk 原本的 workspace path guard，因此從 `~/ProjectA` 啟動的 instance 無法透過這些工具越界存取 `~/ProjectB`。
+
+編號 instance 也會使用獨立設定檔 `~/.catdesk/instances/<n>/config.toml`，因此 MCP slug、ngrok static domain、connector revision 與其他 instance 設定彼此獨立。ngrok authtoken 與 macOS Terminal profile 偏好仍保留在主要的 `~/.catdesk/config.toml`，作為整台電腦共用設定，不需要每個 instance 重新輸入。
+
+這個初步實作中，每個編號 instance 仍會建立自己的 ngrok tunnel，因此需要各自的 static domain 與 ChatGPT connector。建議將 connector 命名為 `CatDesk 1`、`CatDesk 2` 等。`catdesk_instruction` 會回報目前的 instance 編號與綁定 workspace，讓 ChatGPT 選擇與目標專案相符的 connector。沒有指定 instance、直接執行 `catdesk` 時，則完全保留既有的 `3200` port 與 `~/.catdesk/config.toml` 行為。
+
 # 技術棧
 
 | 部分 | 技術 |

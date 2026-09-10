@@ -177,6 +177,28 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
+# Multiple CatDesk instances
+
+CatDesk can run several isolated numbered instances at the same time. This is useful when one ChatGPT conversation needs access to multiple projects without giving a single CatDesk process a workspace that is broader than necessary.
+
+For example:
+
+```bash
+cd ~/ProjectA
+catdesk -1
+
+cd ~/ProjectB
+catdesk -2
+```
+
+`catdesk -1` through `catdesk -9` are shorthand for `catdesk --instance 1` through `catdesk --instance 9`. `--instance=N` is also supported.
+
+Each numbered instance keeps the workspace from the directory where it was launched (or `WORKSPACE_ROOT`) and uses a separate local port by default: instance 1 uses `3201`, instance 2 uses `3202`, and so on through `3209`. `PORT` still overrides the default. File and command tools keep CatDesk's existing workspace path guards, so an instance launched for `~/ProjectA` cannot use those tools to reach `~/ProjectB`.
+
+Numbered instances also use separate configuration files under `~/.catdesk/instances/<n>/config.toml`, which keeps their MCP slug, ngrok static domain, connector revision, and other instance settings independent. The ngrok authtoken and macOS Terminal profile preference remain machine-wide in the main `~/.catdesk/config.toml` so they do not need to be configured repeatedly.
+
+For this initial implementation, each numbered instance still opens its own ngrok tunnel and therefore needs its own static domain and ChatGPT connector. Name the connectors `CatDesk 1`, `CatDesk 2`, etc. `catdesk_instruction` reports the instance number and bound workspace so ChatGPT can choose the connector that matches the requested project. Running plain `catdesk` without an instance number preserves the existing port `3200` and `~/.catdesk/config.toml` behavior.
+
 # Stack
 
 | Part | Stack |
