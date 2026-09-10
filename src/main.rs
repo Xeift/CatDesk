@@ -2827,11 +2827,12 @@ async fn run_settings(
     let tool_modes = ToolMode::all();
     let show_detail_modes = ShowDetailMode::all();
     let mut confirm_reset_token_billing = false;
+    let mut confirm_disable_sandbox = false;
     let mut selected_row = {
         let app = state.lock().await;
         themes.iter().position(|t| t.id == app.theme).unwrap_or(0)
     };
-    let total_rows = themes.len() + tool_modes.len() + show_detail_modes.len() + 1 + 3;
+    let total_rows = themes.len() + tool_modes.len() + show_detail_modes.len() + 1 + 1 + 3;
 
     loop {
         let (
@@ -2840,6 +2841,7 @@ async fn run_settings(
             current_show_detail_mode,
             usage_totals,
             set_catdesk_as_co_author,
+            sandbox_enabled,
             mcp_slug,
             ngrok_domain,
         ) = {
@@ -2850,6 +2852,7 @@ async fn run_settings(
                 app.show_detail_mode,
                 app.all_time_usage_totals(),
                 app.set_catdesk_as_co_author,
+                app.sandbox_enabled,
                 app.mcp_slug.clone(),
                 app.ngrok_domain.clone(),
             )
@@ -2861,11 +2864,13 @@ async fn run_settings(
                 current_tool_mode,
                 current_show_detail_mode,
                 set_catdesk_as_co_author,
+                sandbox_enabled,
                 &mcp_slug,
                 ngrok_domain.as_deref(),
                 &usage_totals,
                 selected_row,
                 confirm_reset_token_billing,
+                confirm_disable_sandbox,
             )
         })?;
 
@@ -2878,10 +2883,12 @@ async fn run_settings(
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Up => {
                         confirm_reset_token_billing = false;
+                        confirm_disable_sandbox = false;
                         selected_row = selected_row.saturating_sub(1);
                     }
                     KeyCode::Down => {
                         confirm_reset_token_billing = false;
+                        confirm_disable_sandbox = false;
                         if selected_row + 1 < total_rows {
                             selected_row += 1;
                         }
@@ -2920,6 +2927,22 @@ async fn run_settings(
                                     app.persist_state_with_log();
                                 }
                             } else if selected_row == detail_mode_end {
+                                if app.sandbox_enabled && !confirm_disable_sandbox {
+                                    confirm_disable_sandbox = true;
+                                    continue;
+                                }
+                                app.sandbox_enabled = !app.sandbox_enabled;
+                                let enabled = app.sandbox_enabled;
+                                app.log(
+                                    "INFO",
+                                    format!(
+                                        "Command sandbox: {}",
+                                        if enabled { "enabled" } else { "disabled" }
+                                    ),
+                                );
+                                app.persist_state_with_log();
+                                confirm_disable_sandbox = false;
+                            } else if selected_row == detail_mode_end + 1 {
                                 app.set_catdesk_as_co_author = !app.set_catdesk_as_co_author;
                                 let enabled = app.set_catdesk_as_co_author;
                                 app.log(
@@ -2930,13 +2953,13 @@ async fn run_settings(
                                     ),
                                 );
                                 app.persist_state_with_log();
-                            } else if selected_row == detail_mode_end + 1 {
-                                // Keep existing slug, do nothing
                             } else if selected_row == detail_mode_end + 2 {
+                                // Keep existing slug, do nothing
+                            } else if selected_row == detail_mode_end + 3 {
                                 app.regenerate_mcp_slug();
                                 app.log("INFO", "Generated new random MCP slug".into());
                                 app.persist_state_with_log();
-                            } else if selected_row == detail_mode_end + 3 {
+                            } else if selected_row == detail_mode_end + 4 {
                                 let current_domain = app.ngrok_domain.clone().unwrap_or_default();
                                 drop(app);
                                 if let Some(new_domain) = run_prompt(terminal, "Enter ngrok static domain (with/without https://, empty to clear):", &current_domain).await? {
@@ -2956,6 +2979,7 @@ async fn run_settings(
                         }
                     }
                     KeyCode::Char('r') => {
+                        confirm_disable_sandbox = false;
                         if !confirm_reset_token_billing {
                             confirm_reset_token_billing = true;
                             continue;
@@ -2968,6 +2992,7 @@ async fn run_settings(
                     }
                     _ => {
                         confirm_reset_token_billing = false;
+                        confirm_disable_sandbox = false;
                     }
                 }
             }
@@ -2981,11 +3006,13 @@ fn draw_settings(
     current_tool_mode: ToolMode,
     current_show_detail_mode: ShowDetailMode,
     set_catdesk_as_co_author: bool,
+    sandbox_enabled: bool,
     mcp_slug: &str,
     ngrok_domain: Option<&str>,
     usage_totals: &UsageTotals,
     selected_row: usize,
     confirm_reset_token_billing: bool,
+    confirm_disable_sandbox: bool,
 ) {
     let themes = theme::all();
     let tool_modes = ToolMode::all();
@@ -3127,7 +3154,63 @@ fn draw_settings(
         )]));
     }
 
-    let co_author_row = themes.len() + tool_modes.len() + show_detail_modes.len();
+    let sandbox_row = themes.len() + tool_modes.len() + show_detail_modes.len();
+    let sandbox_selected = sandbox_row == selected_row;
+    let sandbox_marker = if sandbox_selected { ">" } else { " " };
+    let sandbox_name_style = if sandbox_selected {
+        Style::default()
+            .fg(palette.key_fg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.primary_fg)
+    };
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "  Command sandbox",
+        Style::default()
+            .fg(palette.title_fg)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    if sandbox_selected {
+        selected_line_idx = lines.len();
+    }
+    lines.push(Line::from(vec![Span::styled(
+        format!(
+            " {} [{}] Sandbox run_command and start_command",
+            sandbox_marker,
+            sandbox_row + 1
+        ),
+        sandbox_name_style,
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("     ", Style::default()),
+        Span::styled(
+            if sandbox_enabled {
+                "[enabled]"
+            } else {
+                "[disabled]"
+            },
+            Style::default().fg(if sandbox_enabled {
+                palette.success_fg
+            } else {
+                palette.danger_fg
+            }),
+        ),
+    ]));
+    lines.push(Line::from(vec![Span::styled(
+        if confirm_disable_sandbox {
+            "     Warning: disabling runs Linux commands directly through /bin/bash. Press Enter again to confirm."
+        } else {
+            "     On Linux, enabled uses bubblewrap; disabled runs directly through /bin/bash."
+        },
+        Style::default().fg(if confirm_disable_sandbox {
+            palette.danger_fg
+        } else {
+            palette.muted_fg
+        }),
+    )]));
+
+    let co_author_row = sandbox_row + 1;
     let co_author_selected = co_author_row == selected_row;
     let co_author_marker = if co_author_selected { ">" } else { " " };
     let co_author_name_style = if co_author_selected {

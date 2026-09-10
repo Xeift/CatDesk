@@ -180,12 +180,14 @@ pub async fn run_command(
     command: &str,
     workspace_root: &Path,
     cwd: &Path,
+    sandbox_enabled: bool,
     timeout_ms: u64,
 ) -> CommandResult {
     let result = crate::process_runner::run_shell_command(
         command,
         workspace_root,
         cwd,
+        sandbox_enabled,
         timeout_ms,
         MAX_BUFFER_BYTES,
     )
@@ -999,7 +1001,7 @@ mod tests {
             "basename \"$PWD\""
         };
 
-        let result = run_command(command, &workspace_root, &workspace_root, 10_000).await;
+        let result = run_command(command, &workspace_root, &workspace_root, false, 10_000).await;
 
         assert!(result.success, "stderr: {}", result.stderr);
         assert_eq!(result.stdout.trim(), leaf);

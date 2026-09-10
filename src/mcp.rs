@@ -143,6 +143,7 @@ pub async fn handle_request(
         mode,
         tool_mode,
         set_catdesk_as_co_author,
+        false,
         catdesk_instruction_called,
         command_jobs,
         devtools,
@@ -159,6 +160,7 @@ pub(crate) async fn handle_request_with_show_detail_mode(
     mode: Mode,
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
+    sandbox_enabled: bool,
     catdesk_instruction_called: bool,
     command_jobs: &CommandJobManager,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
@@ -193,6 +195,7 @@ pub(crate) async fn handle_request_with_show_detail_mode(
                         mode,
                         tool_mode,
                         set_catdesk_as_co_author,
+                        sandbox_enabled,
                         command_jobs,
                         devtools,
                         show_detail_mode,
@@ -1084,6 +1087,7 @@ async fn handle_tools_call(
         mode,
         tool_mode,
         set_catdesk_as_co_author,
+        false,
         command_jobs,
         devtools,
         current_show_detail_mode(),
@@ -1098,6 +1102,7 @@ async fn handle_tools_call_with_show_detail_mode(
     mode: Mode,
     tool_mode: ToolMode,
     set_catdesk_as_co_author: bool,
+    sandbox_enabled: bool,
     command_jobs: &CommandJobManager,
     devtools: &Option<Arc<Mutex<DevtoolsBridge>>>,
     show_detail_mode: ShowDetailMode,
@@ -1135,13 +1140,20 @@ async fn handle_tools_call_with_show_detail_mode(
                 if tool_mode.run_command_enabled() {
                     match tool_name.as_str() {
                         "run_command" => {
-                            handle_run_command(req, workspace_root, set_catdesk_as_co_author).await
+                            handle_run_command(
+                                req,
+                                workspace_root,
+                                set_catdesk_as_co_author,
+                                sandbox_enabled,
+                            )
+                            .await
                         }
                         "start_command" => {
                             handle_start_command(
                                 req,
                                 workspace_root,
                                 set_catdesk_as_co_author,
+                                sandbox_enabled,
                                 command_jobs,
                                 show_detail_mode,
                             )
@@ -1385,6 +1397,7 @@ async fn handle_start_command(
     req: &JsonRpcRequest,
     workspace_root: &str,
     set_catdesk_as_co_author: bool,
+    sandbox_enabled: bool,
     command_jobs: &CommandJobManager,
     show_detail_mode: ShowDetailMode,
 ) -> JsonRpcResponse {
@@ -1440,6 +1453,7 @@ async fn handle_start_command(
         let mut hasher = DefaultHasher::new();
         effective_command.hash(&mut hasher);
         cwd.hash(&mut hasher);
+        sandbox_enabled.hash(&mut hasher);
         timeout_ms.hash(&mut hasher);
         format!("start_command:{id}:{:016x}", hasher.finish())
     });
@@ -1454,6 +1468,7 @@ async fn handle_start_command(
             effective_command,
             Path::new(workspace_root).to_path_buf(),
             cwd,
+            sandbox_enabled,
             timeout_ms,
             request_key,
             change_session,
@@ -1552,6 +1567,7 @@ async fn handle_run_command(
     req: &JsonRpcRequest,
     workspace_root: &str,
     set_catdesk_as_co_author: bool,
+    sandbox_enabled: bool,
 ) -> JsonRpcResponse {
     let params = &req.params;
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -1651,6 +1667,7 @@ async fn handle_run_command(
         &effective_command,
         Path::new(workspace_root),
         &cwd,
+        sandbox_enabled,
         effective_timeout,
     )
     .await;
@@ -7231,6 +7248,7 @@ hello world"
             Mode::Both,
             ToolMode::MultiTools,
             false,
+            false,
             &command_jobs,
             &None,
             ShowDetailMode::Disable,
@@ -7258,6 +7276,7 @@ hello world"
                 1,
                 Mode::Both,
                 ToolMode::MultiTools,
+                false,
                 false,
                 &command_jobs,
                 &None,
