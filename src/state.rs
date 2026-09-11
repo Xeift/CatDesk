@@ -185,11 +185,33 @@ impl ShowDetailMode {
         }
     }
 
+    pub fn label_for(self, language: UiLanguage) -> &'static str {
+        match (self, language) {
+            (Self::Disable, UiLanguage::English) => "Disable",
+            (Self::Expanded, UiLanguage::English) => "Expanded",
+            (Self::Collapsed, UiLanguage::English) => "Collapsed",
+            (Self::Disable, UiLanguage::TraditionalChinese) => "停用",
+            (Self::Expanded, UiLanguage::TraditionalChinese) => "展開",
+            (Self::Collapsed, UiLanguage::TraditionalChinese) => "收合",
+        }
+    }
+
     pub fn description(self) -> &'static str {
         match self {
             Self::Disable => "Completely disable the web widget. Fastest and uses least memory.",
             Self::Expanded => "Show the full web widget with syntax-highlighted diffs.",
             Self::Collapsed => "Show the web widget but keep code changes collapsed by default.",
+        }
+    }
+
+    pub fn description_for(self, language: UiLanguage) -> &'static str {
+        if language == UiLanguage::English {
+            return self.description();
+        }
+        match self {
+            Self::Disable => "完全停用網頁 Widget，速度最快且最省記憶體。",
+            Self::Expanded => "顯示完整網頁 Widget 與語法高亮差異。",
+            Self::Collapsed => "顯示網頁 Widget，但預設收合程式碼變更。",
         }
     }
 
@@ -227,6 +249,14 @@ impl UiLanguage {
 
     pub fn is_traditional_chinese(self) -> bool {
         matches!(self, Self::TraditionalChinese)
+    }
+
+    pub fn text<'a>(self, english: &'a str, traditional_chinese: &'a str) -> &'a str {
+        if self.is_traditional_chinese() {
+            traditional_chinese
+        } else {
+            english
+        }
     }
 }
 
@@ -455,6 +485,18 @@ impl Mode {
             Mode::Both => "Both",
         }
     }
+
+    pub fn label_for(self, language: UiLanguage) -> &'static str {
+        match (self, language) {
+            (Mode::Computer, UiLanguage::English) => "Computer",
+            (Mode::Browser, UiLanguage::English) => "Browser",
+            (Mode::Both, UiLanguage::English) => "Both",
+            (Mode::Computer, UiLanguage::TraditionalChinese) => "電腦",
+            (Mode::Browser, UiLanguage::TraditionalChinese) => "瀏覽器",
+            (Mode::Both, UiLanguage::TraditionalChinese) => "兩者",
+        }
+    }
+
     pub fn computer_enabled(self) -> bool {
         matches!(self, Mode::Computer | Mode::Both)
     }
@@ -484,10 +526,29 @@ impl ToolMode {
         }
     }
 
+    pub fn label_for(self, language: UiLanguage) -> &'static str {
+        match (self, language) {
+            (ToolMode::MultiTools, UiLanguage::English) => "multi-tools",
+            (ToolMode::ReadOnly, UiLanguage::English) => "read-only",
+            (ToolMode::MultiTools, UiLanguage::TraditionalChinese) => "多工具",
+            (ToolMode::ReadOnly, UiLanguage::TraditionalChinese) => "唯讀",
+        }
+    }
+
     pub fn description(self) -> &'static str {
         match self {
             ToolMode::MultiTools => "Expose workspace read/write tools plus run_command.",
             ToolMode::ReadOnly => "Expose safe read-only workspace tools only.",
+        }
+    }
+
+    pub fn description_for(self, language: UiLanguage) -> &'static str {
+        if language == UiLanguage::English {
+            return self.description();
+        }
+        match self {
+            ToolMode::MultiTools => "提供工作區讀寫工具與 run_command。",
+            ToolMode::ReadOnly => "只提供安全的唯讀工作區工具。",
         }
     }
 

@@ -7,6 +7,8 @@ pub const THEME: ThemeDef = ThemeDef {
     id: "concise",
     label: "concise",
     description: "Black/gray/white minimal UI with low color usage.",
+    label_zh_tw: "簡潔",
+    description_zh_tw: "黑／灰／白的極簡介面，減少色彩使用。",
     palette: Palette {
         header_fg: Color::White,
         border_fg: Color::DarkGray,

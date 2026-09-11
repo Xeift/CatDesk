@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "catdesk"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -411,6 +411,7 @@ dependencies = [
  "toml",
  "tree-sitter",
  "tree-sitter-bash",
+ "unicode-width 0.2.0",
  "uuid",
  "vt100",
  "windows-sys 0.61.2",

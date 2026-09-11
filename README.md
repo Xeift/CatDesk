@@ -25,7 +25,7 @@ Codex has a very generous weekly quota (reset usage frequently) compared to Anti
 However, the quota runs out very quickly if you work on a large project.
 
 <p align="center">
-  <img src="docs/images/no_remaining_usage.png" alt="I used up my Codex quota on the first day after it reset" width="700"><br>
+  <img src="docs/images/no_remaining_usage.png" alt="We used up our Codex quota on the first day after it reset" width="700"><br>
   <em>We used up our Codex quota on the first day after it reset</em>
 </p>
 
@@ -57,7 +57,7 @@ ChatGPT Web + CatDesk
 = OpenClaw without cron and other active utilities
 ```
 
-We tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 Thinking is now really good at tool calling and computer use.** The first time we tried it with GPT-5.4, we were honestly surprised by how well it worked. GPT-5.5 and GPT-5.6 are even smoother, and GPT-5.6 is extremely good at using CatDesk. It's also very fast.
+We tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 Thinking is now really good at tool calling and computer use.** The first time we tried it with GPT-5.4, we were surprised by how well it worked. GPT-5.5 and GPT-5.6 are even smoother, and GPT-5.6 is extremely good at using CatDesk. It's also very fast.
 
 # Differences between ChatGPT Chat + CatDesk, Codex, and the API (let's say Plus plan)
 
@@ -84,11 +84,11 @@ If you don't want to use CatDesk, here are some similar projects you can try:
 | [codex-mcp](https://github.com/mollehxh/codex-mcp) | Small MCP server exposing a Codex-like workspace interface over stdio or HTTP. |
 
 > [!NOTE]
-> We do not own or maintain any of the projects listed above. We are not their maintainers. They are included here for informational purposes only.
+> We do not own or maintain any of the projects listed above. They are included here for informational purposes only.
 
 # Who needs this?
 
-- People who used up their Codex quota on the first few day after it reset (us🥺)
+- People who used up their Codex quota on the first few days after it reset (us🥺)
 - People who are working on web development and crawlers. (CatDesk enables ChatGPT Web to read elements and control your browser tab through chrome-devtools-mcp integration.)
 
 # Quickstart
@@ -110,7 +110,7 @@ If you don't want to use CatDesk, here are some similar projects you can try:
    catdesk
    ```
 
-   When CatDesk starts, choose `Control Computer`, `Control Browser`, or `Both`. Press `l` on the mode selection screen to switch between English and Traditional Chinese; the preference is saved in `~/.catdesk/config.toml`. If browser control is enabled, select a supported Chromium browser. On macOS, CatDesk detects standard browser app bundles in `/Applications` and `~/Applications` in addition to binaries available on `PATH`.
+   When CatDesk starts, choose `Control Computer`, `Control Browser`, or `Both`. Press `l` on the mode selection screen to switch between English and Traditional Chinese; the preference is saved in `~/.catdesk/config.toml`. Traditional Chinese is applied across the main dashboard, settings, browser selection, ngrok setup, and common runtime log messages shown in the TUI; exported logs keep their original text for debugging. If browser control is enabled, select a supported Chromium browser. On macOS, CatDesk detects standard browser app bundles in `/Applications` and `~/Applications` in addition to binaries available on `PATH`.
 
    On first launch, CatDesk will ask you to enter your **ngrok authtoken** and **ngrok static domain** (e.g. `my-app.ngrok-free.dev`). You can get both from the [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup). These are saved to `~/.catdesk/config.toml` and reused on subsequent launches.
 
@@ -141,7 +141,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 9. Start using the connector from ChatGPT Web. Some important tips:
 
-- We recommend letting ChatGPT decide which connector to use automatically. You can manually selecting the connector using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability. However, the downside is, `web.search` and `web.open` will be disabled. Which means it can't search latest info. The `web` tool and a custom connector cannot be used at the same time.
+- We recommend letting ChatGPT decide which connector to use automatically. You can manually select the connector using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability. However, the downside is that `web.search` and `web.open` will be disabled, which means it can't search for the latest information. The `web` tool and a custom connector cannot be used at the same time.
 
 <table align="center">
   <tr>
@@ -156,7 +156,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
-- To improve performance and avoid high memory usage, We strongly recommend **opening a new session for every small feature**. Before switching chats, ask ChatGPT to use `create_handoff`. CatDesk prepares a `catdesk_handoff_<workspace-name>_<short-id>.md` artifact containing the current goal, completed work, important decisions, validation, next steps, and Git context; ChatGPT then saves it to the persistent Library instead of writing the workspace. On the next session, `catdesk_instruction` tells ChatGPT to search Library using the full workspace identity prefix `catdesk_handoff_<workspace-name>_<short-id>`, not just the workspace name. With one exact workspace match it reads the handoff and deletes it only after a successful read; with multiple exact matches it asks which one to use first. **Library Search must be enabled** to recover handoffs. Do not put credentials, tokens, passwords, or other secrets in a handoff. CatDesk can become extremely laggy after 50+ tool calls.
+- To improve performance and avoid high memory usage, we strongly recommend **opening a new session for every small feature**. Before switching chats, ask ChatGPT to use `create_handoff`. CatDesk prepares a `catdesk_handoff_<workspace-name>_<short-id>.md` artifact containing the current goal, completed work, important decisions, validation, next steps, and Git context; ChatGPT then saves it to the persistent Library instead of writing the workspace. On the next session, `catdesk_instruction` tells ChatGPT to search Library using the full workspace identity prefix `catdesk_handoff_<workspace-name>_<short-id>`, not just the workspace name. With one exact workspace match it reads the handoff and deletes it only after a successful read; with multiple exact matches it asks which one to use first. **Library Search must be enabled** to recover handoffs. Do not put credentials, tokens, passwords, or other secrets in a handoff. CatDesk can become extremely laggy after 50+ tool calls.
 <p align="center">
   <img src="docs/images/high_ram_usage.png" alt="3.9 GB Memory usage🥹" width="300"><br>
   <em>3.9 GB Memory usage🥹</em>
@@ -231,7 +231,7 @@ According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and
 
 # FAQ
 
-### Can I turn off the red CSP button?
+## Can the red CSP button be turned off?
 
 <table align="center">
   <tr>
@@ -248,7 +248,7 @@ According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and
 
 Yes. Open [Advanced connector settings](https://chatgpt.com/#settings/Connectors/Advanced) and turn on `Enforce CSP in developer mode`. That setting removes the red button. CatDesk automatically adds the current ngrok domain to the widget CSP, so the widget should keep working with CSP enforcement enabled.
 
-### We've already connected. Why do we need to connect again and again?
+## Already connected. Why does it ask to connect again and again?
 
 There doesn't seem to be any obvious pattern for when the connector triggers `Connect`. We're sure it's not triggered by the tool call count, but we don't know the exact reason.
 
@@ -267,13 +267,13 @@ There doesn't seem to be any obvious pattern for when the connector triggers `Co
 
 Looks like it was a bug, and they fixed it 🥳.
 
-### Can CatDesk be used in other apps?
+## Can CatDesk be used in other apps?
 
 Yes, in theory. CatDesk may also work with other apps that support custom remote MCP servers, including Claude. (We don't think anyone will use CatDesk with Claude though, since Claude Chat mode and Claude Code share the same usage limits.)
 
-However, CatDesk is built specifically for ChatGPT Chat and its Custom Connector (They renamed it to _Apps_, and now they renamed it again and call it _Plugins_, but to prevent confusion with _Application_, we still prefer calling it _Connector_) flow. ChatGPT Chat is the environment CatDesk is designed and tested for, so other apps may not work as smoothly.
+However, CatDesk is built specifically for ChatGPT Chat and its Custom Connector (They renamed it to _Apps_, and now they renamed it again and call it _Plugins_, but to prevent confusion with _Application_, we still prefer to call it _Connector_) flow. ChatGPT Chat is the environment CatDesk is designed and tested for, so other apps may not work as smoothly.
 
-### How does the input/output token be calculated?
+## How does the input/output token be calculated?
 
 CatDesk does not get official token usage numbers from ChatGPT Web. It estimates them locally with `o200k_base`, the same tokenizer family used by GPT-5.5-style models, so the numbers are useful, but still only estimates.
 
@@ -291,7 +291,7 @@ CatDesk does not count:
 
 The loading animation is only a visual effect. ChatGPT Web does not stream partial MCP tool input/output into CatDesk, so the widget animates locally first and then locks to the estimated values when the real tool result arrives.
 
-### What is workspace?
+## What is workspace?
 
 Workspace is the root directory CatDesk is allowed to work in.
 
@@ -299,7 +299,7 @@ By default, it is the directory where you launch CatDesk. You can also override 
 
 File tools use this directory as their base path, and paths outside the workspace are rejected.
 
-### Where should we put our AGENTS.md?
+## Where should AGENTS.md go?
 
 You can put it in 3 places.
 
@@ -314,7 +314,7 @@ CatDesk checks these locations for `AGENTS.md` in this order. This happens every
   <em>Set AGENTS.md manually</em>
 </p>
 
-### What to do if the widget is blank?
+## What to do if the widget is blank?
 
 <p align="center">
   <img src="docs/images/blank_widget.png" alt="Empty widget/function call" width="500"><br>

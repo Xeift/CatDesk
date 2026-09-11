@@ -25,7 +25,7 @@
 但如果你在做大型專案，額度仍然會很快用完。
 
 <p align="center">
-  <img src="docs/images/no_remaining_usage.png" alt="I used up my Codex quota on the first day after it reset" width="700"><br>
+  <img src="docs/images/no_remaining_usage.png" alt="We used up our Codex quota on the first day after it reset" width="700"><br>
   <em>我們的 Codex 額度在重置後第一天就用完了</em>
 </p>
 
@@ -110,7 +110,7 @@ ChatGPT Web + CatDesk
    catdesk
    ```
 
-   CatDesk 啟動後，可以選擇 `Control Computer`、`Control Browser` 或 `Both`。在模式選擇畫面按 `l` 可以在 English 與繁體中文之間切換；語言偏好會儲存在 `~/.catdesk/config.toml`。如果啟用了瀏覽器控制，請選擇一個支援的 Chromium 瀏覽器。在 macOS 上，除了 `PATH` 中的 binary，CatDesk 也會偵測 `/Applications` 與 `~/Applications` 裡的標準瀏覽器 App bundle。
+   CatDesk 啟動後，可以選擇 `Control Computer`、`Control Browser` 或 `Both`。在模式選擇畫面按 `l` 可以在 English 與繁體中文之間切換；語言偏好會儲存在 `~/.catdesk/config.toml`。繁體中文會套用到主 Dashboard、設定、瀏覽器選擇、ngrok 設定，以及 TUI 顯示的常見 runtime log 訊息；為了方便除錯，匯出的 log 仍保留原始文字。如果啟用了瀏覽器控制，請選擇一個支援的 Chromium 瀏覽器。在 macOS 上，除了 `PATH` 中的 binary，CatDesk 也會偵測 `/Applications` 與 `~/Applications` 裡的標準瀏覽器 App bundle。
 
    第一次啟動時，CatDesk 會要求你輸入 **ngrok authtoken** 和 **ngrok static domain**（例如 `my-app.ngrok-free.dev`）。這兩項都可以從 [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup) 取得，並會儲存在 `~/.catdesk/config.toml`，之後啟動時自動重用。
 
@@ -248,7 +248,7 @@ CatDesk 有兩種本機工具模式：`multi-tools` 最多提供 12 個工具（
 
 可以。開啟 [Advanced connector settings](https://chatgpt.com/#settings/Connectors/Advanced)，然後啟用 `Enforce CSP in developer mode`。這個設定會移除紅色按鈕。CatDesk 會自動把目前的 ngrok domain 加進 widget CSP，因此開啟 CSP enforcement 後 widget 應該仍能正常運作。
 
-## 我們明明已經連過了，為什麼還一直叫我們重新 Connect？
+## 明明已經連過了，為什麼還一直要求重新 Connect？
 
 目前看不出 connector 什麼時候會觸發 `Connect` 有明顯規律。我們可以確定它不是依照 tool call 次數觸發，但具體原因我們也不知道。
 
