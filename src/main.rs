@@ -15,6 +15,7 @@ mod process_runner;
 mod server;
 mod startup;
 mod state;
+mod terminal_session;
 mod theme;
 mod workspace_tools;
 

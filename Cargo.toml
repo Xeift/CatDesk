@@ -31,6 +31,8 @@ regex = "1"
 globset = "0.4"
 ignore = "0.4"
 similar = "3.1"
+portable-pty = "0.9"
+vt100 = "0.15.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

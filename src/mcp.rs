@@ -29,9 +29,12 @@ pub(crate) const MODERN_MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
 const WIDGET_RESOURCE_REVISION: u32 = 3;
+const TERMINAL_UI_TEMPLATE_URI: &str = "ui://widget/catdesk-terminal.html";
+const TERMINAL_WIDGET_RESOURCE_REVISION: u32 = 1;
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
+const CATDESK_TERMINAL_WIDGET_HTML: &str = include_str!("widget/catdesk_terminal.html");
 const REENABLE_WIDGET_PNG: &[u8] = include_bytes!("widget/assets/reenable_widget.png");
 const REFRESH_CATDESK_PNG: &[u8] = include_bytes!("widget/assets/refresh_catdesk.png");
 const REMOVE_CATDESK_PNG: &[u8] = include_bytes!("widget/assets/remove_catdesk.png");
@@ -314,6 +317,7 @@ fn handle_resources_list_with_show_detail_mode(
 
     let ui_meta = widget_resource_ui_meta(public_base_url);
     let resource_uri = current_widget_resource_uri();
+    let terminal_resource_uri = current_terminal_widget_resource_uri();
     JsonRpcResponse::success(
         req.id.clone(),
         json!({
@@ -322,6 +326,13 @@ fn handle_resources_list_with_show_detail_mode(
                     "uri": resource_uri,
                     "name": "CatDesk dashboard widget",
                     "description": "Embedded ChatGPT widget for CatDesk status and timeline data.",
+                    "mimeType": UI_TEMPLATE_MIME_TYPE,
+                    "_meta": { "ui": ui_meta.clone() }
+                },
+                {
+                    "uri": terminal_resource_uri,
+                    "name": "CatDesk interactive terminal",
+                    "description": "Embedded interactive PTY terminal for the CatDesk workspace.",
                     "mimeType": UI_TEMPLATE_MIME_TYPE,
                     "_meta": { "ui": ui_meta }
                 }
@@ -335,8 +346,22 @@ fn current_widget_resource_uri() -> String {
     current_widget_resource_uri_for_tool("")
 }
 
-pub(crate) fn is_catdesk_widget_resource_uri(uri: &str) -> bool {
+fn is_dashboard_widget_resource_uri(uri: &str) -> bool {
     uri == UI_TEMPLATE_URI || uri.starts_with(&format!("{UI_TEMPLATE_URI}?"))
+}
+
+fn is_terminal_widget_resource_uri(uri: &str) -> bool {
+    uri == TERMINAL_UI_TEMPLATE_URI || uri.starts_with(&format!("{TERMINAL_UI_TEMPLATE_URI}?"))
+}
+
+pub(crate) fn is_catdesk_widget_resource_uri(uri: &str) -> bool {
+    is_dashboard_widget_resource_uri(uri) || is_terminal_widget_resource_uri(uri)
+}
+
+fn current_terminal_widget_resource_uri() -> String {
+    format!(
+        "{TERMINAL_UI_TEMPLATE_URI}?widgetRevision={TERMINAL_WIDGET_RESOURCE_REVISION}&toolName=open_terminal"
+    )
 }
 
 fn current_widget_resource_uri_for_tool(tool_name: &str) -> String {
@@ -430,7 +455,9 @@ fn handle_resources_read_with_show_detail_mode(
     if show_detail_mode == ShowDetailMode::Disable {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
     }
-    let text = if is_catdesk_widget_resource_uri(uri) {
+    let text = if is_terminal_widget_resource_uri(uri) {
+        CATDESK_TERMINAL_WIDGET_HTML.to_string()
+    } else if is_dashboard_widget_resource_uri(uri) {
         render_widget_html(uri, mascot_seed)
     } else {
         return JsonRpcResponse::error(req.id.clone(), -32602, format!("Unknown resource: {uri}"));
@@ -651,6 +678,9 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
                     }
                 }),
             );
+        }
+        "open_terminal" => {
+            properties.insert("workspace".to_string(), json!({ "type": "string" }));
         }
         "run_command" => {
             for field in [
@@ -909,6 +939,19 @@ async fn handle_tools_list_with_show_detail_mode(
                 },
                 "annotations": { "readOnlyHint": false, "openWorldHint": false, "destructiveHint": true }
             }));
+            if show_detail_mode != ShowDetailMode::Disable {
+                tools.push(json!({
+                    "name": "open_terminal",
+                    "title": "Open interactive terminal",
+                    "description": "Open a persistent interactive PTY terminal in a ChatGPT widget. The shell starts in the CatDesk workspace and remains active while the widget is open.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    },
+                    "annotations": { "readOnlyHint": false, "openWorldHint": true, "destructiveHint": true }
+                }));
+            }
         }
 
         tools.push(catdesk_instruction_tool_descriptor());
@@ -1128,7 +1171,29 @@ async fn handle_tools_call_with_show_detail_mode(
             )
         // Local computer tools
         } else if mode.computer_enabled() {
-            if matches!(
+            if tool_name == "open_terminal" {
+                if show_detail_mode == ShowDetailMode::Disable {
+                    tool_error_response(
+                        req,
+                        "Interactive terminal requires widgets to be enabled".into(),
+                    )
+                } else if tool_mode.run_command_enabled() {
+                    tool_success_response_with_structured(
+                        req,
+                        "Interactive terminal ready".into(),
+                        json!({
+                            "toolName": "open_terminal",
+                            "message": "Interactive terminal ready",
+                            "success": true,
+                            "workspace": workspace_root,
+                        }),
+                    )
+                } else if tool_mode.read_only() {
+                    read_only_blocked_response(req, &tool_name)
+                } else {
+                    tool_error_response(req, format!("Unknown tool: {tool_name}"))
+                }
+            } else if matches!(
                 tool_name.as_str(),
                 "run_command" | "start_command" | "poll_command" | "cancel_command"
             ) {
@@ -2480,6 +2545,7 @@ fn tool_descriptor_should_attach_widget(name: &str) -> bool {
             | "start_command"
             | "poll_command"
             | "cancel_command"
+            | "open_terminal"
             | "catdesk_instruction"
             | "search"
             | "read"
@@ -2508,7 +2574,11 @@ fn ensure_tool_descriptor_widget_template_with_show_detail_mode(
     if !tool_descriptor_should_attach_widget(&name) {
         return;
     }
-    let resource_uri = current_widget_resource_uri_for_tool(&name);
+    let resource_uri = if name == "open_terminal" {
+        current_terminal_widget_resource_uri()
+    } else {
+        current_widget_resource_uri_for_tool(&name)
+    };
     let meta_value = tool_obj
         .entry("_meta".to_string())
         .or_insert_with(|| json!({}));
@@ -3199,7 +3269,13 @@ fn enrich_tool_result_with_show_detail_mode(
         let meta_value = result_obj
             .entry("_meta".to_string())
             .or_insert_with(|| json!({}));
-        ensure_output_template_meta(meta_value);
+        let tool_name = tool_name_from_request(req);
+        if tool_name == "open_terminal" {
+            let resource_uri = current_terminal_widget_resource_uri();
+            ensure_output_template_meta_with_uri(meta_value, &resource_uri);
+        } else {
+            ensure_output_template_meta(meta_value);
+        }
     }
     if let Some(widget_payload) = widget_payload {
         attach_widget_payload_meta(&mut result, widget_payload);
@@ -3289,6 +3365,7 @@ fn is_local_destructive_tool(tool_name: &str) -> bool {
             | "start_command"
             | "poll_command"
             | "cancel_command"
+            | "open_terminal"
             | "write"
             | "edit"
             | "delete"
@@ -4425,6 +4502,7 @@ mod tests {
                 "start_command",
                 "poll_command",
                 "cancel_command",
+                "open_terminal",
                 "catdesk_instruction",
                 "read",
                 "search",
@@ -4542,7 +4620,41 @@ mod tests {
                 output_template.contains(&format!("toolName={name}")),
                 "output template should include initial tool name for {name}: {output_template}"
             );
+            if name == "open_terminal" {
+                assert!(output_template.starts_with(TERMINAL_UI_TEMPLATE_URI));
+            } else {
+                assert!(output_template.starts_with(UI_TEMPLATE_URI));
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn open_terminal_is_hidden_when_widgets_are_disabled() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!("req-tools-list-disabled")),
+            method: "tools/list".into(),
+            params: json!({}),
+        };
+        let response = handle_tools_list_with_show_detail_mode(
+            &req,
+            Mode::Both,
+            ToolMode::MultiTools,
+            &None,
+            ShowDetailMode::Disable,
+        )
+        .await;
+        let tools = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("tools"))
+            .and_then(Value::as_array)
+            .expect("missing tools");
+        assert!(
+            tools
+                .iter()
+                .all(|tool| { tool.get("name").and_then(Value::as_str) != Some("open_terminal") })
+        );
     }
 
     #[tokio::test]
@@ -6787,8 +6899,17 @@ hello world"
                     .and_then(|result| result.get("resources"))
                     .and_then(Value::as_array)
                     .map(Vec::len),
-                Some(1)
+                Some(2)
             );
+
+            let terminal_read_response = handle_resources_read_with_show_detail_mode(
+                &resources_read_request(TERMINAL_UI_TEMPLATE_URI),
+                Some("https://example.ngrok.app"),
+                1,
+                mode,
+            );
+            assert!(terminal_read_response.error.is_none());
+            assert!(terminal_read_response.result.is_some());
 
             let read_response = handle_resources_read_with_show_detail_mode(
                 &resources_read_request(UI_TEMPLATE_URI),
