@@ -11,11 +11,11 @@ An open-source tool that lets you use ChatGPT Chat as a local coding agent. No r
 
 # Disclaimer
 
-This is an independent open-source project and is not affiliated with or endorsed by OpenAI. I built it as a personal tool and decided to open-source it. Some features are still buggy and may cause unexpected behavior. Use it at your own risk. I am not responsible for any loss caused by this tool. It is strongly recommended to run it inside a VM or container.
+This is an independent open-source project and is not affiliated with or endorsed by OpenAI. We built it as a personal tool and decided to open-source it. Some features are still buggy and may cause unexpected behavior. Use it at your own risk. We are not responsible for any loss caused by this tool. It is strongly recommended to run it inside a VM or container.
 
 # Why CatDesk?
 
-Codex has a very generous weekly quota (reset usage frequently) compared to Antigravity (good at good morning) and Claude Code (RIP 5h quota 💀), that's why I love OpenAI so much.
+Codex has a very generous weekly quota (reset usage frequently) compared to Antigravity (good at good morning) and Claude Code (RIP 5h quota 💀), that's why we love OpenAI so much.
 
 <p align="center">
   <img src="docs/images/codex_2x_usage.png" alt="Codex reset usage frequently🙏" width="700"><br>
@@ -25,8 +25,8 @@ Codex has a very generous weekly quota (reset usage frequently) compared to Anti
 However, the quota runs out very quickly if you work on a large project.
 
 <p align="center">
-  <img src="docs/images/no_remaining_usage.png" alt="I used up my Codex quota on the first day after it reset" width="700"><br>
-  <em>I used up my Codex quota on the first day after it reset</em>
+  <img src="docs/images/no_remaining_usage.png" alt="We used up our Codex quota on the first day after it reset" width="700"><br>
+  <em>We used up our Codex quota on the first day after it reset</em>
 </p>
 
 Then you need to wait another 7 days. What are you going to do for the rest of the week?
@@ -39,7 +39,7 @@ That's the idea behind CatDesk! It gives ChatGPT Web tools like `write` and `run
 
 <p align="center">
   <img src="docs/images/thinking_usage_limits.png" alt="ChatGPT reasoning usage limits for GPT-5.5 and GPT-5.6" width="900"><br>
-  <em>GPT-5.5: <a href="https://web.archive.org/web/20260519111010/https://help.openai.com/en/articles/11909943-gpt-55-in-chatgpt">3,000 messages/week</a>, GPT-5.6: <a href="https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt">unknown</a> but I have never hit the limit</em>
+  <em>GPT-5.5: <a href="https://web.archive.org/web/20260519111010/https://help.openai.com/en/articles/11909943-gpt-55-in-chatgpt">3,000 messages/week</a>, GPT-5.6: <a href="https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt">unknown</a> but we have never hit the limit</em>
 </p>
 
 # How does this work?
@@ -57,7 +57,7 @@ ChatGPT Web + CatDesk
 = OpenClaw without cron and other active utilities
 ```
 
-I tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 Thinking is now really good at tool calling and computer use.** The first time I tried it with GPT-5.4, I was honestly surprised by how well it worked. GPT-5.5 and GPT-5.6 are even smoother, and GPT-5.6 is extremely good at using CatDesk. It's also very fast.
+We tried this with GPT-5.2 before, and the results were poor. However, **GPT-5.4 Thinking is now really good at tool calling and computer use.** The first time we tried it with GPT-5.4, we were surprised by how well it worked. GPT-5.5 and GPT-5.6 are even smoother, and GPT-5.6 is extremely good at using CatDesk. It's also very fast.
 
 # Differences between ChatGPT Chat + CatDesk, Codex, and the API (let's say Plus plan)
 
@@ -84,11 +84,11 @@ If you don't want to use CatDesk, here are some similar projects you can try:
 | [codex-mcp](https://github.com/mollehxh/codex-mcp) | Small MCP server exposing a Codex-like workspace interface over stdio or HTTP. |
 
 > [!NOTE]
-> I do not own or maintain any of the projects listed above. They are included here for informational purposes only.
+> We do not own or maintain any of the projects listed above. They are included here for informational purposes only.
 
 # Who needs this?
 
-- People who used up their Codex quota on the first few day after it reset (me🥺)
+- People who used up their Codex quota on the first few days after it reset (us🥺)
 - People who are working on web development and crawlers. (CatDesk enables ChatGPT Web to read elements and control your browser tab through chrome-devtools-mcp integration.)
 
 # Quickstart
@@ -110,7 +110,7 @@ If you don't want to use CatDesk, here are some similar projects you can try:
    catdesk
    ```
 
-   When CatDesk starts, choose `Control Computer`, `Control Browser`, or `Both`. Press `l` on the mode selection screen to switch between English and Traditional Chinese; the preference is saved in `~/.catdesk/config.toml`. If browser control is enabled, select a supported Chromium browser. On macOS, CatDesk detects standard browser app bundles in `/Applications` and `~/Applications` in addition to binaries available on `PATH`.
+   When CatDesk starts, choose `Control Computer`, `Control Browser`, or `Both`. Press `l` on the mode selection screen to switch between English and Traditional Chinese; the preference is saved in `~/.catdesk/config.toml`. Traditional Chinese is applied across the main dashboard, settings, browser selection, ngrok setup, and common runtime log messages shown in the TUI; exported logs keep their original text for debugging. If browser control is enabled, select a supported Chromium browser. On macOS, CatDesk detects standard browser app bundles in `/Applications` and `~/Applications` in addition to binaries available on `PATH`.
 
    On first launch, CatDesk will ask you to enter your **ngrok authtoken** and **ngrok static domain** (e.g. `my-app.ngrok-free.dev`). You can get both from the [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup). These are saved to `~/.catdesk/config.toml` and reused on subsequent launches.
 
@@ -131,7 +131,7 @@ If you don't want to use CatDesk, here are some similar projects you can try:
 
 7. Click `Create`, then click `Connect`.
 
-   - Permission defaults to **Allow read actions**. For the smoothest experience, I recommend **Allow all actions** (equivalent to Codex's `--yolo`; use with caution).
+   - Permission defaults to **Allow read actions**. For the smoothest experience, we recommend **Allow all actions** (equivalent to Codex's `--yolo`; use with caution).
 
 8. Add this to your ChatGPT `Custom instructions`:
 
@@ -141,7 +141,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 9. Start using the connector from ChatGPT Web. Some important tips:
 
-- I recommend let ChatGPT to decide which connector automatically. You can manually selecting the connector using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability. However, the downside is, `web.search` and `web.open` will be disabled. Which means it can't search latest info. The `web` tool and a custom connector cannot be used at the same time.
+- We recommend letting ChatGPT decide which connector to use automatically. You can manually select the connector using `/` or `@`. This way, ChatGPT can only access the connector you selected, which may improve stability. However, the downside is that `web.search` and `web.open` will be disabled, which means it can't search for the latest information. The `web` tool and a custom connector cannot be used at the same time.
 
 <table align="center">
   <tr>
@@ -156,7 +156,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
-- To improve performance and avoid high memory usage, I strongly recommend **opening a new session for every small feature**. Before switching chats, ask ChatGPT to use `create_handoff`. CatDesk prepares a `catdesk_handoff_<workspace-name>_<short-id>.md` artifact containing the current goal, completed work, important decisions, validation, next steps, and Git context; ChatGPT then saves it to the persistent Library instead of writing the workspace. On the next session, `catdesk_instruction` tells ChatGPT to search Library using the full workspace identity prefix `catdesk_handoff_<workspace-name>_<short-id>`, not just the workspace name. With one exact workspace match it reads the handoff and deletes it only after a successful read; with multiple exact matches it asks which one to use first. **Library Search must be enabled** to recover handoffs. Do not put credentials, tokens, passwords, or other secrets in a handoff. CatDesk can become extremely laggy after 50+ tool calls.
+- To improve performance and avoid high memory usage, we strongly recommend **opening a new session for every small feature**. Before switching chats, ask ChatGPT to use `create_handoff`. CatDesk prepares a `catdesk_handoff_<workspace-name>_<short-id>.md` artifact containing the current goal, completed work, important decisions, validation, next steps, and Git context; ChatGPT then saves it to the persistent Library instead of writing the workspace. On the next session, `catdesk_instruction` tells ChatGPT to search Library using the full workspace identity prefix `catdesk_handoff_<workspace-name>_<short-id>`, not just the workspace name. With one exact workspace match it reads the handoff and deletes it only after a successful read; with multiple exact matches it asks which one to use first. **Library Search must be enabled** to recover handoffs. Do not put credentials, tokens, passwords, or other secrets in a handoff. CatDesk can become extremely laggy after 50+ tool calls.
 <p align="center">
   <img src="docs/images/high_ram_usage.png" alt="3.9 GB Memory usage🥹" width="300"><br>
   <em>3.9 GB Memory usage🥹</em>
@@ -250,7 +250,7 @@ According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and
 
 # FAQ
 
-### Can I turn off the red CSP button?
+## Can the red CSP button be turned off?
 
 <table align="center">
   <tr>
@@ -267,9 +267,9 @@ According to [the blog](<https://help.openai.com/en/articles/11909943-gpt-53-and
 
 Yes. Open [Advanced connector settings](https://chatgpt.com/#settings/Connectors/Advanced) and turn on `Enforce CSP in developer mode`. That setting removes the red button. CatDesk automatically adds the current ngrok domain to the widget CSP, so the widget should keep working with CSP enforcement enabled.
 
-### I've already connected. Why do I need to connect again and again?
+## Already connected. Why does it ask to connect again and again?
 
-There doesn't seem to be any obvious pattern for when the connector triggers `Connect`. I'm sure it's not triggered by the tool call count, but I don't know the exact reason.
+There doesn't seem to be any obvious pattern for when the connector triggers `Connect`. We're sure it's not triggered by the tool call count, but we don't know the exact reason.
 
 <table align="center">
   <tr>
@@ -286,13 +286,13 @@ There doesn't seem to be any obvious pattern for when the connector triggers `Co
 
 Looks like it was a bug, and they fixed it 🥳.
 
-### Can CatDesk be used in other apps?
+## Can CatDesk be used in other apps?
 
-Yes, in theory. CatDesk may also work with other apps that support custom remote MCP servers, including Claude. (I don't think anyone will use CatDesk with Claude though, since Claude Chat mode and Claude Code share the same usage limits.)
+Yes, in theory. CatDesk may also work with other apps that support custom remote MCP servers, including Claude. (We don't think anyone will use CatDesk with Claude though, since Claude Chat mode and Claude Code share the same usage limits.)
 
-However, CatDesk is built specifically for ChatGPT Chat and its Custom Connector (They renamed it to _Apps_, and now they renamed it again and call it _Plugins_, but to prevent confusion with _Application_, I still prefer call it _Connector_) flow. ChatGPT Chat is the environment CatDesk is designed and tested for, so other apps may not work as smoothly.
+However, CatDesk is built specifically for ChatGPT Chat and its Custom Connector (They renamed it to _Apps_, and now they renamed it again and call it _Plugins_, but to prevent confusion with _Application_, we still prefer to call it _Connector_) flow. ChatGPT Chat is the environment CatDesk is designed and tested for, so other apps may not work as smoothly.
 
-### How does the input/output token be calculated?
+## How does the input/output token be calculated?
 
 CatDesk does not get official token usage numbers from ChatGPT Web. It estimates them locally with `o200k_base`, the same tokenizer family used by GPT-5.5-style models, so the numbers are useful, but still only estimates.
 
@@ -310,7 +310,7 @@ CatDesk does not count:
 
 The loading animation is only a visual effect. ChatGPT Web does not stream partial MCP tool input/output into CatDesk, so the widget animates locally first and then locks to the estimated values when the real tool result arrives.
 
-### What is workspace?
+## What is workspace?
 
 Workspace is the root directory CatDesk is allowed to work in.
 
@@ -318,7 +318,7 @@ By default, it is the directory where you launch CatDesk. You can also override 
 
 File tools use this directory as their base path, and paths outside the workspace are rejected.
 
-### Where to put my AGENTS.md?
+## Where should AGENTS.md go?
 
 You can put it in 3 places.
 
@@ -333,7 +333,7 @@ CatDesk checks these locations for `AGENTS.md` in this order. This happens every
   <em>Set AGENTS.md manually</em>
 </p>
 
-### What to do if the widget is blank?
+## What to do if the widget is blank?
 
 <p align="center">
   <img src="docs/images/blank_widget.png" alt="Empty widget/function call" width="500"><br>
@@ -343,7 +343,7 @@ CatDesk checks these locations for `AGENTS.md` in this order. This happens every
 1. Simply refresh the page and reconnect the connector.
 2. Stop the response and send the message again.
 
-This is a bug on ChatGPT's side. There is nothing I can do about it, and changing the code will not solve the issue. This bug was probably introduced on Apr 15th.
+This is a bug on ChatGPT's side. There is nothing we can do about it, and changing the code will not solve the issue. This bug was probably introduced on Apr 15th.
 
 # Safety
 
@@ -373,6 +373,6 @@ Both the static domain and the random path are persisted in `~/.catdesk/config.t
   <em>Binagotchy!</em>
 </p>
 
-The character is a cute shark-cat! I actually made this before CatDesk and decided to put it in the project.
+The character is a cute shark-cat! We actually made this before CatDesk and decided to put it in the project.
 
 By default, CatDesk will generate a random Binagotchy every time you start it. If you see a cute one, you can set it as your partner on the launch screen. The system will also automatically save every Binagotchy in `~/.catdesk/binagotchy`. You can download it too (or, to be accurate, export it)! Both `.png` and `.gif` are supported. Feel free to use it anywhere. This project and Binagotchy are both under the MIT License. By the way, Binagotchy is generated using pure scripts and does not use any text-to-image or diffusion model.

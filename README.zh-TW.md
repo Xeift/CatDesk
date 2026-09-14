@@ -11,11 +11,11 @@
 
 # 免責聲明
 
-這是一個獨立的開源專案，與 OpenAI 無關，也未獲得 OpenAI 背書。我一開始只是把它做成個人工具，後來決定開源。部分功能仍可能有 bug，並可能造成非預期行為。請自行承擔使用風險。我不對此工具造成的任何損失負責。強烈建議在 VM 或容器內執行。
+這是一個獨立的開源專案，與 OpenAI 無關，也未獲得 OpenAI 背書。我們一開始只是把它做成個人工具，後來決定開源。部分功能仍可能有 bug，並可能造成非預期行為。請自行承擔使用風險。我們不對此工具造成的任何損失負責。強烈建議在 VM 或容器內執行。
 
 # 為什麼要用 CatDesk？
 
-和 Antigravity（很會說早安）以及 Claude Code（RIP 5 小時額度 💀）相比，Codex 的每週額度非常大方（而且常常重置用量），這也是我這麼喜歡 OpenAI 的原因。
+和 Antigravity（很會說早安）以及 Claude Code（RIP 5 小時額度 💀）相比，Codex 的每週額度非常大方（而且常常重置用量），這也是我們這麼喜歡 OpenAI 的原因。
 
 <p align="center">
   <img src="docs/images/codex_2x_usage.png" alt="Codex reset usage frequently🙏" width="700"><br>
@@ -25,8 +25,8 @@
 但如果你在做大型專案，額度仍然會很快用完。
 
 <p align="center">
-  <img src="docs/images/no_remaining_usage.png" alt="I used up my Codex quota on the first day after it reset" width="700"><br>
-  <em>我的 Codex 額度在重置後第一天就用完了</em>
+  <img src="docs/images/no_remaining_usage.png" alt="We used up our Codex quota on the first day after it reset" width="700"><br>
+  <em>我們的 Codex 額度在重置後第一天就用完了</em>
 </p>
 
 然後你得再等 7 天。那剩下這一週要幹嘛？
@@ -39,7 +39,7 @@
 
 <p align="center">
   <img src="docs/images/thinking_usage_limits.png" alt="ChatGPT reasoning usage limits for GPT-5.5 and GPT-5.6" width="900"><br>
-  <em>GPT-5.5：<a href="https://web.archive.org/web/20260519111010/https://help.openai.com/en/articles/11909943-gpt-55-in-chatgpt">每週 3,000 則訊息</a>，GPT-5.6：<a href="https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt">未知</a>，但我從來沒有撞到上限</em>
+  <em>GPT-5.5：<a href="https://web.archive.org/web/20260519111010/https://help.openai.com/en/articles/11909943-gpt-55-in-chatgpt">每週 3,000 則訊息</a>，GPT-5.6：<a href="https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt">未知</a>，但我們從來沒有撞到上限</em>
 </p>
 
 # 原理是什麼？
@@ -57,7 +57,7 @@ ChatGPT Web + CatDesk
 = 沒有 cron 和其他主動工具的 OpenClaw
 ```
 
-我以前用 GPT-5.2 測過，效果很差。不過現在 **GPT-5.4 Thinking 在工具呼叫與電腦操作上已經非常強。** 我第一次用 GPT-5.4 測 CatDesk 時，真的被效果嚇到了。GPT-5.5 和 GPT-5.6 又更順，而 GPT-5.6 使用 CatDesk 的能力尤其強，而且速度也非常快。
+我們以前用 GPT-5.2 測過，效果很差。不過現在 **GPT-5.4 Thinking 在工具呼叫與電腦操作上已經非常強。** 我們第一次用 GPT-5.4 測 CatDesk 時，真的被效果嚇到了。GPT-5.5 和 GPT-5.6 又更順，而 GPT-5.6 使用 CatDesk 的能力尤其強，而且速度也非常快。
 
 # ChatGPT Chat + CatDesk、Codex 與 API 的差異（以 Plus 方案為例）
 
@@ -84,11 +84,11 @@ ChatGPT Web + CatDesk
 | [codex-mcp](https://github.com/mollehxh/codex-mcp) | 小型 MCP server，透過 stdio 或 HTTP 提供類 Codex workspace 介面。 |
 
 > [!NOTE]
-> 上述專案皆不屬於我，我也不是其維護者。列在這裡僅供參考。
+> 上述專案皆不屬於我們，我們也不是其維護者。列在這裡僅供參考。
 
 # 誰會需要這個？
 
-- Codex 額度重置沒幾天就用完的人（我🥺）
+- Codex 額度重置沒幾天就用完的人（我們🥺）
 - 做 Web 開發或爬蟲的人。（CatDesk 透過 chrome-devtools-mcp 整合，讓 ChatGPT Web 可以讀取網頁元素並控制瀏覽器分頁。）
 
 # 快速開始
@@ -110,7 +110,7 @@ ChatGPT Web + CatDesk
    catdesk
    ```
 
-   CatDesk 啟動後，可以選擇 `Control Computer`、`Control Browser` 或 `Both`。在模式選擇畫面按 `l` 可以在 English 與繁體中文之間切換；語言偏好會儲存在 `~/.catdesk/config.toml`。如果啟用了瀏覽器控制，請選擇一個支援的 Chromium 瀏覽器。在 macOS 上，除了 `PATH` 中的 binary，CatDesk 也會偵測 `/Applications` 與 `~/Applications` 裡的標準瀏覽器 App bundle。
+   CatDesk 啟動後，可以選擇 `Control Computer`、`Control Browser` 或 `Both`。在模式選擇畫面按 `l` 可以在 English 與繁體中文之間切換；語言偏好會儲存在 `~/.catdesk/config.toml`。繁體中文會套用到主 Dashboard、設定、瀏覽器選擇、ngrok 設定，以及 TUI 顯示的常見 runtime log 訊息；為了方便除錯，匯出的 log 仍保留原始文字。如果啟用了瀏覽器控制，請選擇一個支援的 Chromium 瀏覽器。在 macOS 上，除了 `PATH` 中的 binary，CatDesk 也會偵測 `/Applications` 與 `~/Applications` 裡的標準瀏覽器 App bundle。
 
    第一次啟動時，CatDesk 會要求你輸入 **ngrok authtoken** 和 **ngrok static domain**（例如 `my-app.ngrok-free.dev`）。這兩項都可以從 [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup) 取得，並會儲存在 `~/.catdesk/config.toml`，之後啟動時自動重用。
 
@@ -131,7 +131,7 @@ ChatGPT Web + CatDesk
 
 7. 點擊 `Create`，再點擊 `Connect`。
 
-   - 權限預設為 **Allow read actions**。如果想要最順暢的體驗，我建議使用 **Allow all actions**（等同 Codex 的 `--yolo`；請小心使用）。
+   - 權限預設為 **Allow read actions**。如果想要最順暢的體驗，我們建議使用 **Allow all actions**（等同 Codex 的 `--yolo`；請小心使用）。
 
 8. 把以下內容加入 ChatGPT 的 `Custom instructions`：
 
@@ -141,7 +141,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 9. 開始在 ChatGPT Web 中使用 connector。幾個重要提示：
 
-- 我建議讓 ChatGPT 自動決定要使用哪個 connector。你也可以用 `/` 或 `@` 手動選 CatDesk。這樣 ChatGPT 只能存取你手動指定的 connector，穩定性可能更好。缺點是 `web.search` 和 `web.open` 會被停用，也就是無法搜尋最新資訊。`web` 工具與 custom connector 不能同時使用。
+- 我們建議讓 ChatGPT 自動決定要使用哪個 connector。你也可以用 `/` 或 `@` 手動選 CatDesk。這樣 ChatGPT 只能存取你手動指定的 connector，穩定性可能更好。缺點是 `web.search` 和 `web.open` 會被停用，也就是無法搜尋最新資訊。`web` 工具與 custom connector 不能同時使用。
 
 <table align="center">
   <tr>
@@ -156,7 +156,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
-- 為了提升效能並避免記憶體使用量過高，我強烈建議**每個小功能都開一個新 session**。切換聊天前，可以請 ChatGPT 使用 `create_handoff`。CatDesk 會準備一份名為 `catdesk_handoff_<workspace-name>_<short-id>.md` 的 handoff，內容包含目前目標、已完成工作、重要決策、驗證結果、下一步以及 Git 狀態；接著由 ChatGPT 把它存進長期保存的 Library，而不是寫進 workspace。下一個 session 呼叫 `catdesk_instruction` 時，ChatGPT 會使用完整 workspace identity 前綴 `catdesk_handoff_<workspace-name>_<short-id>` 搜尋 Library，而不是只用 workspace 名稱。若只有一份完全符合目前 workspace 的 handoff，就讀取並在成功讀完後刪除；若有多份完全符合的結果，會先詢問要使用哪一份，再只讀取並刪除選中的 handoff。要恢復 handoff，必須啟用 **Library Search**。不要把憑證、token、密碼或其他秘密寫進 handoff。工具呼叫超過 50 次之後，畫面可能會開始非常卡。
+- 為了提升效能並避免記憶體使用量過高，我們強烈建議**每個小功能都開一個新 session**。切換聊天前，可以請 ChatGPT 使用 `create_handoff`。CatDesk 會準備一份名為 `catdesk_handoff_<workspace-name>_<short-id>.md` 的 handoff，內容包含目前目標、已完成工作、重要決策、驗證結果、下一步以及 Git 狀態；接著由 ChatGPT 把它存進長期保存的 Library，而不是寫進 workspace。下一個 session 呼叫 `catdesk_instruction` 時，ChatGPT 會使用完整 workspace identity 前綴 `catdesk_handoff_<workspace-name>_<short-id>` 搜尋 Library，而不是只用 workspace 名稱。若只有一份完全符合目前 workspace 的 handoff，就讀取並在成功讀完後刪除；若有多份完全符合的結果，會先詢問要使用哪一份，再只讀取並刪除選中的 handoff。要恢復 handoff，必須啟用 **Library Search**。不要把憑證、token、密碼或其他秘密寫進 handoff。工具呼叫超過 50 次之後，畫面可能會開始非常卡。
 <p align="center">
   <img src="docs/images/high_ram_usage.png" alt="3.9 GB Memory usage🥹" width="300"><br>
   <em>3.9 GB 記憶體用量🥹</em>
@@ -267,9 +267,9 @@ CatDesk 有兩種本機工具模式：`multi-tools` 提供 11 個工具，`read-
 
 可以。開啟 [Advanced connector settings](https://chatgpt.com/#settings/Connectors/Advanced)，然後啟用 `Enforce CSP in developer mode`。這個設定會移除紅色按鈕。CatDesk 會自動把目前的 ngrok domain 加進 widget CSP，因此開啟 CSP enforcement 後 widget 應該仍能正常運作。
 
-## 我明明已經連過了，為什麼還一直叫我重新 Connect？
+## 明明已經連過了，為什麼還一直要求重新 Connect？
 
-目前看不出 connector 什麼時候會觸發 `Connect` 有明顯規律。我可以確定它不是依照 tool call 次數觸發，但具體原因我也不知道。
+目前看不出 connector 什麼時候會觸發 `Connect` 有明顯規律。我們可以確定它不是依照 tool call 次數觸發，但具體原因我們也不知道。
 
 <table align="center">
   <tr>
@@ -288,9 +288,9 @@ CatDesk 有兩種本機工具模式：`multi-tools` 提供 11 個工具，`read-
 
 ## CatDesk 可以用在其他 App 嗎？
 
-理論上可以。CatDesk 也可能能和其他支援自訂遠端 MCP server 的 App 搭配，包括 Claude。（雖然我不覺得有人會拿 CatDesk 配 Claude，因為 Claude Chat 模式和 Claude Code 共用同一份使用額度。）
+理論上可以。CatDesk 也可能能和其他支援自訂遠端 MCP server 的 App 搭配，包括 Claude。（雖然我們不覺得有人會拿 CatDesk 配 Claude，因為 Claude Chat 模式和 Claude Code 共用同一份使用額度。）
 
-不過 CatDesk 是專門為 ChatGPT Chat 以及它的 Custom Connector 流程打造的。（它們先把這個功能改名為 _Apps_，後來又改名成 _Plugins_，但為了避免和 _Application_ 混淆，我還是比較喜歡叫它 _Connector_。）ChatGPT Chat 是 CatDesk 主要設計與測試的環境，因此其他 App 的體驗可能沒有這麼順。
+不過 CatDesk 是專門為 ChatGPT Chat 以及它的 Custom Connector 流程打造的。（它們先把這個功能改名為 _Apps_，後來又改名成 _Plugins_，但為了避免和 _Application_ 混淆，我們還是比較喜歡叫它 _Connector_。）ChatGPT Chat 是 CatDesk 主要設計與測試的環境，因此其他 App 的體驗可能沒有這麼順。
 
 ## Input/output token 是怎麼算的？
 
@@ -343,7 +343,7 @@ CatDesk 會按照上述順序尋找 `AGENTS.md`，每次呼叫 `catdesk_instruct
 1. 直接重新整理頁面並重新連接 connector。
 2. 停止回覆，再重新傳送訊息。
 
-這是 ChatGPT 端的 bug，我這邊沒有辦法修，改 CatDesk 程式碼也解決不了。這個 bug 可能是在 4 月 15 日左右出現的。
+這是 ChatGPT 端的 bug，我們這邊沒有辦法修，改 CatDesk 程式碼也解決不了。這個 bug 可能是在 4 月 15 日左右出現的。
 
 # 安全性
 
@@ -373,6 +373,6 @@ Static domain 和 random path 都會儲存在 `~/.catdesk/config.toml`，所以�
   <em>Binagotchy!</em>
 </p>
 
-這個角色是一隻可愛的鯊魚貓！其實我在做 CatDesk 之前就已經做了它，後來決定把它放進這個專案。
+這個角色是一隻可愛的鯊魚貓！其實我們在做 CatDesk 之前就已經做了它，後來決定把它放進這個專案。
 
 CatDesk 預設會在每次啟動時產生一隻隨機 Binagotchy。如果你看到喜歡的，可以在啟動畫面把它設成你的夥伴。系統也會把每一隻 Binagotchy 自動儲存到 `~/.catdesk/binagotchy`。你也可以下載它（更精確地說，是匯出）！支援 `.png` 和 `.gif`。歡迎拿去任何地方使用。這個專案與 Binagotchy 都採用 MIT License。順帶一提，Binagotchy 完全由腳本生成，沒有使用任何 text-to-image 或 diffusion model。

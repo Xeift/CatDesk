@@ -7,6 +7,8 @@ pub const THEME: ThemeDef = ThemeDef {
     id: "neon",
     label: "neon",
     description: "Cyberpunk pink accents with neon highlights.",
+    label_zh_tw: "霓虹",
+    description_zh_tw: "賽博龐克粉紅點綴與霓虹高亮。",
     palette: Palette {
         header_fg: Color::LightMagenta,
         border_fg: Color::Magenta,

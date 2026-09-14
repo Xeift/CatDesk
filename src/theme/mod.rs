@@ -29,7 +29,27 @@ pub struct ThemeDef {
     pub id: &'static str,
     pub label: &'static str,
     pub description: &'static str,
+    pub label_zh_tw: &'static str,
+    pub description_zh_tw: &'static str,
     pub palette: Palette,
+}
+
+impl ThemeDef {
+    pub fn label_for(&self, traditional_chinese: bool) -> &'static str {
+        if traditional_chinese {
+            self.label_zh_tw
+        } else {
+            self.label
+        }
+    }
+
+    pub fn description_for(&self, traditional_chinese: bool) -> &'static str {
+        if traditional_chinese {
+            self.description_zh_tw
+        } else {
+            self.description
+        }
+    }
 }
 
 pub const DEFAULT_THEME_ID: &str = concise::THEME.id;

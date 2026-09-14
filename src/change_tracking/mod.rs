@@ -70,9 +70,11 @@ pub(crate) struct ChangeSession {
 
 impl ChangeSession {
     pub(crate) fn begin(workspace_root: &Path, scope: ChangeScope) -> Self {
+        let original_workspace_root = workspace_root.to_path_buf();
         let workspace_root = workspace_root
             .canonicalize()
-            .unwrap_or_else(|_| workspace_root.to_path_buf());
+            .unwrap_or_else(|_| original_workspace_root.clone());
+        let scope = normalize_scope_paths(&original_workspace_root, &workspace_root, scope);
         let before = snapshot::collect_snapshot(&workspace_root, &scope.targets);
         Self {
             workspace_root,
@@ -88,6 +90,22 @@ impl ChangeSession {
         let after = snapshot::collect_snapshot(&self.workspace_root, &self.scope.targets);
         diff::diff_snapshots(&self.before, &after)
     }
+}
+
+// Canonicalizing a workspace can change the root spelling (for example
+// macOS /var -> /private/var) or resolve a symlink. Keep targets that were
+// built from the original root in the same path namespace as the snapshot root.
+fn normalize_scope_paths(
+    original_workspace_root: &Path,
+    canonical_workspace_root: &Path,
+    mut scope: ChangeScope,
+) -> ChangeScope {
+    for target in &mut scope.targets {
+        if let Ok(relative) = target.path.strip_prefix(original_workspace_root) {
+            target.path = canonical_workspace_root.join(relative);
+        }
+    }
+    scope
 }
 
 #[cfg(test)]
@@ -242,6 +260,30 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, ".env");
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_workspace_root_keeps_target_paths_workspace_relative() {
+        use std::os::unix::fs::symlink;
+
+        let root = workspace("canonical-root");
+        let alias = root.with_extension("alias");
+        fs::write(root.join("tracked.txt"), "before\n").expect("write tracked");
+        symlink(&root, &alias).expect("create workspace symlink");
+
+        let session = ChangeSession::begin(
+            &alias,
+            ChangeScope::single(ChangeTarget::explicit(alias.join("tracked.txt"), false)),
+        );
+        fs::write(root.join("tracked.txt"), "after\n").expect("change tracked");
+
+        let changes = session.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "tracked.txt");
+
+        let _ = fs::remove_file(alias);
         let _ = fs::remove_dir_all(root);
     }
 
