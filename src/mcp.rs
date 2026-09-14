@@ -19,7 +19,7 @@ use crate::handoff;
 use crate::mascot;
 use crate::state::{
     AgentsPathMode, Mode, ShowDetailMode, TokenStatsLayout, ToolMode, app_config_path,
-    load_app_config, user_home_dir,
+    load_app_config, process_instance_slot, user_home_dir,
 };
 use crate::workspace_tools;
 
@@ -462,6 +462,11 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
     match name {
         "catdesk_instruction" => {
             properties.insert("instructionText".to_string(), json!({ "type": "string" }));
+            properties.insert(
+                "instanceSlot".to_string(),
+                json!({ "type": ["integer", "null"], "minimum": 1, "maximum": 9 }),
+            );
+            properties.insert("workspaceRoot".to_string(), json!({ "type": "string" }));
         }
         "read" => {
             properties.insert(
@@ -2146,6 +2151,17 @@ fn widget_path_strings(path: &Path) -> (String, String) {
     )
 }
 
+fn numbered_instance_instruction(
+    instance_slot: Option<u8>,
+    workspace_root: &str,
+) -> Option<String> {
+    instance_slot.map(|slot| {
+        format!(
+            "This connector is CatDesk instance {slot}, bound to workspace `{workspace_root}`. If multiple numbered CatDesk connectors are available, use instance {slot} only for requests targeting this workspace. Never use this instance for another workspace; local file and command tools remain hard-restricted to this workspace."
+        )
+    })
+}
+
 fn catdesk_instruction_text(
     workspace_root: &str,
     mode: Mode,
@@ -2166,6 +2182,12 @@ Always specify the branch explicitly when using `git push`."#
         .lines()
         .map(str::to_string)
         .collect();
+
+    if let Some(instance_instruction) =
+        numbered_instance_instruction(process_instance_slot(), workspace_root)
+    {
+        lines.push(instance_instruction);
+    }
 
     if mode.computer_enabled() {
         lines.push("Use read to read files and search to search the workspace. Name every file you need in one read call.".to_string());
@@ -2236,6 +2258,8 @@ fn catdesk_instruction_structured(
     Ok(json!({
         "toolName": "catdesk_instruction",
         "instructionText": instruction_text,
+        "instanceSlot": process_instance_slot(),
+        "workspaceRoot": workspace_root,
     }))
 }
 
@@ -2266,6 +2290,7 @@ fn catdesk_instruction_widget_payload_with_cards(
         .map(|path| widget_path_strings(&path))
         .unwrap_or_else(|_| ("-".to_string(), "-".to_string()));
     payload_obj.insert("workspacePath".to_string(), json!(workspace_path));
+    payload_obj.insert("instanceSlot".to_string(), json!(process_instance_slot()));
     payload_obj.insert(
         "workspacePathDisplay".to_string(),
         json!(workspace_path_display),
@@ -4487,6 +4512,8 @@ mod tests {
         for (tool_name, field) in [
             ("run_command", "stdout"),
             ("catdesk_instruction", "instructionText"),
+            ("catdesk_instruction", "instanceSlot"),
+            ("catdesk_instruction", "workspaceRoot"),
             ("read", "files"),
             ("search", "searchResults"),
             ("write", "bytesWritten"),
@@ -5373,6 +5400,16 @@ mod tests {
         assert!(!workspace_root.join(".catdesk").exists());
 
         let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn numbered_instance_instruction_identifies_bound_workspace() {
+        let instruction = numbered_instance_instruction(Some(2), "/tmp/project-b")
+            .expect("numbered instance instruction");
+        assert!(instruction.contains("CatDesk instance 2"));
+        assert!(instruction.contains("`/tmp/project-b`"));
+        assert!(instruction.contains("hard-restricted to this workspace"));
+        assert!(numbered_instance_instruction(None, "/tmp/project-b").is_none());
     }
 
     #[test]
