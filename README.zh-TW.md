@@ -193,7 +193,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 # 工具
 
-CatDesk 有兩種本機工具模式：`multi-tools` 提供 11 個工具，`read-only` 提供 4 個工具。
+CatDesk 有兩種本機工具模式：`multi-tools` 最多提供 12 個工具（啟用 Widget 時會提供 `open_terminal`），`read-only` 提供 4 個工具。
 
 在 `multi-tools` 模式下，CatDesk 的本機工具如下：
 
@@ -207,11 +207,14 @@ CatDesk 有兩種本機工具模式：`multi-tools` 提供 11 個工具，`read-
 | `create_handoff`        | 讀取  | 準備 workspace 專屬的 Library handoff，不修改 workspace                  |
 | `delete`                | 寫入  | 刪除檔案或目錄                                                           |
 | `run_command`           | Shell | 執行短時間 Shell 指令並等待完成                                          |
+| `open_terminal`         | Shell | 在 ChatGPT Widget 中開啟持續存在的互動式 PTY 終端機                       |
 | `start_command`         | Job   | 啟動長時間指令，並立即回傳 job ID                                        |
 | `poll_command`          | Job   | 讀取背景指令的增量輸出與狀態                                             |
 | `cancel_command`        | Job   | 停止背景指令以及其子程序樹                                               |
 
 長時間執行的指令刻意與 MCP HTTP request 的生命週期分離。Build、compile、dependency installation、長時間 test suite 與 development server 應使用 `start_command`，接著以回傳的 cursor 呼叫 `poll_command`。Poll response 有大小限制；如果 `hasMoreOutput` 為 true，即使 job 已經結束，也要持續用 `nextCursor` 輪詢，直到把剩餘輸出讀完。`run_command` 適合較短的指令，而且 timeout 上限為 120 秒。
+
+`open_terminal` 會在 CatDesk workspace 中啟動使用者的預設 Shell，支援鍵盤輸入、貼上、Ctrl+C、方向鍵、調整尺寸與全螢幕。終端機後端是真正的 PTY；畫面更新會直接在 Widget 與 CatDesk 之間傳遞，不會把每一幀終端機輸出塞進模型 transcript。它只會在 `multi-tools` 且 Widget 啟用時提供。和 `run_command` 一樣，它擁有 CatDesk process 的權限；workspace 只是初始工作目錄，不是作業系統層級的 filesystem sandbox，因此請以同等程度謹慎使用。閒置超過 10 分鐘的終端機 session 會自動終止，同時最多可開啟 4 個 session。
 
 如果啟用了瀏覽器模式，CatDesk 還可以公開額外的 browser/devtools 工具。這些工具由 browser bridge 提供，所以實際工具列表取決於你的環境。
 

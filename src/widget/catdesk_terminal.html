@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { color-scheme: dark; --bg:#0c0d10; --panel:#15171c; --border:#2a2f38; --fg:#f3f5f7; --muted:#8f98a7; --accent:#7fd7ff; --danger:#ff8f8f; }
+    * { box-sizing: border-box; }
+    html, body { margin:0; min-height:100%; background:var(--bg); color:var(--fg); font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace; }
+    body { padding:10px; }
+    #shell { height:min(72vh,720px); min-height:320px; display:flex; flex-direction:column; border:1px solid var(--border); border-radius:12px; overflow:hidden; background:var(--bg); box-shadow:0 12px 40px rgba(0,0,0,.25); }
+    header { min-height:42px; display:flex; align-items:center; gap:10px; padding:8px 10px; border-bottom:1px solid var(--border); background:var(--panel); }
+    .dot { width:10px; height:10px; border-radius:50%; background:#6ee7a8; flex:none; }
+    #title { font:600 12px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    #workspace { min-width:0; color:var(--muted); font:11px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .grow { flex:1; }
+    button { border:1px solid var(--border); border-radius:7px; padding:5px 8px; background:#1c2027; color:var(--fg); font:11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; cursor:pointer; }
+    button:hover { border-color:#455064; }
+    #terminal { position:relative; flex:1; min-height:0; overflow:hidden; outline:none; padding:10px 12px; cursor:text; }
+    #screen { margin:0; position:absolute; inset:10px 12px; overflow:hidden; white-space:pre; font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace; tab-size:8; }
+    #measure { position:absolute; visibility:hidden; white-space:pre; font:13px/1.35 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace; }
+    #cursor { position:absolute; width:7.8px; height:17.55px; background:rgba(243,245,247,.82); pointer-events:none; animation:blink 1.05s step-end infinite; }
+    @keyframes blink { 50% { opacity:.15; } }
+    #status { min-height:30px; display:flex; align-items:center; gap:8px; padding:6px 10px; border-top:1px solid var(--border); color:var(--muted); background:var(--panel); font:11px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    #status.error { color:var(--danger); }
+    .kbd { color:var(--accent); }
+    @media (max-width:620px) { body{padding:0} #shell{height:68vh;min-height:300px;border-radius:0;border-left:0;border-right:0} #workspace{display:none} }
+  </style>
+</head>
+<body>
+  <div id="shell">
+    <header>
+      <span class="dot" id="dot"></span>
+      <span id="title">CatDesk Terminal</span>
+      <span id="workspace"></span>
+      <span class="grow"></span>
+      <button id="fullscreen" type="button">Fullscreen</button>
+      <button id="restart" type="button">Restart</button>
+      <button id="close" type="button">Close</button>
+    </header>
+    <div id="terminal" tabindex="0" role="textbox" aria-label="Interactive CatDesk terminal" aria-multiline="true">
+      <pre id="screen"></pre>
+      <span id="cursor" hidden></span>
+      <span id="measure">M</span>
+    </div>
+    <div id="status"><span>Waiting for CatDesk…</span><span class="grow"></span><span class="kbd">Click terminal to type</span></div>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+      var META_KEY = "catdesk/widgetPayload";
+      var sessionId = "";
+      var apiBase = "";
+      var lastVersion = -1;
+      var pollTimer = null;
+      var closed = false;
+      var opening = false;
+      var lastRows = 0;
+      var lastCols = 0;
+      var screenEl = document.getElementById("screen");
+      var terminalEl = document.getElementById("terminal");
+      var cursorEl = document.getElementById("cursor");
+      var measureEl = document.getElementById("measure");
+      var statusEl = document.getElementById("status");
+      var workspaceEl = document.getElementById("workspace");
+      var dotEl = document.getElementById("dot");
+
+      function payloadFrom(metadata) {
+        if (!metadata || typeof metadata !== "object") return null;
+        var payload = metadata[META_KEY];
+        return payload && typeof payload === "object" ? payload : null;
+      }
+
+      function currentPayload() {
+        return payloadFrom(window.openai && window.openai.toolResponseMetadata);
+      }
+
+      function setStatus(text, isError) {
+        statusEl.firstElementChild.textContent = text;
+        statusEl.classList.toggle("error", !!isError);
+        dotEl.style.background = isError ? "#ff8f8f" : (closed ? "#8f98a7" : "#6ee7a8");
+      }
+
+      function headers() {
+        return { "content-type": "application/json", "ngrok-skip-browser-warning": "true" };
+      }
+
+      async function api(path, options) {
+        if (!apiBase) throw new Error("Terminal API is not ready");
+        var response = await fetch(apiBase + path, Object.assign({ cache:"no-store", headers:headers() }, options || {}));
+        var text = await response.text();
+        var body = text ? JSON.parse(text) : {};
+        if (!response.ok || body.ok === false) throw new Error(body.error || ("HTTP " + response.status));
+        return body;
+      }
+
+      function dimensions() {
+        var rect = measureEl.getBoundingClientRect();
+        var cellWidth = Math.max(1, rect.width);
+        var lineHeight = Math.max(1, rect.height);
+        var box = terminalEl.getBoundingClientRect();
+        var cols = Math.max(20, Math.min(240, Math.floor((box.width - 24) / cellWidth)));
+        var rows = Math.max(8, Math.min(120, Math.floor((box.height - 20) / lineHeight)));
+        return { rows:rows, cols:cols, cellWidth:cellWidth, lineHeight:lineHeight };
+      }
+
+      function render(snapshot) {
+        if (!snapshot) return;
+        if (snapshot.version !== lastVersion) {
+          lastVersion = snapshot.version;
+          screenEl.textContent = (snapshot.lines || []).join("\n");
+        }
+        workspaceEl.textContent = snapshot.workspace || "";
+        workspaceEl.title = snapshot.workspace || "";
+        var d = dimensions();
+        if (snapshot.cursorHidden || !snapshot.alive) {
+          cursorEl.hidden = true;
+        } else {
+          cursorEl.hidden = false;
+          cursorEl.style.left = (12 + snapshot.cursorCol * d.cellWidth) + "px";
+          cursorEl.style.top = (10 + snapshot.cursorRow * d.lineHeight) + "px";
+          cursorEl.style.width = d.cellWidth + "px";
+          cursorEl.style.height = d.lineHeight + "px";
+        }
+        closed = !snapshot.alive;
+        if (snapshot.error) setStatus(snapshot.error, true);
+        else if (snapshot.alive) setStatus(snapshot.rows + "×" + snapshot.cols + " · interactive PTY", false);
+        else setStatus("Shell exited", false);
+      }
+
+      async function openTerminal() {
+        if (!apiBase || opening) return;
+        opening = true;
+        closed = false;
+        try {
+          var d = dimensions();
+          var body = await api("/open", { method:"POST", body:JSON.stringify({ rows:d.rows, cols:d.cols }) });
+          sessionId = body.session.sessionId;
+          lastRows = body.session.rows;
+          lastCols = body.session.cols;
+          lastVersion = -1;
+          render(body.session);
+          terminalEl.focus();
+          schedulePoll(10);
+        } catch (error) {
+          setStatus(error.message || String(error), true);
+        } finally {
+          opening = false;
+        }
+      }
+
+      async function poll() {
+        if (!sessionId || closed) return;
+        try {
+          var path = "/" + encodeURIComponent(sessionId) + "/screen?after=" + encodeURIComponent(lastVersion) + "&waitMs=1000";
+          var body = await api(path);
+          render(body.session);
+        } catch (error) {
+          setStatus(error.message || String(error), true);
+          return;
+        }
+        schedulePoll(0);
+      }
+
+      function schedulePoll(delay) {
+        if (pollTimer) clearTimeout(pollTimer);
+        pollTimer = setTimeout(poll, delay);
+      }
+
+      async function sendInput(data) {
+        if (!sessionId || closed || !data) return;
+        try {
+          var body = await api("/" + encodeURIComponent(sessionId) + "/input", { method:"POST", body:JSON.stringify({ data:data }) });
+          render(body.session);
+          schedulePoll(25);
+        } catch (error) {
+          setStatus(error.message || String(error), true);
+        }
+      }
+
+      async function resizeTerminal() {
+        if (!sessionId || closed) return;
+        var d = dimensions();
+        if (d.rows === lastRows && d.cols === lastCols) return;
+        lastRows = d.rows;
+        lastCols = d.cols;
+        try {
+          var body = await api("/" + encodeURIComponent(sessionId) + "/resize", { method:"POST", body:JSON.stringify({ rows:d.rows, cols:d.cols }) });
+          render(body.session);
+        } catch (error) {
+          setStatus(error.message || String(error), true);
+        }
+      }
+
+      async function closeTerminal() {
+        if (!sessionId) return;
+        var id = sessionId;
+        sessionId = "";
+        closed = true;
+        if (pollTimer) clearTimeout(pollTimer);
+        try { await api("/" + encodeURIComponent(id), { method:"DELETE" }); } catch (_) {}
+        cursorEl.hidden = true;
+        setStatus("Terminal closed", false);
+      }
+
+      async function restartTerminal() {
+        await closeTerminal();
+        screenEl.textContent = "";
+        await openTerminal();
+      }
+
+      function keyData(event) {
+        if (event.metaKey) return null;
+        if (event.ctrlKey && !event.altKey && event.key && event.key.length === 1) {
+          var upper = event.key.toUpperCase().charCodeAt(0);
+          if (upper >= 65 && upper <= 90) return String.fromCharCode(upper - 64);
+        }
+        var special = {
+          Enter:"\r", Backspace:"\x7f", Tab:"\t", Escape:"\x1b",
+          ArrowUp:"\x1b[A", ArrowDown:"\x1b[B", ArrowRight:"\x1b[C", ArrowLeft:"\x1b[D",
+          Home:"\x1b[H", End:"\x1b[F", Delete:"\x1b[3~", Insert:"\x1b[2~",
+          PageUp:"\x1b[5~", PageDown:"\x1b[6~", F1:"\x1bOP", F2:"\x1bOQ", F3:"\x1bOR", F4:"\x1bOS",
+          F5:"\x1b[15~", F6:"\x1b[17~", F7:"\x1b[18~", F8:"\x1b[19~", F9:"\x1b[20~", F10:"\x1b[21~", F11:"\x1b[23~", F12:"\x1b[24~"
+        };
+        if (special[event.key]) return special[event.key];
+        if (!event.ctrlKey && !event.altKey && event.key && event.key.length === 1) return event.key;
+        return null;
+      }
+
+      terminalEl.addEventListener("keydown", function (event) {
+        var data = keyData(event);
+        if (data === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        sendInput(data);
+      });
+      terminalEl.addEventListener("paste", function (event) {
+        var text = event.clipboardData && event.clipboardData.getData("text/plain");
+        if (!text) return;
+        event.preventDefault();
+        sendInput(text);
+      });
+      terminalEl.addEventListener("mousedown", function () { terminalEl.focus(); });
+
+      document.getElementById("close").addEventListener("click", closeTerminal);
+      document.getElementById("restart").addEventListener("click", restartTerminal);
+      document.getElementById("fullscreen").addEventListener("click", async function () {
+        try {
+          if (window.openai && typeof window.openai.requestDisplayMode === "function") {
+            await window.openai.requestDisplayMode({ mode:"fullscreen" });
+          }
+        } catch (error) { setStatus(error.message || String(error), true); }
+      });
+
+      var resizeDebounce = null;
+      new ResizeObserver(function () {
+        clearTimeout(resizeDebounce);
+        resizeDebounce = setTimeout(resizeTerminal, 120);
+      }).observe(terminalEl);
+
+      function applyPayload(payload) {
+        if (!payload) return;
+        var nextBase = typeof payload.terminalApiBaseUrl === "string" ? payload.terminalApiBaseUrl : "";
+        if (!nextBase) return;
+        if (nextBase !== apiBase) {
+          apiBase = nextBase.replace(/\/$/, "");
+          if (!sessionId) openTerminal();
+        }
+      }
+
+      window.addEventListener("message", function (event) {
+        if (event.source !== window.parent) return;
+        var message = event.data;
+        if (!message || typeof message !== "object") return;
+        if (message.method === "ui/notifications/tool-result") applyPayload(currentPayload());
+      });
+      window.addEventListener("openai:set_globals", function (event) {
+        var globals = event && event.detail ? event.detail.globals : null;
+        applyPayload(payloadFrom(globals && globals.toolResponseMetadata));
+        applyPayload(currentPayload());
+      }, { passive:true });
+
+      window.addEventListener("beforeunload", function () {
+        if (!sessionId || !apiBase) return;
+        fetch(apiBase + "/" + encodeURIComponent(sessionId), { method:"DELETE", headers:headers(), keepalive:true }).catch(function () {});
+      });
+
+      applyPayload(currentPayload());
+    })();
+  </script>
+</body>
+</html>

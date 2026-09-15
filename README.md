@@ -193,7 +193,7 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
 
 # Tools
 
-CatDesk has two local tool modes: `multi-tools` exposes 11 tools, and `read-only` exposes 4 tools.
+CatDesk has two local tool modes: `multi-tools` exposes up to 12 tools (`open_terminal` is available when widgets are enabled), and `read-only` exposes 4 tools.
 
 CatDesk's local tools in `multi-tools` mode are:
 
@@ -207,11 +207,14 @@ CatDesk's local tools in `multi-tools` mode are:
 | `create_handoff`      | Read  | Prepares a workspace-specific Library handoff without changing the workspace |
 | `delete`              | Write | Deletes a file or directory                                                |
 | `run_command`         | Shell | Runs a short shell command and waits for completion                        |
+| `open_terminal`       | Shell | Opens a persistent interactive PTY terminal inside the ChatGPT widget      |
 | `start_command`       | Job   | Starts a long-running shell command and immediately returns a job ID       |
 | `poll_command`        | Job   | Reads incremental output and status from a background command              |
 | `cancel_command`      | Job   | Stops a background command and its child process tree                      |
 
 Long-running commands are deliberately decoupled from the lifetime of an MCP HTTP request. Builds, compilation, dependency installation, long test suites, and development servers should use `start_command`, then `poll_command` with the returned cursor. Poll responses are bounded; if `hasMoreOutput` is true, keep polling with `nextCursor` even after the command reaches a terminal state to drain the remaining buffered output. `run_command` remains the simpler path for short commands and has a 120-second maximum timeout.
+
+`open_terminal` starts the user's default shell in the CatDesk workspace and supports keyboard input, paste, Ctrl+C, cursor keys, resize, and fullscreen. The terminal is backed by a real PTY; screen updates travel directly between the widget and CatDesk instead of being copied into the model transcript. It is available only in `multi-tools` mode when widgets are enabled. Like `run_command`, it has the permissions of the CatDesk process; the workspace is its initial working directory, not an OS-level filesystem sandbox, so use it with the same caution as shell access. Inactive terminal sessions are automatically terminated after 10 minutes, and at most four can be open at once.
 
 If browser mode is enabled, CatDesk can also expose extra browser/devtools tools. Those are provided by the browser bridge, so the exact list depends on your environment.
 
