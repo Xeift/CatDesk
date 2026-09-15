@@ -332,15 +332,21 @@ struct PreparedShellCommand {
     cleanup_dir: Option<PathBuf>,
 }
 
+fn uses_linux_sandbox(sandbox_enabled: bool) -> bool {
+    cfg!(target_os = "linux") && sandbox_enabled
+}
+
 fn shell_command(
     command: &str,
     workspace_root: &Path,
     cwd: &Path,
+    sandbox_enabled: bool,
 ) -> io::Result<PreparedShellCommand> {
     #[cfg(windows)]
     {
         let _ = workspace_root;
         let _ = cwd;
+        let _ = sandbox_enabled;
         let mut shell = Command::new("powershell.exe");
         shell
             .arg("-NoLogo")
@@ -360,6 +366,7 @@ fn shell_command(
     {
         let _ = workspace_root;
         let _ = cwd;
+        let _ = sandbox_enabled;
         let mut shell = Command::new("/bin/bash");
         shell.arg("-c").arg(command);
         Ok(PreparedShellCommand {
@@ -368,20 +375,16 @@ fn shell_command(
         })
     }
 
-    #[cfg(all(target_os = "linux", not(test)))]
+    #[cfg(target_os = "linux")]
     {
-        let (helper, scratch_dir) =
-            crate::linux_sandbox::helper_command(command, workspace_root, cwd)?;
-        Ok(PreparedShellCommand {
-            command: Command::from(helper),
-            cleanup_dir: Some(scratch_dir),
-        })
-    }
-
-    #[cfg(all(target_os = "linux", test))]
-    {
-        let _ = workspace_root;
-        let _ = cwd;
+        if uses_linux_sandbox(sandbox_enabled) {
+            let (helper, scratch_dir) =
+                crate::linux_sandbox::helper_command(command, workspace_root, cwd)?;
+            return Ok(PreparedShellCommand {
+                command: Command::from(helper),
+                cleanup_dir: Some(scratch_dir),
+            });
+        }
         let mut shell = Command::new("/bin/bash");
         shell.arg("-c").arg(command);
         Ok(PreparedShellCommand {
@@ -395,8 +398,9 @@ fn spawn_shell_command_blocking(
     command: &str,
     workspace_root: &Path,
     cwd: &Path,
+    sandbox_enabled: bool,
 ) -> io::Result<SpawnedProcess> {
-    let prepared = shell_command(command, workspace_root, cwd)?;
+    let prepared = shell_command(command, workspace_root, cwd, sandbox_enabled)?;
     let mut shell = prepared.command;
     let mut cleanup_dir = prepared.cleanup_dir;
     shell
@@ -481,12 +485,13 @@ pub async fn spawn_shell_command(
     command: &str,
     workspace_root: &Path,
     cwd: &Path,
+    sandbox_enabled: bool,
 ) -> io::Result<SpawnedProcess> {
     let command = command.to_owned();
     let workspace_root = workspace_root.to_path_buf();
     let cwd = cwd.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        spawn_shell_command_blocking(&command, &workspace_root, &cwd)
+        spawn_shell_command_blocking(&command, &workspace_root, &cwd, sandbox_enabled)
     })
     .await
     .map_err(|error| io::Error::other(format!("command spawn task failed: {error}")))?
@@ -589,11 +594,13 @@ pub async fn run_shell_command(
     command: &str,
     workspace_root: &Path,
     cwd: &Path,
+    sandbox_enabled: bool,
     timeout_ms: u64,
     max_capture_bytes: usize,
 ) -> ProcessRunResult {
     let started = Instant::now();
-    let mut process = match spawn_shell_command(command, workspace_root, cwd).await {
+    let mut process = match spawn_shell_command(command, workspace_root, cwd, sandbox_enabled).await
+    {
         Ok(process) => process,
         Err(error) => {
             return ProcessRunResult {
@@ -717,6 +724,22 @@ mod tests {
         path
     }
 
+    #[test]
+    fn sandbox_toggle_selects_linux_sandbox_only_when_enabled() {
+        assert_eq!(uses_linux_sandbox(true), cfg!(target_os = "linux"));
+        assert!(!uses_linux_sandbox(false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabled_sandbox_uses_direct_bash_on_linux() {
+        let root = workspace("direct-bash");
+        let prepared = shell_command("true", &root, &root, false).expect("prepare shell command");
+        assert_eq!(prepared.command.as_std().get_program(), "/bin/bash");
+        assert!(prepared.cleanup_dir.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn capture_reader_preserves_partial_output_on_read_error() {
         let captured = capture_reader(PartialThenError { emitted: false }, 1024).await;
@@ -736,7 +759,7 @@ mod tests {
         } else {
             "printf 'hello\\n'"
         };
-        let result = run_shell_command(command, &root, &root, 5_000, 1024).await;
+        let result = run_shell_command(command, &root, &root, false, 5_000, 1024).await;
         assert!(result.success, "stderr: {}", result.stderr);
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout.trim(), "hello");
@@ -752,7 +775,7 @@ mod tests {
         } else {
             "printf '%*s' 200000 ''; printf '%*s' 200000 '' >&2"
         };
-        let result = run_shell_command(command, &root, &root, 5_000, 4_096).await;
+        let result = run_shell_command(command, &root, &root, false, 5_000, 4_096).await;
         assert!(
             result.success,
             "large-output command failed: {}",
@@ -774,7 +797,7 @@ mod tests {
         } else {
             "sleep 0.7; printf survived > sentinel.txt"
         };
-        let result = run_shell_command(command, &root, &root, 100, 1024).await;
+        let result = run_shell_command(command, &root, &root, false, 100, 1024).await;
         assert!(result.timed_out);
         tokio::time::sleep(Duration::from_millis(900)).await;
         assert!(
@@ -793,7 +816,7 @@ mod tests {
         } else {
             "(sleep 0.8; printf survived > descendant.txt) & sleep 5"
         };
-        let result = run_shell_command(command, &root, &root, 150, 1024).await;
+        let result = run_shell_command(command, &root, &root, false, 150, 1024).await;
         assert!(result.timed_out);
         tokio::time::sleep(Duration::from_millis(1_000)).await;
         assert!(
@@ -812,7 +835,7 @@ mod tests {
         } else {
             "(sleep 0.8; printf survived > detached.txt) & printf 'root-done\\n'"
         };
-        let result = run_shell_command(command, &root, &root, 5_000, 1024).await;
+        let result = run_shell_command(command, &root, &root, false, 5_000, 1024).await;
         assert!(result.success, "root command failed: {}", result.stderr);
         assert!(result.stdout.contains("root-done"));
         tokio::time::sleep(Duration::from_millis(1_000)).await;
@@ -834,7 +857,7 @@ mod tests {
         };
         let root_for_task = root.clone();
         let task = tokio::spawn(async move {
-            run_shell_command(command, &root_for_task, &root_for_task, 5_000, 1024).await
+            run_shell_command(command, &root_for_task, &root_for_task, false, 5_000, 1024).await
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
         task.abort();

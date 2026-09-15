@@ -285,12 +285,18 @@ pub struct AppConfig {
     pub partner_binagotchy_seed: Option<String>,
     #[serde(default)]
     pub set_catdesk_as_co_author: bool,
+    #[serde(default = "default_sandbox_enabled")]
+    pub sandbox_enabled: bool,
     pub theme: String,
     pub mode: Mode,
     pub tool_mode: ToolMode,
     #[serde(default)]
     pub usage_by_model: BTreeMap<String, UsageTotals>,
     pub selected_browser: Option<DetectedBrowser>,
+}
+
+fn default_sandbox_enabled() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -308,6 +314,7 @@ impl Default for AppConfig {
             ui_language: UiLanguage::English,
             partner_binagotchy_seed: None,
             set_catdesk_as_co_author: false,
+            sandbox_enabled: true,
             theme: theme::DEFAULT_THEME_ID.to_string(),
             mode: Mode::Both,
             tool_mode: ToolMode::MultiTools,
@@ -589,6 +596,7 @@ pub struct AppState {
     pub mascot_seed: u64,
     pub partner_binagotchy_seed: Option<String>,
     pub set_catdesk_as_co_author: bool,
+    pub sandbox_enabled: bool,
     pub mascot: MascotPack,
     pub detected_browsers: Vec<DetectedBrowser>,
     pub selected_browser: Option<DetectedBrowser>,
@@ -962,6 +970,7 @@ impl AppState {
             mascot_seed,
             partner_binagotchy_seed,
             set_catdesk_as_co_author: config.set_catdesk_as_co_author,
+            sandbox_enabled: config.sandbox_enabled,
             mascot,
             workspace_root,
             detected_browsers: Vec::new(),
@@ -1019,6 +1028,7 @@ impl AppState {
         config.chatgpt_connector_revision = self.chatgpt_connector_revision;
         config.partner_binagotchy_seed = self.partner_binagotchy_seed.clone();
         config.set_catdesk_as_co_author = self.set_catdesk_as_co_author;
+        config.sandbox_enabled = self.sandbox_enabled;
         config.theme = self.theme.clone();
         config.mode = self.mode;
         config.tool_mode = self.tool_mode;
@@ -1528,6 +1538,7 @@ mod tests {
         assert!(matches!(app.tool_mode, ToolMode::MultiTools));
         assert!(matches!(app.show_detail_mode, ShowDetailMode::Collapsed));
         assert!(app.set_catdesk_as_co_author);
+        assert!(app.sandbox_enabled);
         assert_eq!(
             app.partner_binagotchy_seed.as_deref(),
             Some("00000000000000ff")
@@ -1756,6 +1767,29 @@ toolCallCount = 1
 
         let saved = AppConfig::load_from_path(&config_path).expect("load config");
         assert!(matches!(saved.show_detail_mode, ShowDetailMode::Collapsed));
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn app_config_round_trips_disabled_sandbox() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-config-sandbox-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp config dir");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let config = AppConfig {
+            sandbox_enabled: false,
+            ..AppConfig::default()
+        };
+        config.save_to_path(&config_path).expect("save config");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("load config");
+        assert!(!saved.sandbox_enabled);
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
