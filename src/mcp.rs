@@ -18,8 +18,8 @@ use crate::devtools::DevtoolsBridge;
 use crate::handoff;
 use crate::mascot;
 use crate::state::{
-    AgentsPathMode, Mode, ShowDetailMode, TokenStatsLayout, ToolMode, app_config_path,
-    load_app_config, user_home_dir,
+    AgentsPathMode, Mode, ShowDetailMode, TokenStatsLayout, ToolMode, WidgetCornerStyle,
+    app_config_path, load_app_config, user_home_dir,
 };
 use crate::workspace_tools;
 
@@ -28,7 +28,7 @@ const SERVER_VERSION: &str = "4.0.0";
 pub(crate) const MODERN_MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
-const WIDGET_RESOURCE_REVISION: u32 = 3;
+const WIDGET_RESOURCE_REVISION: u32 = 6;
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
@@ -341,19 +341,21 @@ pub(crate) fn is_catdesk_widget_resource_uri(uri: &str) -> bool {
 
 fn current_widget_resource_uri_for_tool(tool_name: &str) -> String {
     let token_stats_layout = current_token_stats_layout();
+    let widget_corner_style = current_widget_corner_style();
     if tool_name.is_empty() {
         return format!(
-            "{UI_TEMPLATE_URI}?widgetRevision={WIDGET_RESOURCE_REVISION}&tokenStatsLayout={}",
-            token_stats_layout.as_str()
+            "{UI_TEMPLATE_URI}?widgetRevision={WIDGET_RESOURCE_REVISION}&tokenStatsLayout={}&widgetCornerStyle={}",
+            token_stats_layout.as_str(),
+            widget_corner_style.as_str()
         );
     }
     format!(
-        "{UI_TEMPLATE_URI}?widgetRevision={WIDGET_RESOURCE_REVISION}&tokenStatsLayout={}&toolName={}",
+        "{UI_TEMPLATE_URI}?widgetRevision={WIDGET_RESOURCE_REVISION}&tokenStatsLayout={}&widgetCornerStyle={}&toolName={}",
         token_stats_layout.as_str(),
+        widget_corner_style.as_str(),
         tool_name
     )
 }
-
 fn query_param_value<'a>(resource_uri: &'a str, key: &str) -> Option<&'a str> {
     let query = resource_uri.split_once('?')?.1;
     query.split('&').find_map(|part| {
@@ -2670,6 +2672,10 @@ fn base_widget_payload(
         "tokenStatsLayout".to_string(),
         json!(token_stats_layout.as_str()),
     );
+    payload.insert(
+        "widgetCornerStyle".to_string(),
+        json!(current_widget_corner_style().as_str()),
+    );
     if let Some(tool_name) = tool_name {
         payload.insert("toolName".to_string(), json!(tool_name));
     }
@@ -2695,6 +2701,12 @@ fn base_widget_payload_with_show_detail_mode(
 fn current_token_stats_layout() -> TokenStatsLayout {
     load_app_config()
         .map(|config| config.token_stats_layout)
+        .unwrap_or_default()
+}
+
+fn current_widget_corner_style() -> WidgetCornerStyle {
+    load_app_config()
+        .map(|config| config.widget_corner_style)
         .unwrap_or_default()
 }
 
@@ -6768,7 +6780,7 @@ hello world"
     #[test]
     fn widget_resource_uri_includes_revision_for_cache_busting() {
         let uri = current_widget_resource_uri_for_tool("catdesk_instruction");
-        assert!(uri.contains("widgetRevision=3"));
+        assert!(uri.contains("widgetRevision=6"));
         assert!(uri.contains("toolName=catdesk_instruction"));
     }
 
@@ -7006,6 +7018,7 @@ hello world"
         );
         assert!(widget_payload.get("agentsPathMode").is_some());
         assert!(widget_payload.get("tokenStatsLayout").is_some());
+        assert!(widget_payload.get("widgetCornerStyle").is_some());
         assert!(widget_payload.get("showDetailMode").is_none());
         assert_eq!(
             widget_payload
