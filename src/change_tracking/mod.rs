@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use diff::FileChange;
 
-const MAX_DIFF_FILES: usize = 16;
+pub(crate) const MAX_DIFF_FILES: usize = 16;
 const MAX_DIFF_CHARS_PER_FILE: usize = 12_000;
 const MAX_WATCHED_ENTRIES: usize = 512;
-const MAX_FILE_CAPTURE_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_FILE_CAPTURE_BYTES: usize = 128 * 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ChangeTarget {
