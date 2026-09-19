@@ -211,8 +211,8 @@ impl WidgetCornerStyle {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShowDetailMode {
-    #[default]
     Disable,
+    #[default]
     Expanded,
     Collapsed,
 }
@@ -367,7 +367,7 @@ impl Default for AppConfig {
             chatgpt_connector_revision: None,
             agents_path_mode: AgentsPathMode::Default,
             token_stats_layout: TokenStatsLayout::Right,
-            show_detail_mode: ShowDetailMode::Disable,
+            show_detail_mode: ShowDetailMode::Expanded,
             widget_corner_style: WidgetCornerStyle::Rounded,
             macos_terminal_profile: None,
             ui_language: UiLanguage::English,
@@ -1795,13 +1795,6 @@ toolCallCount = 1
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
-    }
-
-    #[test]
-    fn app_config_disables_widget_detail_by_default() {
-        let config = AppConfig::default();
-        assert!(matches!(config.show_detail_mode, ShowDetailMode::Disable));
-        assert!(matches!(ShowDetailMode::default(), ShowDetailMode::Disable));
     }
 
     #[test]
