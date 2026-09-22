@@ -4032,7 +4032,7 @@ fn draw_settings(
         Style::default().fg(palette.primary_fg)
     };
 
-    let slug_new_row = co_author_row + 2;
+    let slug_new_row = slug_keep_row + 1;
     let slug_new_selected = slug_new_row == selected_row;
     let slug_new_marker = if slug_new_selected { ">" } else { " " };
     let slug_new_name_style = if slug_new_selected {
@@ -4043,7 +4043,7 @@ fn draw_settings(
         Style::default().fg(palette.primary_fg)
     };
 
-    let domain_row = co_author_row + 3;
+    let domain_row = slug_new_row + 1;
     let domain_selected = domain_row == selected_row;
     let domain_marker = if domain_selected { ">" } else { " " };
     let domain_name_style = if domain_selected {
