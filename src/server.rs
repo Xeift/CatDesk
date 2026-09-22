@@ -1686,7 +1686,7 @@ mod tests {
         }
         let (success, widgets) = tracked.expect("missing bootstrap tools/list event");
         assert!(success);
-        assert_eq!(widgets.len(), 11);
+        assert_eq!(widgets.len(), 10);
         assert_eq!(
             widgets
                 .iter()
@@ -1702,7 +1702,6 @@ mod tests {
                 "search",
                 "write",
                 "edit",
-                "create_handoff",
                 "delete",
             ]
         );
@@ -2960,6 +2959,7 @@ async fn post_mcp_inner(
         mode,
         tool_mode,
         set_catdesk_as_co_author,
+        handoff_enabled,
         ngrok_url,
         mcp_path,
         partner_binagotchy_seed,
@@ -2972,6 +2972,7 @@ async fn post_mcp_inner(
             app.mode,
             app.tool_mode,
             app.set_catdesk_as_co_author,
+            app.handoff_enabled,
             app.ngrok_url.clone(),
             app.mcp_path(),
             app.partner_binagotchy_seed.clone(),
@@ -3001,6 +3002,7 @@ async fn post_mcp_inner(
         mode,
         tool_mode,
         set_catdesk_as_co_author,
+        handoff_enabled,
         s.catdesk_instruction_called.load(Ordering::Acquire),
         &s.command_jobs,
         &s.devtools,
