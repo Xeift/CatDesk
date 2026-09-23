@@ -1907,18 +1907,94 @@ fn build_run_command_listing_structured(
     })
 }
 
+fn structured_content_text(structured: &Value) -> String {
+    let Some(structured) = structured.as_object() else {
+        return String::new();
+    };
+
+    let mut parts = Vec::new();
+    for key in [
+        "message",
+        "text",
+        "instructionText",
+        "stdout",
+        "stderr",
+        "value",
+    ] {
+        if let Some(text) = structured.get(key).and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                parts.push(text.to_string());
+            }
+        }
+    }
+
+    if let Some(files) = structured.get("files").and_then(Value::as_array) {
+        for file in files {
+            let Some(error) = file.get("error").and_then(Value::as_str) else {
+                continue;
+            };
+            let error = error.trim();
+            if error.is_empty() {
+                continue;
+            }
+            let path = file
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty());
+            parts.push(match path {
+                Some(path) => format!("{path}: {error}"),
+                None => error.to_string(),
+            });
+        }
+    }
+
+    if parts.is_empty() && structured.get("timedOut").and_then(Value::as_bool) == Some(true) {
+        parts.push("Command timed out.".to_string());
+    } else if parts.is_empty() && structured.get("success").and_then(Value::as_bool) == Some(false)
+    {
+        if let Some(exit_code) = structured.get("exitCode").and_then(Value::as_i64) {
+            parts.push(format!("Command failed with exit code {exit_code}."));
+        }
+    }
+
+    parts.join("\n")
+}
+
 fn tool_response(
     req: &JsonRpcRequest,
     text: String,
     structured: Option<Value>,
     is_error: bool,
 ) -> JsonRpcResponse {
+    let structured =
+        structured.unwrap_or_else(|| tool_message_structured(req, text.clone(), is_error));
+    let content_text = if is_error {
+        let text = text.trim();
+        if text.is_empty() || text == "(no output)" {
+            let structured_text = structured_content_text(&structured);
+            if structured_text.is_empty() {
+                text.to_string()
+            } else {
+                structured_text
+            }
+        } else {
+            text.to_string()
+        }
+    } else {
+        String::new()
+    };
+    let content = if content_text.is_empty() {
+        json!([])
+    } else {
+        json!([{ "type": "text", "text": content_text }])
+    };
     let mut result = json!({
-        "content": []
+        "content": content,
+        "structuredContent": structured
     });
     if let Some(obj) = result.as_object_mut() {
-        let structured = structured.unwrap_or_else(|| tool_message_structured(req, text, is_error));
-        obj.insert("structuredContent".to_string(), structured);
         if is_error {
             obj.insert("isError".to_string(), Value::Bool(true));
         }
@@ -2588,27 +2664,10 @@ fn extract_tool_result_content_text(result: &Value) -> String {
 }
 
 fn extract_tool_result_structured_text(result: &Value) -> String {
-    let Some(structured) = result.get("structuredContent").and_then(Value::as_object) else {
-        return String::new();
-    };
-
-    let mut parts = Vec::new();
-    for key in [
-        "message",
-        "text",
-        "instructionText",
-        "stdout",
-        "stderr",
-        "value",
-    ] {
-        if let Some(text) = structured.get(key).and_then(Value::as_str) {
-            let text = text.trim();
-            if !text.is_empty() {
-                parts.push(text);
-            }
-        }
-    }
-    parts.join("\n")
+    result
+        .get("structuredContent")
+        .map(structured_content_text)
+        .unwrap_or_default()
 }
 
 fn remove_text_content_from_tool_result(req: &JsonRpcRequest, result: &mut Value) {
@@ -2625,6 +2684,10 @@ fn remove_text_content_from_tool_result(req: &JsonRpcRequest, result: &mut Value
                 "text": content_text,
             }),
         );
+    }
+
+    if result_obj.get("isError").and_then(Value::as_bool) == Some(true) {
+        return;
     }
 
     let Some(content) = result_obj.get_mut("content").and_then(Value::as_array_mut) else {
@@ -3433,7 +3496,7 @@ fn handle_read_files(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcRespo
                 "batchTruncated": output.batch_truncated,
                 "files": output.files,
             });
-            // tool_response drops `text` whenever structured content is given.
+            // Successful reads stay structured-only; failed reads also expose model-readable error content.
             if output.files.iter().all(|file| file.error.is_some()) {
                 // Per-entry errors are right for a batch, but a batch where
                 // nothing was read is a failed call, not a successful empty one.
@@ -3932,6 +3995,22 @@ mod tests {
                 && entry.get("type").and_then(Value::as_str) != Some("text")),
             "tool result content must not contain text entries: {content:?}"
         );
+    }
+
+    fn content_text(response: &JsonRpcResponse) -> &str {
+        response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| {
+                content
+                    .iter()
+                    .find(|entry| entry.get("type").and_then(Value::as_str) == Some("text"))
+            })
+            .and_then(|entry| entry.get("text"))
+            .and_then(Value::as_str)
+            .expect("missing text content")
     }
 
     #[test]
@@ -4451,6 +4530,159 @@ mod tests {
             Some(true)
         );
         assert!(result_text(&response).contains("Use start_command"));
+        assert!(content_text(&response).contains("Use start_command"));
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_command_failure_returns_error_text_content() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-run-failure-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let command = if cfg!(windows) {
+            "Write-Error 'boom'; exit 7"
+        } else {
+            "printf 'boom\\n' >&2; exit 7"
+        };
+        let req = tool_call_request("run_command", json!({ "command": command }));
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+
+        let result = response.result.as_ref().expect("missing result");
+        assert_eq!(result.get("isError").and_then(Value::as_bool), Some(true));
+        let structured = result
+            .get("structuredContent")
+            .expect("missing structured content");
+        assert_eq!(
+            structured.get("success").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(structured.get("exitCode").and_then(Value::as_i64), Some(7));
+        assert!(
+            structured
+                .get("stderr")
+                .and_then(Value::as_str)
+                .is_some_and(|stderr| stderr.contains("boom"))
+        );
+        assert!(content_text(&response).contains("boom"));
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn run_command_silent_failure_returns_exit_code_content() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-run-silent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let (command, expected_exit_code) = if cfg!(windows) {
+            ("exit 7", 7)
+        } else {
+            ("false", 1)
+        };
+        let req = tool_call_request("run_command", json!({ "command": command }));
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+
+        let result = response.result.as_ref().expect("missing result");
+        assert_eq!(result.get("isError").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result
+                .get("structuredContent")
+                .and_then(|structured| structured.get("exitCode"))
+                .and_then(Value::as_i64),
+            Some(expected_exit_code)
+        );
+        assert_eq!(
+            content_text(&response),
+            format!("Command failed with exit code {expected_exit_code}.")
+        );
+
+        let _ = std::fs::remove_dir_all(workspace_root);
+    }
+
+    #[test]
+    fn silent_timeout_error_uses_timed_out_metadata_in_content() {
+        let req = tool_call_request("run_command", json!({ "command": "sleep forever" }));
+        let response = tool_error_response_with_structured(
+            &req,
+            "(no output)".to_string(),
+            json!({
+                "toolName": "run_command",
+                "command": "sleep forever",
+                "stdout": "",
+                "stderr": "",
+                "success": false,
+                "exitCode": null,
+                "timedOut": true
+            }),
+        );
+
+        assert_eq!(content_text(&response), "Command timed out.");
+    }
+
+    #[tokio::test]
+    async fn run_command_timeout_with_stdout_keeps_timeout_reason_in_content() {
+        let workspace_root =
+            std::env::temp_dir().join(format!("catdesk-mcp-run-timeout-output-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        let workspace_root_str = workspace_root.to_string_lossy().into_owned();
+        let command = if cfg!(windows) {
+            "Write-Output 'before-timeout'; Start-Sleep -Seconds 1"
+        } else {
+            "printf 'before-timeout\\n'; sleep 1"
+        };
+        let req = tool_call_request("run_command", json!({ "command": command, "timeout": 100 }));
+        let response = handle_tools_call(
+            &req,
+            &workspace_root_str,
+            1,
+            Mode::Both,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+
+        let result = response.result.as_ref().expect("missing result");
+        assert_eq!(result.get("isError").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result
+                .get("structuredContent")
+                .and_then(|structured| structured.get("timedOut"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        let content = content_text(&response);
+        assert!(
+            content.contains("before-timeout"),
+            "missing command output: {content}"
+        );
+        assert!(
+            content.to_ascii_lowercase().contains("timed out"),
+            "missing timeout reason: {content}"
+        );
+
         let _ = std::fs::remove_dir_all(workspace_root);
     }
 
@@ -5028,7 +5260,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
+        assert_eq!(content_text(&response), result_text(&response));
         assert_eq!(
             response
                 .result
@@ -5071,7 +5303,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
+        assert_eq!(content_text(&response), result_text(&response));
         assert_eq!(
             response
                 .result
@@ -5114,7 +5346,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
+        assert_eq!(content_text(&response), result_text(&response));
         assert_eq!(
             response
                 .result
@@ -5147,7 +5379,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
+        assert_eq!(content_text(&response), result_text(&response));
         assert_eq!(
             response
                 .result
@@ -5679,7 +5911,7 @@ mod tests {
         )
         .await;
 
-        assert_no_text_content(&response);
+        assert_eq!(content_text(&response), result_text(&response));
         assert_eq!(
             response
                 .result
@@ -6588,6 +6820,15 @@ mod tests {
                 .and_then(|result| result.get("isError")),
             Some(&json!(true)),
             "a batch where nothing was read is a failed call"
+        );
+        let content = content_text(&response);
+        assert!(
+            content.contains("a.txt"),
+            "missing first failed path: {content}"
+        );
+        assert!(
+            content.contains("b.txt"),
+            "missing second failed path: {content}"
         );
 
         let _ = std::fs::remove_dir_all(workspace_root);
