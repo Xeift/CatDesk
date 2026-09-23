@@ -36,6 +36,43 @@ fn insert_env_path(paths: &mut BTreeSet<PathBuf>, variable: &str) {
     }
 }
 
+fn insert_nvm_lib_path(paths: &mut BTreeSet<PathBuf>, nvm_bin: &Path, nvm_dir: &Path) {
+    let Ok(nvm_bin) = nvm_bin.canonicalize() else {
+        return;
+    };
+    let Ok(nvm_dir) = nvm_dir.canonicalize() else {
+        return;
+    };
+    if nvm_bin.file_name() != Some(std::ffi::OsStr::new("bin")) {
+        return;
+    }
+    let Some(version_root) = nvm_bin.parent() else {
+        return;
+    };
+    let Ok(node_versions) = nvm_dir.join("versions/node").canonicalize() else {
+        return;
+    };
+    if version_root.parent() != Some(node_versions.as_path()) {
+        return;
+    }
+    let Some(lib) = real_dir(&version_root.join("lib")) else {
+        return;
+    };
+    if lib.parent() != Some(version_root) {
+        return;
+    }
+
+    paths.insert(lib);
+}
+
+fn insert_nvm_read_paths(paths: &mut BTreeSet<PathBuf>) {
+    let (Some(nvm_bin), Some(nvm_dir)) = (std::env::var_os("NVM_BIN"), std::env::var_os("NVM_DIR"))
+    else {
+        return;
+    };
+    insert_nvm_lib_path(paths, Path::new(&nvm_bin), Path::new(&nvm_dir));
+}
+
 fn insert_ssh_read_paths(paths: &mut BTreeSet<PathBuf>, home: &Path) {
     let ssh_dir = home.join(".ssh");
     for name in ["config", "known_hosts", "known_hosts2"] {
@@ -77,6 +114,10 @@ fn runtime_read_paths() -> BTreeSet<PathBuf> {
     // Executables installed outside the standard system prefixes must remain
     // executable when their directory is explicitly present in PATH.
     insert_env_path_list(&mut paths, "PATH");
+
+    // NVM's npm/npx launchers in NVM_BIN are symlinks into the sibling lib
+    // directory. Expose only that current version's lib tree, read-only.
+    insert_nvm_read_paths(&mut paths);
 
     // Rust toolchains are commonly installed under the user's home directory.
     // Expose only executable/cache trees from Cargo so registry credentials
@@ -577,6 +618,77 @@ pub fn helper_command(
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn nvm_read_paths_include_only_current_version_lib() {
+        let tree = TempTree::new();
+        let nvm_dir = tree.path().join(".nvm");
+        let version_root = nvm_dir.join("versions/node/v26.8.1");
+        let bin = version_root.join("bin");
+        let lib = version_root.join("lib");
+        std::fs::create_dir_all(&bin).expect("create NVM bin");
+        std::fs::create_dir_all(&lib).expect("create NVM lib");
+
+        let mut paths = BTreeSet::new();
+        insert_nvm_lib_path(&mut paths, &bin, &nvm_dir);
+
+        assert!(paths.contains(&lib.canonicalize().expect("canonical NVM lib")));
+        assert!(!paths.contains(&version_root.canonicalize().expect("canonical version root")));
+        assert!(!paths.contains(&nvm_dir.canonicalize().expect("canonical NVM dir")));
+    }
+
+    #[test]
+    fn nvm_read_paths_reject_symlinked_lib_escaping_version_root() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new();
+        let nvm_dir = tree.path().join(".nvm");
+        let version_root = nvm_dir.join("versions/node/v26.8.1");
+        let bin = version_root.join("bin");
+        let outside = tree.path().join("outside");
+        std::fs::create_dir_all(&bin).expect("create NVM bin");
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        symlink(&outside, version_root.join("lib")).expect("symlink NVM lib");
+
+        let mut paths = BTreeSet::new();
+        insert_nvm_lib_path(&mut paths, &bin, &nvm_dir);
+
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn nvm_read_paths_reject_nonstandard_path_inside_nvm_dir() {
+        let tree = TempTree::new();
+        let nvm_dir = tree.path().join(".nvm");
+        let version_root = nvm_dir.join("foo");
+        let bin = version_root.join("bin");
+        let lib = version_root.join("lib");
+        std::fs::create_dir_all(nvm_dir.join("versions/node")).expect("create NVM versions");
+        std::fs::create_dir_all(&bin).expect("create nonstandard bin");
+        std::fs::create_dir_all(&lib).expect("create nonstandard lib");
+
+        let mut paths = BTreeSet::new();
+        insert_nvm_lib_path(&mut paths, &bin, &nvm_dir);
+
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn nvm_read_paths_reject_bin_outside_nvm_dir() {
+        let tree = TempTree::new();
+        let nvm_dir = tree.path().join(".nvm");
+        let outside_root = tree.path().join("outside/node");
+        let bin = outside_root.join("bin");
+        let lib = outside_root.join("lib");
+        std::fs::create_dir_all(&nvm_dir).expect("create NVM dir");
+        std::fs::create_dir_all(&bin).expect("create outside bin");
+        std::fs::create_dir_all(&lib).expect("create outside lib");
+
+        let mut paths = BTreeSet::new();
+        insert_nvm_lib_path(&mut paths, &bin, &nvm_dir);
+
+        assert!(paths.is_empty());
+    }
 
     #[test]
     fn runtime_read_paths_include_resolv_conf_target() {
