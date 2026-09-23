@@ -38,9 +38,19 @@ Here's the solution: most people with a Plus subscription do not use even 10% of
 That's the idea behind CatDesk! It gives ChatGPT Web tools like `write` and `run_command` to edit files on your computer.
 
 <p align="center">
-  <img src="docs/images/thinking_usage_limits.png" alt="ChatGPT reasoning usage limits for GPT-5.5 and GPT-5.6" width="900"><br>
-  <em>GPT-5.5: <a href="https://web.archive.org/web/20260519111010/https://help.openai.com/en/articles/11909943-gpt-55-in-chatgpt">3,000 messages/week</a>, GPT-5.6: <a href="https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt">unknown</a> but we have never hit the limit</em>
+  <img src="docs/images/thinking_usage_limits.png" alt="ChatGPT reasoning usage limits for GPT-5.5, GPT-5.6 and GPT-6" width="900"><br>
+  <em>GPT-5.5: <a href="https://web.archive.org/web/20260519111010/https://help.openai.com/en/articles/11909943-gpt-55-in-chatgpt">3,000 messages/week</a><br>
+  GPT-5.6: <a href="https://web.archive.org/web/20260710134918/https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt">"existing ChatGPT limits"</a>, unclear but we have never hit the limit<br>
+  GPT-6 Astra: <a href="https://web.archive.org/web/20260916192117/https://help.openai.com/en/articles/20001354-gpt-56-and-gpt-6-pro-in-chatgpt">not available for Plus in Chat mode</a></em>
 </p>
+
+> [!NOTE]
+> Although custom connectors are a valid and normal official feature of ChatGPT Chat mode, which is totally fine to use and will not lead to a ban, I believe OpenAI will eventually kill this kind of tool because of the lack of compute. It will probably:
+>
+> - Introduce usage limits for custom connectors
+> - Merge Chat and Work Mode, with no separate limits anymore
+>
+> There have been some signs recently. For example, the reasoning time for GPT-5.6 Sol High has been reduced from 102 mins → 25 mins, and GPT-6 Sol/Astra are not being added to Chat mode for Plus users (at least for now). I believe this kind of project will not last long (maybe until the end of 2026?), but I'll try my best to maintain CatDesk in the meantime.
 
 # How does this work?
 
@@ -83,6 +93,8 @@ If you don't want to use CatDesk, here are some similar projects you can try:
 | [Proxide](https://github.com/tt-a1i/proxide) | Agent-agnostic workspace bridge for using web-based models with local repositories through MCP or a browser fallback. |
 | [codex-mcp](https://github.com/mollehxh/codex-mcp) | Small MCP server exposing a Codex-like workspace interface over stdio or HTTP. |
 
+Feel free to fork CatDesk and make your own version!
+
 > [!NOTE]
 > We do not own or maintain any of the projects listed above. They are included here for informational purposes only.
 
@@ -101,22 +113,18 @@ If you don't want to use CatDesk, here are some similar projects you can try:
 1. Install CatDesk globally with npm.
 
    ```bash
-   npm install -g catdesk
+   npm i -g catdesk --allow-scripts=catdesk
    ```
 
-2. Run CatDesk from any terminal directory.
+2. Run CatDesk.
 
    ```bash
    catdesk
    ```
 
-   When CatDesk starts, choose `Control Computer`, `Control Browser`, or `Both`. Press `l` on the mode selection screen to switch between English and Traditional Chinese; the preference is saved in `~/.catdesk/config.toml`. Traditional Chinese is applied across the main dashboard, settings, browser selection, ngrok setup, and common runtime log messages shown in the TUI; exported logs keep their original text for debugging. If browser control is enabled, select a supported Chromium browser. On macOS, CatDesk detects standard browser app bundles in `/Applications` and `~/Applications` in addition to binaries available on `PATH`.
+   Choose `Control Computer`, `Control Browser`, or `Both`.
 
-   On first launch, CatDesk will ask you to enter your **ngrok authtoken** and **ngrok static domain** (e.g. `my-app.ngrok-free.dev`). You can get both from the [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup). These are saved to `~/.catdesk/config.toml` and reused on subsequent launches.
-
-   By default, CatDesk listens on port `3200`. You can override it with `PORT`. The workspace root defaults to the current working directory and can be overridden with `WORKSPACE_ROOT`.
-
-   On the first launch from macOS Terminal.app, CatDesk asks whether you want to use its dedicated `CatDesk` Terminal profile and saves that choice to `~/.catdesk/config.toml`. If enabled and the current tab is not already using that profile, CatDesk applies it, closes any temporary helper window, and asks you to run the same command again in that tab. Subsequent launches reuse the saved preference. Set `CATDESK_SKIP_MACOS_TERMINAL_PROFILE=1` to temporarily keep the current Terminal session untouched regardless of the saved preference.
+   On first launch, enter your **ngrok authtoken** and **static domain** from the [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup). CatDesk will save them for future launches.
 
 3. Wait for the TUI to show the MCP Server URL.
 

@@ -38,9 +38,19 @@
 這就是 CatDesk 的核心概念！它讓 ChatGPT Web 擁有 `write`、`run_command` 等工具，可以直接修改你電腦上的檔案。
 
 <p align="center">
-  <img src="docs/images/thinking_usage_limits.png" alt="ChatGPT reasoning usage limits for GPT-5.5 and GPT-5.6" width="900"><br>
-  <em>GPT-5.5：<a href="https://web.archive.org/web/20260519111010/https://help.openai.com/en/articles/11909943-gpt-55-in-chatgpt">每週 3,000 則訊息</a>，GPT-5.6：<a href="https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt">未知</a>，但我們從來沒有撞到上限</em>
+  <img src="docs/images/thinking_usage_limits.png" alt="ChatGPT reasoning usage limits for GPT-5.5, GPT-5.6 and GPT-6" width="900"><br>
+  <em>GPT-5.5：<a href="https://web.archive.org/web/20260519111010/https://help.openai.com/en/articles/11909943-gpt-55-in-chatgpt">每週 3,000 則訊息</a><br>
+  GPT-5.6：<a href="https://web.archive.org/web/20260710134918/https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt">「現有 ChatGPT 額度限制」</a>，實際上限不明，但我們從來沒有撞到上限<br>
+  GPT-6 Astra：<a href="https://web.archive.org/web/20260916192117/https://help.openai.com/en/articles/20001354-gpt-56-and-gpt-6-pro-in-chatgpt">Plus 使用者目前無法在 Chat mode 使用</a></em>
 </p>
+
+> [!NOTE]
+> 雖然 Custom Connector 是 ChatGPT Chat mode 正常且官方支援的功能，使用它完全沒問題，也不會因此被封鎖，但我認為 OpenAI 最終可能會因為算力不足而終止這類工具的使用方式。可能會：
+>
+> - 對 Custom Connector 加入使用額度限制
+> - 合併 Chat 與 Work Mode，不再提供分開的額度
+>
+> 最近已經出現一些跡象。例如 GPT-5.6 Sol High 的 reasoning time 已從 102 分鐘縮短到 25 分鐘，而 GPT-6 Sol/Astra 也沒有加入 Plus 使用者的 Chat mode（至少目前沒有）。我認為這類專案可能不會維持太久（也許到 2026 年底？），但在那之前我會盡力維護 CatDesk。
 
 # 原理是什麼？
 
@@ -83,6 +93,8 @@ ChatGPT Web + CatDesk
 | [Proxide](https://github.com/tt-a1i/proxide) | 與 agent 無關的 workspace bridge，可讓網頁版模型透過 MCP 或 browser fallback 操作本機 repository。 |
 | [codex-mcp](https://github.com/mollehxh/codex-mcp) | 小型 MCP server，透過 stdio 或 HTTP 提供類 Codex workspace 介面。 |
 
+歡迎 fork CatDesk，做出你自己的版本！
+
 > [!NOTE]
 > 上述專案皆不屬於我們，我們也不是其維護者。列在這裡僅供參考。
 
@@ -101,22 +113,18 @@ ChatGPT Web + CatDesk
 1. 用 npm 全域安裝 CatDesk。
 
    ```bash
-   npm install -g catdesk
+   npm i -g catdesk --allow-scripts=catdesk
    ```
 
-2. 在任意終端機目錄執行 CatDesk。
+2. 執行 CatDesk。
 
    ```bash
    catdesk
    ```
 
-   CatDesk 啟動後，可以選擇 `Control Computer`、`Control Browser` 或 `Both`。在模式選擇畫面按 `l` 可以在 English 與繁體中文之間切換；語言偏好會儲存在 `~/.catdesk/config.toml`。繁體中文會套用到主 Dashboard、設定、瀏覽器選擇、ngrok 設定，以及 TUI 顯示的常見 runtime log 訊息；為了方便除錯，匯出的 log 仍保留原始文字。如果啟用了瀏覽器控制，請選擇一個支援的 Chromium 瀏覽器。在 macOS 上，除了 `PATH` 中的 binary，CatDesk 也會偵測 `/Applications` 與 `~/Applications` 裡的標準瀏覽器 App bundle。
+   選擇 `Control Computer`、`Control Browser` 或 `Both`。
 
-   第一次啟動時，CatDesk 會要求你輸入 **ngrok authtoken** 和 **ngrok static domain**（例如 `my-app.ngrok-free.dev`）。這兩項都可以從 [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup) 取得，並會儲存在 `~/.catdesk/config.toml`，之後啟動時自動重用。
-
-   CatDesk 預設監聽 `3200` port。可以用 `PORT` 覆寫。Workspace root 預設為你啟動 CatDesk 時所在的目錄，也可以用 `WORKSPACE_ROOT` 覆寫。
-
-   第一次從 macOS Terminal.app 啟動時，CatDesk 會詢問你是否要使用專用的 `CatDesk` Terminal profile，並把選擇儲存在 `~/.catdesk/config.toml`。如果啟用，而且目前分頁尚未使用該 profile，CatDesk 會套用它、關閉暫時建立的 helper window，並要求你在該分頁再次執行相同指令。之後啟動時會直接重用已儲存的偏好。設定 `CATDESK_SKIP_MACOS_TERMINAL_PROFILE=1` 可以暫時保留目前的 Terminal session，不論已儲存的偏好為何。
+   第一次啟動時，從 [ngrok dashboard](https://dashboard.ngrok.com/get-started/setup) 取得並輸入 **ngrok authtoken** 和 **static domain**。CatDesk 會儲存設定供之後使用。
 
 3. 等待 TUI 顯示 MCP Server URL。
 
