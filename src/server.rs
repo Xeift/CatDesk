@@ -2382,12 +2382,13 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).expect("create workspace");
         std::fs::create_dir_all(&config_root).expect("create config dir");
 
-        let app = AppState::new_for_test(
+        let mut app = AppState::new_for_test(
             8787,
             workspace_root.to_string_lossy().into_owned(),
             config_path.clone(),
         )
         .expect("create app state");
+        app.sandbox_enabled = false;
         let app_state = Arc::new(Mutex::new(app));
         let (ui_tx, _ui_rx) = unbounded_channel();
         let command_jobs = CommandJobManager::new();
@@ -2960,6 +2961,7 @@ async fn post_mcp_inner(
         tool_mode,
         set_catdesk_as_co_author,
         handoff_enabled,
+        sandbox_enabled,
         ngrok_url,
         mcp_path,
         partner_binagotchy_seed,
@@ -2973,6 +2975,7 @@ async fn post_mcp_inner(
             app.tool_mode,
             app.set_catdesk_as_co_author,
             app.handoff_enabled,
+            app.sandbox_enabled,
             app.ngrok_url.clone(),
             app.mcp_path(),
             app.partner_binagotchy_seed.clone(),
@@ -3003,6 +3006,7 @@ async fn post_mcp_inner(
         tool_mode,
         set_catdesk_as_co_author,
         handoff_enabled,
+        sandbox_enabled,
         s.catdesk_instruction_called.load(Ordering::Acquire),
         &s.command_jobs,
         &s.devtools,
