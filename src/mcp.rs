@@ -2278,6 +2278,7 @@ When a user asks you to do anything, use Workspace first, since the user expects
 If there's a connection issue with the CatDesk connector and you have already retried, stop what you are doing and explicitly report the raw error to the user.
 Do NOT fall back to the sandbox container.
 When writing a git commit message, first run `git log --oneline -n 5` and keep the commit style consistent with recent history.
+Do not manually add CatDesk co-author attribution or pass a CatDesk `Co-Authored-By` trailer to `git commit`; CatDesk manages that automatically according to the user's setting.
 Always specify the branch explicitly when using `git push`."#
         .lines()
         .map(str::to_string)
@@ -5757,6 +5758,15 @@ mod tests {
         assert!(!instruction.contains("persistent ChatGPT Library"));
         assert!(!instruction.contains("Library Search must be enabled"));
         assert!(!instruction.contains("use create_handoff"));
+    }
+
+    #[test]
+    fn catdesk_instruction_tells_agents_not_to_write_catdesk_trailers() {
+        let instruction =
+            catdesk_instruction_text("/tmp/workspace", Mode::Both, ToolMode::MultiTools, false)
+                .expect("build instruction");
+        assert!(instruction.contains("Do not manually add CatDesk co-author attribution"));
+        assert!(instruction.contains("CatDesk manages that automatically"));
     }
 
     #[tokio::test]
