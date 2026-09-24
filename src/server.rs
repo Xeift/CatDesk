@@ -23,6 +23,7 @@ use crate::state::{
     TokenStatsLayout, UsageTotals, parse_seed_hex, save_agents_path_mode, save_show_detail_mode,
     save_token_stats_layout,
 };
+use crate::workspace_router;
 
 const STATELESS_FLOW_ID: &str = "stateless";
 
@@ -2850,6 +2851,187 @@ mod tests {
         let _ = std::fs::remove_dir_all(workspace_root);
         let _ = std::fs::remove_dir_all(config_root);
     }
+
+    #[tokio::test]
+    async fn workspace_router_forwards_tool_calls_to_bound_worker() {
+        let worker_workspace = unique_temp_path("catdesk-workspace-route-worker");
+        let router_workspace = unique_temp_path("catdesk-workspace-route-router");
+        let config_root = unique_temp_path("catdesk-workspace-route-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&worker_workspace).expect("create worker workspace");
+        std::fs::create_dir_all(&router_workspace).expect("create router workspace");
+        std::fs::create_dir_all(&config_root).expect("create config root");
+
+        let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind worker");
+        let worker_port = worker_listener.local_addr().expect("worker addr").port();
+        let worker_app = Router::new().fallback(post(|| async {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"forwarded":true}"#))
+                .unwrap()
+        }));
+        let worker_task = tokio::spawn(async move {
+            axum::serve(worker_listener, worker_app)
+                .await
+                .expect("serve worker");
+        });
+
+        workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("register worker");
+
+        let app = AppState::new_for_test(
+            8787,
+            router_workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create router app state");
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "route-test",
+            "method": "tools/call",
+            "params": {
+                "name": "read",
+                "arguments": {"paths": ["README.md"]},
+                "_meta": {"openai/session": "session-worker-test"}
+            }
+        });
+        let body = Bytes::from(request.to_string());
+        let headers = HeaderMap::new();
+
+        let response = route_workspace_tool_call(&server_state, &request, &body, &headers)
+            .await
+            .expect("request should be forwarded");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read forwarded response");
+        assert_eq!(response_body.as_ref(), br#"{"forwarded":true}"#);
+
+        workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("unregister worker");
+        worker_task.abort();
+        let _ = worker_task.await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(config_root);
+        let _ = std::fs::remove_dir_all(router_workspace);
+        let _ = std::fs::remove_dir_all(worker_workspace);
+    }
+}
+
+async fn route_workspace_tool_call(
+    s: &ServerState,
+    body: &Value,
+    body_bytes: &Bytes,
+    headers: &HeaderMap,
+) -> Option<Response<Body>> {
+    if body.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return None;
+    }
+
+    let session_id = workspace_router::session_id_from_request(body)?;
+    let (workspace_worker, local_port, mcp_path) = {
+        let app = s.app.lock().await;
+        (app.workspace_worker, app.port, app.mcp_path())
+    };
+    if workspace_worker {
+        return None;
+    }
+
+    let target = match workspace_router::resolve_session(session_id) {
+        Ok(target) => target,
+        Err(message) => {
+            return Some(modern_jsonrpc_error_response(
+                StatusCode::CONFLICT,
+                body.get("id"),
+                -32040,
+                "WorkspaceRoutingError",
+                Some(json!({ "message": message })),
+            ));
+        }
+    };
+    if target.port == local_port {
+        return None;
+    }
+
+    let url = format!("http://127.0.0.1:{}{}", target.port, mcp_path);
+    let client = reqwest::Client::new();
+    let mut request = client
+        .post(url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body_bytes.to_vec());
+
+    for name in ["mcp-protocol-version", "mcp-method", "mcp-name"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            request = request.header(name, value);
+        }
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return Some(modern_jsonrpc_error_response(
+                StatusCode::BAD_GATEWAY,
+                body.get("id"),
+                -32041,
+                "WorkspaceWorkerUnavailable",
+                Some(json!({
+                    "workspace": target.workspace,
+                    "port": target.port,
+                    "message": error.to_string(),
+                })),
+            ));
+        }
+    };
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Some(modern_jsonrpc_error_response(
+                StatusCode::BAD_GATEWAY,
+                body.get("id"),
+                -32042,
+                "WorkspaceWorkerResponseError",
+                Some(json!({ "message": error.to_string() })),
+            ));
+        }
+    };
+
+    {
+        let mut app = s.app.lock().await;
+        app.log(
+            "INFO",
+            format!(
+                "Routed ChatGPT session {} to workspace {} on local port {}",
+                session_id, target.workspace, target.port
+            ),
+        );
+    }
+
+    Some(
+        Response::builder()
+            .status(status.as_u16())
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(bytes))
+            .unwrap(),
+    )
 }
 
 // ── POST /<slug>/mcp ────────────────────────────────────────
@@ -2992,6 +3174,15 @@ async fn post_mcp_inner(
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "ERROR",
             message: format!("← POST {mcp_path} {request_summary} validation-error"),
+        });
+        return response;
+    }
+
+    if let Some(response) = route_workspace_tool_call(&s, &body, &body_bytes, headers).await {
+        let _ = s.ui_events.send(ServerUiEvent::RecordFlow {
+            flow_id: STATELESS_FLOW_ID.to_string(),
+            events: vec![request_flow_event],
+            direction: FlowDirection::Backward,
         });
         return response;
     }

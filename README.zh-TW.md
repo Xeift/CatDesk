@@ -185,6 +185,30 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
+# 單一 connector 的多 workspace
+
+CatDesk 可以讓多個本機 workspace 共用同一個 ChatGPT connector，不需要每個專案各自建立 ngrok domain 與 connector。
+
+先在第一個專案正常啟動 CatDesk：
+
+```bash
+cd ~/ProjectA
+catdesk
+```
+
+第一個 process 會在 `3200` port 上作為公開 router，並持有原本的 ngrok tunnel。接著在另一個專案再次啟動：
+
+```bash
+cd ~/ProjectB
+catdesk
+```
+
+如果 CatDesk 偵測到既有的本機 router，新 process 會自動成為 workspace worker，使用 `3201`–`3299` 之間可用的本機 port，不會再建立另一條 ngrok tunnel，也不需要第二個 ChatGPT connector。
+
+ChatGPT 的 tool call 會帶有 `_meta["openai/session"]`，這是一個匿名化的對話識別碼。新 ChatGPT 對話第一次呼叫工具時，router 會把該 session 綁定到第一個目前正在執行、且尚未被其他對話綁定的 workspace。之後同一個對話的 tool call 都會路由到同一個 workspace process。CatDesk 會把本機 workspace/session 對應關係存在 `~/.catdesk/workspace_id.toml`。
+
+因此 Project A 與 Project B 仍各自保有 CatDesk 原本的 workspace path guard，但只需要一個公開 connector。重新啟動某個 workspace 裡的 CatDesk，會讓該 workspace 重新變成可供新對話綁定的狀態。使用 worker workspace 時，持有 `3200` port 的 router process 必須保持執行。
+
 # 技術架構
 
 | 項目 | 技術 |

@@ -473,6 +473,7 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
     match name {
         "catdesk_instruction" => {
             properties.insert("instructionText".to_string(), json!({ "type": "string" }));
+            properties.insert("workspaceRoot".to_string(), json!({ "type": "string" }));
         }
         "read" => {
             properties.insert(
@@ -2284,6 +2285,10 @@ Always specify the branch explicitly when using `git push`."#
         .map(str::to_string)
         .collect();
 
+    lines.push(format!(
+        "This ChatGPT session is routed to CatDesk workspace `{workspace_root}`. Keep all workspace file and command operations inside this workspace."
+    ));
+
     if mode.computer_enabled() {
         lines.push("Use read to read files and search to search the workspace. Name every file you need in one read call.".to_string());
         if handoff_enabled {
@@ -2357,6 +2362,7 @@ fn catdesk_instruction_structured(
     Ok(json!({
         "toolName": "catdesk_instruction",
         "instructionText": instruction_text,
+        "workspaceRoot": workspace_root,
     }))
 }
 
@@ -4777,6 +4783,7 @@ mod tests {
         for (tool_name, field) in [
             ("run_command", "stdout"),
             ("catdesk_instruction", "instructionText"),
+            ("catdesk_instruction", "workspaceRoot"),
             ("read", "files"),
             ("search", "searchResults"),
             ("write", "bytesWritten"),
@@ -6282,6 +6289,10 @@ mod tests {
                 .is_some()
         );
         assert_eq!(
+            structured.get("workspaceRoot").and_then(Value::as_str),
+            Some(workspace_root_str.as_str())
+        );
+        assert_eq!(
             response
                 .result
                 .as_ref()
@@ -7360,6 +7371,10 @@ hello world"
                 .get("instructionText")
                 .and_then(Value::as_str)
                 .is_some()
+        );
+        assert_eq!(
+            structured.get("workspaceRoot").and_then(Value::as_str),
+            Some("/tmp/workspace")
         );
         assert!(structured.get("workspacePath").is_none());
         assert!(structured.get("agentsPath").is_none());
