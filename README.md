@@ -185,6 +185,30 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
+# Multiple workspaces with one connector
+
+CatDesk can keep one public ChatGPT connector while multiple local CatDesk processes are open in different workspaces.
+
+Start CatDesk normally in the first project:
+
+```bash
+cd ~/ProjectA
+catdesk
+```
+
+The first process owns the public connector and ngrok tunnel on port `3200`. Start CatDesk again from another project:
+
+```bash
+cd ~/ProjectB
+catdesk
+```
+
+When CatDesk detects the existing local router, the new process automatically starts as a workspace worker on a free local port in `3201`–`3299` and does not create another ngrok tunnel or connector.
+
+ChatGPT tool calls include `_meta["openai/session"]`, an anonymized conversation identifier. On the first tool call from a new ChatGPT conversation, the router binds that session to the first running workspace that is not already bound to another conversation. Later tool calls from the same conversation are routed to the same workspace process. CatDesk stores the local workspace/session mapping in `~/.catdesk/workspace_id.toml`.
+
+This means Project A and Project B can stay isolated behind their own CatDesk workspace guards while sharing one ChatGPT connector. Restarting CatDesk inside a workspace makes that workspace available for a new conversation again. The router process that owns port `3200` must remain running while worker workspaces are in use.
+
 # Stack
 
 | Part | Stack |

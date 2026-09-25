@@ -16,6 +16,7 @@ mod server;
 mod startup;
 mod state;
 mod theme;
+mod workspace_router;
 mod workspace_tools;
 
 use crossterm::{
@@ -38,7 +39,7 @@ use state::{
     ToolMode, UiLanguage, UsageTotals, WidgetCornerStyle, app_config_path, flow_anim_lit_count,
     load_app_config, load_macos_terminal_profile, load_ngrok_authtoken, load_ngrok_domain,
     local_now, save_macos_terminal_profile, save_ngrok_authtoken, save_ngrok_domain,
-    save_widget_corner_style, user_home_dir,
+    save_widget_corner_style, set_process_config_path_override, user_home_dir,
 };
 use std::collections::HashMap;
 use std::io::{Write, stdout};
@@ -1697,16 +1698,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let port: u16 = std::env::var("PORT")
+    let explicit_port = std::env::var("PORT")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3200);
+        .and_then(|v| v.parse::<u16>().ok());
     let workspace_root = match std::env::var("WORKSPACE_ROOT") {
         Ok(path) => path,
         Err(_) => std::env::current_dir()?.to_string_lossy().into_owned(),
     };
 
-    let state: SharedState = Arc::new(Mutex::new(AppState::new(port, workspace_root)?));
+    let mut app = AppState::new(
+        explicit_port.unwrap_or(workspace_router::ROUTER_PORT),
+        workspace_root,
+    )?;
+    if explicit_port.is_none() && workspace_router::router_is_running(&app.mcp_slug).await {
+        app.port = workspace_router::find_available_worker_port()?;
+        app.workspace_worker = true;
+        let worker_config = app.isolate_workspace_worker_config()?;
+        set_process_config_path_override(worker_config.clone()).map_err(std::io::Error::other)?;
+        app.log(
+            "INFO",
+            format!(
+                "Existing CatDesk router detected; registered this process as a workspace worker on port {} with isolated config {}",
+                app.port,
+                worker_config.display()
+            ),
+        );
+    }
+    let state: SharedState = Arc::new(Mutex::new(app));
     {
         let mut app = state.lock().await;
         app.persist_state_with_log();
@@ -1761,6 +1779,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cleanup after the TUI is gone so quit never appears frozen on screen.
     let command_jobs = { state.lock().await.command_jobs.clone() };
     command_jobs.cancel_all().await;
+    let (registered_workspace, registered_port) = {
+        let app = state.lock().await;
+        (app.workspace_root.clone(), app.port)
+    };
     {
         let mut app = state.lock().await;
         if let Some(handle) = app.server_handle.take() {
@@ -1781,6 +1803,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.remote_connected = false;
         app.last_remote_activity_ms = None;
     }
+    let _ = workspace_router::unregister_workspace(&registered_workspace, registered_port);
 
     result
 }
@@ -5200,8 +5223,9 @@ async fn ensure_selected_browser_remote_debugging(
         return Some(selected);
     };
 
+    let catdesk_port = state.lock().await.port;
     let user_data_dir = format!(
-        "/tmp/catdesk-remote-debug-{}",
+        "/tmp/catdesk-remote-debug-{}-{catdesk_port}",
         sanitize_for_filename(&selected.binary)
     );
     if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
@@ -5449,6 +5473,17 @@ async fn start_services(
         }
     };
 
+    let (workspace_root, workspace_worker) = {
+        let app = state.lock().await;
+        (app.workspace_root.clone(), app.workspace_worker)
+    };
+    if let Err(error) = workspace_router::register_workspace(&workspace_root, port) {
+        state.lock().await.log(
+            "ERROR",
+            format!("Failed to register workspace for session routing: {error}"),
+        );
+    }
+
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
@@ -5458,10 +5493,16 @@ async fn start_services(
         app.server_running = true;
         app.server_handle = Some(handle);
         app.log("INFO", format!("MCP Server started on port {port}"));
+        if workspace_worker {
+            app.log(
+                "INFO",
+                "Workspace worker is ready; the existing CatDesk connector will route a ChatGPT session here when needed."
+                    .into(),
+            );
+        }
     }
 
-    // Start ngrok
-    if let Err(e) = ngrok::start(state.clone()).await {
+    if !workspace_worker && let Err(e) = ngrok::start(state.clone()).await {
         state.lock().await.log("ERROR", format!("ngrok: {e}"));
     }
 
