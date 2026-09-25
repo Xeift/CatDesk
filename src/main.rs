@@ -65,6 +65,7 @@ const STATUS_LABEL_WIDTH: usize = 19;
 const GPT_5_6_AND_EARLIER_INPUT_USD_PER_1M: f64 = 5.0;
 const GPT_5_6_AND_EARLIER_OUTPUT_USD_PER_1M: f64 = 30.0;
 const PRICE_DISPLAY_DECIMALS: usize = 6;
+const USAGE_COUNT_ANIM_DURATION: Duration = Duration::from_millis(480);
 const NGROK_SETUP_URL: &str = "https://dashboard.ngrok.com/get-started/setup";
 const CHATGPT_CONNECTOR_SETTINGS_URL: &str = "https://chatgpt.com/apps#settings/Connectors";
 const CHATGPT_PLUGIN_SETTINGS_URL: &str = "https://chatgpt.com/#settings/Plugins";
@@ -710,59 +711,204 @@ fn usage_value_widths(
     std::array::from_fn(|index| first[index].len().max(second[index].len()))
 }
 
-fn usage_line(
-    usage: &UsageTotals,
+#[derive(Clone, Debug)]
+struct UsageAnimationFrame {
+    usage: UsageTotals,
     cost_usd: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct UsageAnimationRow {
+    initialized: bool,
+    from_usage: UsageTotals,
+    target_usage: UsageTotals,
+    from_cost_usd: f64,
+    target_cost_usd: f64,
+    started_at: Option<Instant>,
+}
+
+impl UsageAnimationRow {
+    fn sample_values(&self, now: Instant) -> (UsageTotals, f64) {
+        if !self.initialized {
+            return (UsageTotals::default(), 0.0);
+        }
+
+        let progress = self
+            .started_at
+            .map(|started_at| {
+                (now.saturating_duration_since(started_at).as_secs_f64()
+                    / USAGE_COUNT_ANIM_DURATION.as_secs_f64())
+                .clamp(0.0, 1.0)
+            })
+            .unwrap_or(1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        let lerp_u64 = |from: u64, target: u64| -> u64 {
+            if target >= from {
+                from.saturating_add(((target - from) as f64 * eased).round() as u64)
+            } else {
+                from.saturating_sub(((from - target) as f64 * eased).round() as u64)
+            }
+        };
+
+        (
+            UsageTotals {
+                tool_input_tokens: lerp_u64(
+                    self.from_usage.tool_input_tokens,
+                    self.target_usage.tool_input_tokens,
+                ),
+                tool_output_tokens: lerp_u64(
+                    self.from_usage.tool_output_tokens,
+                    self.target_usage.tool_output_tokens,
+                ),
+                total_tokens: lerp_u64(
+                    self.from_usage.total_tokens,
+                    self.target_usage.total_tokens,
+                ),
+                tool_call_count: lerp_u64(
+                    self.from_usage.tool_call_count,
+                    self.target_usage.tool_call_count,
+                ),
+            },
+            self.from_cost_usd + (self.target_cost_usd - self.from_cost_usd) * eased,
+        )
+    }
+
+    fn update(
+        &mut self,
+        target_usage: &UsageTotals,
+        target_cost_usd: f64,
+        now: Instant,
+    ) -> UsageAnimationFrame {
+        if !self.initialized {
+            self.initialized = true;
+            self.from_usage = target_usage.clone();
+            self.target_usage = target_usage.clone();
+            self.from_cost_usd = target_cost_usd;
+            self.target_cost_usd = target_cost_usd;
+            return UsageAnimationFrame {
+                usage: target_usage.clone(),
+                cost_usd: target_cost_usd,
+            };
+        }
+
+        let target_changed = target_usage != &self.target_usage
+            || (target_cost_usd - self.target_cost_usd).abs() > f64::EPSILON;
+        if target_changed {
+            let decreased = target_usage.tool_input_tokens < self.target_usage.tool_input_tokens
+                || target_usage.tool_output_tokens < self.target_usage.tool_output_tokens
+                || target_usage.total_tokens < self.target_usage.total_tokens
+                || target_usage.tool_call_count < self.target_usage.tool_call_count
+                || target_cost_usd + f64::EPSILON < self.target_cost_usd;
+
+            if decreased {
+                self.from_usage = target_usage.clone();
+                self.target_usage = target_usage.clone();
+                self.from_cost_usd = target_cost_usd;
+                self.target_cost_usd = target_cost_usd;
+                self.started_at = None;
+            } else {
+                let (current_usage, current_cost_usd) = self.sample_values(now);
+                self.from_usage = current_usage;
+                self.target_usage = target_usage.clone();
+                self.from_cost_usd = current_cost_usd;
+                self.target_cost_usd = target_cost_usd;
+                self.started_at = Some(now);
+            }
+        }
+
+        let (usage, cost_usd) = self.sample_values(now);
+        if self.started_at.is_some_and(|started_at| {
+            now.saturating_duration_since(started_at) >= USAGE_COUNT_ANIM_DURATION
+        }) {
+            self.from_usage = self.target_usage.clone();
+            self.from_cost_usd = self.target_cost_usd;
+            self.started_at = None;
+        }
+
+        UsageAnimationFrame { usage, cost_usd }
+    }
+}
+
+#[derive(Debug, Default)]
+struct UsageAnimationState {
+    session: UsageAnimationRow,
+    all_time: UsageAnimationRow,
+}
+
+impl UsageAnimationState {
+    fn frames(
+        &mut self,
+        session_usage: &UsageTotals,
+        session_cost_usd: f64,
+        all_time_usage: &UsageTotals,
+        all_time_cost_usd: f64,
+        now: Instant,
+    ) -> (UsageAnimationFrame, UsageAnimationFrame) {
+        (
+            self.session.update(session_usage, session_cost_usd, now),
+            self.all_time.update(all_time_usage, all_time_cost_usd, now),
+        )
+    }
+}
+
+fn usage_value_spans(value: &str, width: usize, base_color: Color) -> Vec<Span<'static>> {
+    vec![Span::styled(
+        format!("{value:<width$}"),
+        Style::default().fg(base_color).add_modifier(Modifier::BOLD),
+    )]
+}
+
+fn usage_line(
+    frame: &UsageAnimationFrame,
     status_label: Span<'static>,
     palette: &theme::Palette,
     value_widths: &[usize; 5],
     ui_language: UiLanguage,
 ) -> Line<'static> {
+    let annotation_style = Style::default().fg(palette.muted_fg);
     let label_style = Style::default().fg(palette.muted_fg);
-    let value_style = Style::default()
-        .fg(palette.secondary_fg)
-        .add_modifier(Modifier::BOLD);
-    let price_style = Style::default()
-        .fg(palette.success_fg)
-        .add_modifier(Modifier::BOLD);
-    let values = formatted_usage_values(usage, cost_usd);
+    let values = formatted_usage_values(&frame.usage, frame.cost_usd);
 
-    Line::from(vec![
-        status_label,
-        Span::styled("↓", label_style),
-        Span::styled(
-            format!("{:<width$}", values[0], width = value_widths[0]),
-            value_style,
-        ),
-        Span::styled(
-            ui_language.text(" (tool input, llm output)", "（工具輸入、LLM 輸出）"),
-            label_style,
-        ),
-        Span::raw("  "),
-        Span::styled("↑", label_style),
-        Span::styled(
-            format!("{:<width$}", values[1], width = value_widths[1]),
-            value_style,
-        ),
-        Span::raw("  "),
-        Span::styled("Σ", label_style),
-        Span::styled(
-            format!("{:<width$}", values[2], width = value_widths[2]),
-            value_style,
-        ),
-        Span::raw("  "),
-        Span::styled("ƒ", label_style),
-        Span::styled(
-            format!("{:<width$}", values[3], width = value_widths[3]),
-            value_style,
-        ),
-        Span::raw("  "),
-        Span::styled("$", label_style),
-        Span::styled(
-            format!("{:<width$}", values[4], width = value_widths[4]),
-            price_style,
-        ),
-    ])
+    let mut spans = vec![status_label, Span::styled("↓", label_style)];
+    spans.extend(usage_value_spans(
+        &values[0],
+        value_widths[0],
+        palette.secondary_fg,
+    ));
+    spans.push(Span::styled(
+        ui_language.text(" (tool input, llm output)", "（工具輸入、LLM 輸出）"),
+        annotation_style,
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("↑", label_style));
+    spans.extend(usage_value_spans(
+        &values[1],
+        value_widths[1],
+        palette.secondary_fg,
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("Σ", label_style));
+    spans.extend(usage_value_spans(
+        &values[2],
+        value_widths[2],
+        palette.secondary_fg,
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("ƒ", label_style));
+    spans.extend(usage_value_spans(
+        &values[3],
+        value_widths[3],
+        palette.secondary_fg,
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("$", label_style));
+    spans.extend(usage_value_spans(
+        &values[4],
+        value_widths[4],
+        palette.success_fg,
+    ));
+
+    Line::from(spans)
 }
 
 fn flow_lane_left_label(ui_language: UiLanguage) -> &'static str {
@@ -2848,11 +2994,11 @@ fn render_toast(f: &mut Frame, palette: theme::Palette, msg: &str, pos: (u16, u1
 mod tests {
     use super::state::{AppState, ToolMode, UiLanguage};
     use super::{
-        LogView, draw_chatgpt_connector_refresh_notice, draw_mode_select, draw_settings,
-        draw_tui_header, draw_ui, export_logs_to_dir, key_is_clipboard_paste, localize_log_message,
-        mask_mcp_path_in_log, normalize_ngrok_authtoken_input, pad_right_to_cell_width,
-        parse_terminal_profile_choice, terminal_cell_width, text_input_key_is_cancel, trim_line,
-        wrap_log_message,
+        LogView, UsageAnimationState, draw_chatgpt_connector_refresh_notice, draw_mode_select,
+        draw_settings, draw_tui_header, draw_ui, export_logs_to_dir, key_is_clipboard_paste,
+        localize_log_message, mask_mcp_path_in_log, normalize_ngrok_authtoken_input,
+        pad_right_to_cell_width, parse_terminal_profile_choice, terminal_cell_width,
+        text_input_key_is_cancel, trim_line, wrap_log_message,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
@@ -2969,6 +3115,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(180, 44)).expect("create terminal");
         let mut log_view = None;
         let revealed_logs = HashMap::new();
+        let mut usage_animation = UsageAnimationState::default();
         terminal
             .draw(|frame| {
                 draw_ui(
@@ -2980,6 +3127,7 @@ mod tests {
                     None,
                     None,
                     &revealed_logs,
+                    &mut usage_animation,
                 )
             })
             .expect("draw main dashboard");
@@ -5092,6 +5240,7 @@ async fn run_tui(
     let mut last_mcp_url: Option<String> = None;
     let mut mcp_url_revealed_until: Option<Instant> = None;
     let mut log_secret_revealed_until: HashMap<u64, Instant> = HashMap::new();
+    let mut usage_animation = UsageAnimationState::default();
 
     loop {
         {
@@ -5126,6 +5275,7 @@ async fn run_tui(
                     toast_ref,
                     reveal_remaining,
                     &log_secret_revealed_until,
+                    &mut usage_animation,
                 );
 
                 if let Some(((c0, r0), (c1, r1))) = selection.range() {
@@ -5449,6 +5599,7 @@ fn draw_ui(
     toast: Option<(&str, (u16, u16))>,
     mcp_url_reveal_remaining: Option<Duration>,
     log_secret_revealed_until: &HashMap<u64, Instant>,
+    usage_animation: &mut UsageAnimationState,
 ) {
     let palette = app.current_theme().palette;
     let ui_language = app.ui_language;
@@ -5605,6 +5756,13 @@ fn draw_ui(
         &all_time_usage_totals,
         all_time_usage_cost_usd,
     );
+    let (session_usage_frame, all_time_usage_frame) = usage_animation.frames(
+        &app.session_usage_totals,
+        session_usage_cost_usd,
+        &all_time_usage_totals,
+        all_time_usage_cost_usd,
+        Instant::now(),
+    );
     let mut status_lines: Vec<Line> = vec![
         Line::from(vec![
             status_label(ui_language.text("Mode", "模式")),
@@ -5735,16 +5893,14 @@ fn draw_ui(
             Line::from(spans)
         },
         usage_line(
-            &app.session_usage_totals,
-            session_usage_cost_usd,
+            &session_usage_frame,
             status_label(ui_language.text("Session", "本次工作階段")),
             &palette,
             &usage_widths,
             ui_language,
         ),
         usage_line(
-            &all_time_usage_totals,
-            all_time_usage_cost_usd,
+            &all_time_usage_frame,
             status_label(ui_language.text("All-time", "累計")),
             &palette,
             &usage_widths,
