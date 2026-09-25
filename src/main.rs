@@ -921,8 +921,23 @@ fn flow_call_offset(text: &str, left_label: &str) -> String {
     " ".repeat(terminal_cell_width(left_label) + centered_in_lane)
 }
 
-fn flow_turn_usage_line(
-    flow: &FlowLane,
+fn format_last_tool_call_elapsed(last_tool_call_ms: Option<u128>, now_millis: u128) -> String {
+    let Some(last_tool_call_ms) = last_tool_call_ms else {
+        return "--".to_string();
+    };
+    let elapsed_ms = now_millis.saturating_sub(last_tool_call_ms);
+    if elapsed_ms > 99_000 {
+        "99+ s".to_string()
+    } else {
+        format!("{:.1} s", elapsed_ms as f64 / 1_000.0)
+    }
+}
+
+fn flow_telemetry_line(
+    usage: Option<&UsageTotals>,
+    request_count: u64,
+    last_tool_call_ms: Option<u128>,
+    now_millis: u128,
     palette: &theme::Palette,
     ui_language: UiLanguage,
 ) -> Line<'static> {
@@ -933,41 +948,52 @@ fn flow_turn_usage_line(
     let price_style = Style::default()
         .fg(palette.success_fg)
         .add_modifier(Modifier::BOLD);
+    let meta_value_style = Style::default().fg(palette.title_fg);
+    let elapsed = format_last_tool_call_elapsed(last_tool_call_ms, now_millis);
 
-    match flow.turn_usage.as_ref() {
+    let (usage_text, input, output, cost) = match usage {
         Some(usage) => {
             let input = format_token_compact(usage.tool_input_tokens);
             let output = format_token_compact(usage.tool_output_tokens);
             let cost = format_usd_compact(estimate_gpt_5_6_and_earlier_usage_cost_usd(usage));
-            let usage_text = format!("↓{input}  ↑{output}  ${cost}");
-            let indent = format!(
-                "    {}",
-                flow_call_offset(&usage_text, flow_lane_left_label(ui_language))
-            );
-            Line::from(vec![
-                Span::raw(indent),
-                Span::styled("↓", label_style),
-                Span::styled(input, value_style),
-                Span::raw("  "),
-                Span::styled("↑", label_style),
-                Span::styled(output, value_style),
-                Span::raw("  "),
-                Span::styled("$", label_style),
-                Span::styled(cost, price_style),
-            ])
+            (
+                format!("↓{input}  ↑{output}  ${cost}"),
+                Some(input),
+                Some(output),
+                Some(cost),
+            )
         }
-        None => {
-            let usage_text = "↓--  ↑--  $--";
-            let indent = format!(
-                "    {}",
-                flow_call_offset(usage_text, flow_lane_left_label(ui_language))
-            );
-            Line::from(vec![
-                Span::raw(indent),
-                Span::styled(usage_text, label_style),
-            ])
+        None => ("↓--  ↑--  $--".to_string(), None, None, None),
+    };
+    let meta_text = format!("⟨Req {request_count} · {elapsed}⟩");
+    let telemetry_text = format!("{usage_text}  {meta_text}");
+    let indent = format!(
+        "    {}",
+        flow_call_offset(&telemetry_text, flow_lane_left_label(ui_language))
+    );
+
+    let mut spans = vec![Span::raw(indent)];
+    match (input, output, cost) {
+        (Some(input), Some(output), Some(cost)) => {
+            spans.push(Span::styled("↓", label_style));
+            spans.push(Span::styled(input, value_style));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("↑", label_style));
+            spans.push(Span::styled(output, value_style));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("$", label_style));
+            spans.push(Span::styled(cost, price_style));
         }
+        _ => spans.push(Span::styled(usage_text, label_style)),
     }
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("⟨Req ", label_style));
+    spans.push(Span::styled(request_count.to_string(), meta_value_style));
+    spans.push(Span::styled(" · ", label_style));
+    spans.push(Span::styled(elapsed, meta_value_style));
+    spans.push(Span::styled("⟩", label_style));
+
+    Line::from(spans)
 }
 
 fn flow_phase(flow: &FlowLane, now_millis: u128) -> &'static str {
@@ -3097,6 +3123,48 @@ mod tests {
     }
 
     #[test]
+    fn flow_telemetry_renders_request_meta() {
+        let palette = super::theme::resolve("neon").palette;
+        let usage = super::state::UsageTotals {
+            tool_input_tokens: 22,
+            tool_output_tokens: 217,
+            total_tokens: 239,
+            tool_call_count: 1,
+        };
+        let line = super::flow_telemetry_line(
+            Some(&usage),
+            22,
+            Some(10_000),
+            91_600,
+            &palette,
+            UiLanguage::English,
+        );
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("⟨Req 22 · 81.6 s⟩"));
+    }
+
+    #[test]
+    fn formats_last_tool_call_elapsed() {
+        assert_eq!(super::format_last_tool_call_elapsed(None, 12_300), "--");
+        assert_eq!(
+            super::format_last_tool_call_elapsed(Some(10_000), 22_300),
+            "12.3 s"
+        );
+        assert_eq!(
+            super::format_last_tool_call_elapsed(Some(1_000), 100_000),
+            "99.0 s"
+        );
+        assert_eq!(
+            super::format_last_tool_call_elapsed(Some(1_000), 100_001),
+            "99+ s"
+        );
+    }
+
+    #[test]
     fn main_dashboard_renders_traditional_chinese() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3148,7 +3216,7 @@ mod tests {
             "選取的瀏覽器",
             "等待連線",
             "你的電腦",
-            "請求",
+            "Req",
             "按鍵",
             "離開",
             "捲動",
@@ -5722,18 +5790,6 @@ fn draw_ui(
     let lane_for = |active: bool, flow: Option<&FlowLane>| -> Vec<Span<'static>> {
         flow_lane_spans(active, flow, &palette, now_millis)
     };
-    let request_stats_for = |app: &AppState| -> Vec<Span<'static>> {
-        vec![
-            Span::styled(
-                ui_language.text("  Requests ", "  請求 "),
-                Style::default().fg(palette.muted_fg),
-            ),
-            Span::styled(
-                app.request_count.to_string(),
-                Style::default().fg(palette.title_fg),
-            ),
-        ]
-    };
     let status_label_style = Style::default()
         .fg(palette.primary_fg)
         .add_modifier(Modifier::BOLD);
@@ -5967,9 +6023,15 @@ fn draw_ui(
             ];
             row.extend(lane);
             row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
-            row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
-            row.extend(request_stats_for(app));
             status_lines.push(Line::from(row));
+            status_lines.push(flow_telemetry_line(
+                None,
+                app.request_count,
+                app.last_tool_call_ms,
+                now_millis,
+                &palette,
+                ui_language,
+            ));
         } else {
             for flow in app
                 .flows
@@ -5996,10 +6058,15 @@ fn draw_ui(
                 ];
                 row.extend(lane);
                 row.push(Span::styled("ChatGPT Web", chatgpt_role_style));
-                row.push(Span::styled("  ", Style::default().fg(palette.muted_fg)));
-                row.extend(request_stats_for(app));
                 status_lines.push(Line::from(row));
-                status_lines.push(flow_turn_usage_line(flow, &palette, ui_language));
+                status_lines.push(flow_telemetry_line(
+                    flow.turn_usage.as_ref(),
+                    app.request_count,
+                    app.last_tool_call_ms,
+                    now_millis,
+                    &palette,
+                    ui_language,
+                ));
             }
         }
     }

@@ -674,6 +674,7 @@ pub struct AppState {
     pub flows: Vec<FlowLane>,
     pub flow_bootstrap_progress: HashMap<String, FlowBootstrapProgress>,
     pub request_count: u64,
+    pub last_tool_call_ms: Option<u128>,
     pub usage_by_model: BTreeMap<String, UsageTotals>,
     pub session_usage_totals: UsageTotals,
     pub command_jobs: CommandJobManager,
@@ -1044,6 +1045,7 @@ impl AppState {
             flows: Vec::new(),
             flow_bootstrap_progress: HashMap::new(),
             request_count: 0,
+            last_tool_call_ms: None,
             usage_by_model: config.usage_by_model,
             session_usage_totals: UsageTotals::default(),
             command_jobs: CommandJobManager::new(),
@@ -1207,6 +1209,9 @@ impl AppState {
         let only_bootstrap_status_events = events_are_bootstrap_status_events(events);
         let starts_tool_call = direction == FlowDirection::Forward
             && events.iter().any(|event| event.starts_with("tools/call:"));
+        if starts_tool_call {
+            self.last_tool_call_ms = Some(now_ms);
+        }
 
         if let Some(idx) = self.flows.iter().position(|flow| flow.flow_id == flow_id) {
             let mut flow = self.flows.remove(idx);
@@ -1998,11 +2003,13 @@ toolCallCount = 0
     fn record_flow_tool_call_does_not_activate_bootstrap_status() {
         let (mut app, workspace, config_path) = test_app("catdesk-flow-tool-call");
 
+        assert!(app.last_tool_call_ms.is_none());
         app.record_flow(
             "stateless",
             &["tools/call:run_command".to_string()],
             FlowDirection::Forward,
         );
+        assert!(app.last_tool_call_ms.is_some());
 
         let flow = app.flows.first().expect("missing flow");
         assert!(!flow.bootstrap_status_active);
