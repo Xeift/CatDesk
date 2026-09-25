@@ -2,8 +2,11 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 use std::time::SystemTime;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::Mutex;
@@ -309,10 +312,29 @@ impl UiLanguage {
         }
     }
 }
+#[cfg(not(test))]
+static PROCESS_CONFIG_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
 pub fn app_config_path() -> std::io::Result<PathBuf> {
+    #[cfg(not(test))]
+    if let Some(path) = PROCESS_CONFIG_PATH_OVERRIDE.get() {
+        return Ok(path.clone());
+    }
     Ok(user_home_dir()?
         .join(APP_CONFIG_DIR_NAME)
         .join(APP_CONFIG_FILE_NAME))
+}
+
+#[cfg(not(test))]
+pub fn set_process_config_path_override(path: PathBuf) -> Result<(), String> {
+    PROCESS_CONFIG_PATH_OVERRIDE
+        .set(path)
+        .map_err(|_| "CatDesk process config path was already initialized".to_string())
+}
+
+#[cfg(test)]
+pub fn set_process_config_path_override(_path: PathBuf) -> Result<(), String> {
+    Ok(())
 }
 
 pub fn save_widget_corner_style(style: WidgetCornerStyle) -> std::io::Result<PathBuf> {
@@ -1106,6 +1128,37 @@ impl AppState {
         Ok(config.normalized())
     }
 
+    pub fn isolate_workspace_worker_config(&mut self) -> std::io::Result<PathBuf> {
+        let canonical_workspace = Path::new(&self.workspace_root)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&self.workspace_root));
+        let mut hasher = DefaultHasher::new();
+        canonical_workspace.hash(&mut hasher);
+        let workspace_id = format!("{:016x}", hasher.finish());
+        let path = user_home_dir()?
+            .join(APP_CONFIG_DIR_NAME)
+            .join("workspaces")
+            .join(workspace_id)
+            .join(APP_CONFIG_FILE_NAME);
+
+        if path == self.config_path {
+            return Ok(path);
+        }
+
+        if path.exists() {
+            let previous = AppConfig::load_from_path(&path)?;
+            self.usage_by_model = previous.usage_by_model;
+        }
+
+        let config = self.app_config()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        config.save_to_path(&path)?;
+        self.config_path = path.clone();
+        Ok(path)
+    }
+
     pub fn regenerate_mcp_slug(&mut self) {
         self.mcp_slug = generate_mcp_slug();
     }
@@ -1726,6 +1779,72 @@ toolCallCount = 1
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn workspace_worker_config_does_not_overwrite_router_config() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-worker-config-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let router_config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let mut router_config = AppConfig {
+            theme: "neon".into(),
+            ..AppConfig::default()
+        };
+        router_config
+            .usage_by_model
+            .entry(CURRENT_USAGE_BUCKET.to_string())
+            .or_default()
+            .accumulate(10, 5, 1);
+        router_config
+            .save_to_path(&router_config_path)
+            .expect("save router config");
+
+        let mut worker = AppState::from_config_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            router_config_path.clone(),
+        )
+        .expect("create worker state");
+        let worker_config_path = worker
+            .isolate_workspace_worker_config()
+            .expect("isolate worker config");
+        assert_ne!(worker_config_path, router_config_path);
+
+        worker.theme = "concise".into();
+        worker.record_turn_usage(100, 50);
+        worker.persist_state().expect("persist worker state");
+
+        let router_after =
+            AppConfig::load_from_path(&router_config_path).expect("reload router config");
+        assert_eq!(router_after.theme, "neon");
+        let router_usage = router_after
+            .usage_by_model
+            .get(CURRENT_USAGE_BUCKET)
+            .expect("router usage");
+        assert_eq!(router_usage.total_tokens, 15);
+        assert_eq!(router_usage.tool_call_count, 1);
+
+        let worker_after =
+            AppConfig::load_from_path(&worker_config_path).expect("reload worker config");
+        assert_eq!(worker_after.theme, "concise");
+        let worker_usage = worker_after
+            .usage_by_model
+            .get(CURRENT_USAGE_BUCKET)
+            .expect("worker usage");
+        assert_eq!(worker_usage.total_tokens, 165);
+        assert_eq!(worker_usage.tool_call_count, 2);
+
+        let _ = std::fs::remove_file(router_config_path);
+        let _ = std::fs::remove_file(&worker_config_path);
+        if let Some(parent) = worker_config_path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

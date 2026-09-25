@@ -39,7 +39,7 @@ use state::{
     ToolMode, UiLanguage, UsageTotals, WidgetCornerStyle, app_config_path, flow_anim_lit_count,
     load_app_config, load_macos_terminal_profile, load_ngrok_authtoken, load_ngrok_domain,
     local_now, save_macos_terminal_profile, save_ngrok_authtoken, save_ngrok_domain,
-    save_widget_corner_style, user_home_dir,
+    save_widget_corner_style, set_process_config_path_override, user_home_dir,
 };
 use std::collections::HashMap;
 use std::io::{Write, stdout};
@@ -1501,11 +1501,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if explicit_port.is_none() && workspace_router::router_is_running(&app.mcp_slug).await {
         app.port = workspace_router::find_available_worker_port()?;
         app.workspace_worker = true;
+        let worker_config = app.isolate_workspace_worker_config()?;
+        set_process_config_path_override(worker_config.clone()).map_err(std::io::Error::other)?;
         app.log(
             "INFO",
             format!(
-                "Existing CatDesk router detected; registered this process as a workspace worker on port {}",
-                app.port
+                "Existing CatDesk router detected; registered this process as a workspace worker on port {} with isolated config {}",
+                app.port,
+                worker_config.display()
             ),
         );
     }
@@ -5100,10 +5103,8 @@ async fn start_services(
         }
     }
 
-    if !workspace_worker {
-        if let Err(e) = ngrok::start(state.clone()).await {
-            state.lock().await.log("ERROR", format!("ngrok: {e}"));
-        }
+    if !workspace_worker && let Err(e) = ngrok::start(state.clone()).await {
+        state.lock().await.log("ERROR", format!("ngrok: {e}"));
     }
 
     devtools_bridge

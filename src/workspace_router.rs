@@ -178,8 +178,12 @@ pub fn unregister_workspace(workspace_root: &str, port: u16) -> io::Result<()> {
 
 pub fn resolve_session(session_id: &str) -> Result<WorkspaceRegistration, String> {
     let path = registry_path().map_err(|error| error.to_string())?;
-    let _lock = acquire_registry_lock(&path).map_err(|error| error.to_string())?;
-    let mut registry = load_registry(&path).map_err(|error| error.to_string())?;
+    resolve_session_at(&path, session_id)
+}
+
+fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistration, String> {
+    let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
+    let mut registry = load_registry(path).map_err(|error| error.to_string())?;
     prune_stale(&mut registry);
 
     if let Some(workspace) = registry.sessions.get(session_id).cloned() {
@@ -189,7 +193,7 @@ pub fn resolve_session(session_id: &str) -> Result<WorkspaceRegistration, String
             .find(|entry| entry.workspace == workspace)
             .cloned()
         {
-            save_registry(&path, &registry).map_err(|error| error.to_string())?;
+            save_registry(path, &registry).map_err(|error| error.to_string())?;
             return Ok(registration);
         }
         registry.sessions.remove(session_id);
@@ -212,8 +216,23 @@ pub fn resolve_session(session_id: &str) -> Result<WorkspaceRegistration, String
     registry
         .sessions
         .insert(session_id.to_string(), next.workspace.clone());
-    save_registry(&path, &registry).map_err(|error| error.to_string())?;
+    save_registry(path, &registry).map_err(|error| error.to_string())?;
     Ok(next)
+}
+
+pub fn registration_for_port(port: u16) -> Result<WorkspaceRegistration, String> {
+    let path = registry_path().map_err(|error| error.to_string())?;
+    let _lock = acquire_registry_lock(&path).map_err(|error| error.to_string())?;
+    let mut registry = load_registry(&path).map_err(|error| error.to_string())?;
+    prune_stale(&mut registry);
+    let registration = registry
+        .workspaces
+        .iter()
+        .find(|entry| entry.port == port)
+        .cloned()
+        .ok_or_else(|| format!("No live CatDesk workspace worker is registered on port {port}"))?;
+    save_registry(&path, &registry).map_err(|error| error.to_string())?;
+    Ok(registration)
 }
 
 pub fn session_id_from_request(body: &Value) -> Option<&str> {
@@ -281,39 +300,6 @@ mod tests {
 
     fn save_test_registry(path: &Path, registry: &WorkspaceRegistry) {
         save_registry(path, registry).expect("save registry");
-    }
-
-    fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistration, String> {
-        let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
-        let mut registry = load_registry(path).map_err(|error| error.to_string())?;
-        prune_stale(&mut registry);
-
-        if let Some(workspace) = registry.sessions.get(session_id).cloned()
-            && let Some(registration) = registry
-                .workspaces
-                .iter()
-                .find(|entry| entry.workspace == workspace)
-                .cloned()
-        {
-            return Ok(registration);
-        }
-
-        let next = registry
-            .workspaces
-            .iter()
-            .find(|entry| {
-                !registry
-                    .sessions
-                    .values()
-                    .any(|bound| bound == &entry.workspace)
-            })
-            .cloned()
-            .ok_or_else(|| "no unbound workspace".to_string())?;
-        registry
-            .sessions
-            .insert(session_id.to_string(), next.workspace.clone());
-        save_registry(path, &registry).map_err(|error| error.to_string())?;
-        Ok(next)
     }
 
     #[test]

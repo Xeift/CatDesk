@@ -2,9 +2,9 @@ use axum::{
     Router,
     body::{Body, Bytes},
     extract::{Form, Path, State},
-    http::{HeaderMap, Response, StatusCode, header},
+    http::{HeaderMap, Method, Response, StatusCode, header},
     response::Json,
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
 };
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -61,6 +61,7 @@ pub fn router(
     let agents_path_state = format!("{secret_prefix}/agents/path-state");
     let token_stats_layout = format!("{secret_prefix}/layout/token-stats");
     let show_detail_mode = format!("{secret_prefix}/layout/show-detail");
+    let workspace_action_path = format!("{secret_prefix}/workspace/{{port}}/{{*path}}");
 
     Router::new()
         .route(&health_path, get(health))
@@ -93,7 +94,102 @@ pub fn router(
         .route(&mcp_path, post(post_mcp_http))
         .route(&mcp_path, get(get_mcp))
         .route(&mcp_path, delete(delete_mcp))
+        .route(&workspace_action_path, any(proxy_workspace_action))
         .with_state(state)
+}
+
+async fn proxy_workspace_action(
+    State(s): State<ServerState>,
+    Path((port, path)): Path<(u16, String)>,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let registration =
+        match tokio::task::spawn_blocking(move || workspace_router::registration_for_port(port))
+            .await
+        {
+            Ok(Ok(registration)) => registration,
+            Ok(Err(message)) => {
+                return with_widget_action_cors(Response::builder())
+                    .status(StatusCode::NOT_FOUND)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "ok": false, "error": message }).to_string(),
+                    ))
+                    .unwrap();
+            }
+            Err(error) => {
+                return with_widget_action_cors(Response::builder())
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "ok": false, "error": error.to_string() }).to_string(),
+                    ))
+                    .unwrap();
+            }
+        };
+
+    let secret_prefix = {
+        let app = s.app.lock().await;
+        app.mcp_path()
+            .strip_suffix("/mcp")
+            .unwrap_or_default()
+            .to_string()
+    };
+    let url = format!(
+        "http://127.0.0.1:{}{}/{}",
+        registration.port,
+        secret_prefix,
+        path.trim_start_matches('/')
+    );
+    let client = reqwest::Client::new();
+    let mut request = client.request(method, url).body(body.to_vec());
+    if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
+        request = request.header(header::CONTENT_TYPE, content_type);
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::BAD_GATEWAY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": error.to_string() }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::BAD_GATEWAY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": error.to_string() }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let mut builder = Response::builder().status(status.as_u16());
+    for name in [
+        header::CONTENT_TYPE,
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        header::CACHE_CONTROL,
+    ] {
+        if let Some(value) = response_headers.get(&name) {
+            builder = builder.header(name, value);
+        }
+    }
+    builder.body(Body::from(bytes)).unwrap()
 }
 
 fn with_widget_action_cors(
@@ -785,12 +881,10 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
     }))
 }
 
-fn attach_catdesk_instruction_actions(
+fn rewrite_catdesk_instruction_action_urls(
     result: &mut Option<Value>,
     public_base_url: Option<&str>,
     mcp_path: &str,
-    mascot_seed: u64,
-    partner_binagotchy_seed: Option<&str>,
 ) {
     let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
         return;
@@ -801,13 +895,9 @@ fn attach_catdesk_instruction_actions(
     else {
         return;
     };
-    let Some(tool_name) = structured.get("toolName").and_then(Value::as_str) else {
-        return;
-    };
-    if tool_name != "catdesk_instruction" {
+    if structured.get("toolName").and_then(Value::as_str) != Some("catdesk_instruction") {
         return;
     }
-
     let Some(widget_payload) = result_obj
         .get_mut("_meta")
         .and_then(Value::as_object_mut)
@@ -825,7 +915,7 @@ fn attach_catdesk_instruction_actions(
         .map(|base| format!("{base}/binagotchy"));
     widget_payload.insert(
         "binagotchyApiBaseUrl".to_string(),
-        json!(binagotchy_action_base_url.clone().unwrap_or_default()),
+        json!(binagotchy_action_base_url.unwrap_or_default()),
     );
     widget_payload.insert(
         "agentsPathModeUrl".to_string(),
@@ -863,6 +953,47 @@ fn attach_catdesk_instruction_actions(
                 .unwrap_or_default()
         ),
     );
+}
+
+fn attach_catdesk_instruction_actions(
+    result: &mut Option<Value>,
+    public_base_url: Option<&str>,
+    mcp_path: &str,
+    mascot_seed: u64,
+    partner_binagotchy_seed: Option<&str>,
+) {
+    rewrite_catdesk_instruction_action_urls(result, public_base_url, mcp_path);
+    let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(structured) = result_obj
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(tool_name) = structured.get("toolName").and_then(Value::as_str) else {
+        return;
+    };
+    if tool_name != "catdesk_instruction" {
+        return;
+    }
+
+    let Some(widget_payload) = result_obj
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    let public_action_base_url = public_base_url
+        .zip(mcp_path.strip_suffix("/mcp"))
+        .map(|(base, secret_prefix)| format!("{base}{secret_prefix}"));
+    let binagotchy_action_base_url = public_action_base_url
+        .as_deref()
+        .map(|base| format!("{base}/binagotchy"));
     widget_payload.insert(
         "partnerBinagotchySeed".to_string(),
         json!(partner_binagotchy_seed.unwrap_or("")),
@@ -2867,11 +2998,22 @@ mod tests {
             .expect("bind worker");
         let worker_port = worker_listener.local_addr().expect("worker addr").port();
         let worker_app = Router::new().fallback(post(|| async {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"forwarded":true}"#))
-                .unwrap()
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": "route-test",
+                "result": {
+                    "structuredContent": {
+                        "toolName": "catdesk_instruction",
+                        "instructionText": "worker instruction",
+                        "workspaceRoot": "/tmp/worker"
+                    },
+                    "_meta": {
+                        WIDGET_PAYLOAD_META_KEY: {
+                            "agentsPathStateUrl": ""
+                        }
+                    }
+                }
+            }))
         }));
         let worker_task = tokio::spawn(async move {
             axum::serve(worker_listener, worker_app)
@@ -2879,6 +3021,89 @@ mod tests {
                 .expect("serve worker");
         });
 
+        workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("register worker");
+
+        let mut app = AppState::new_for_test(
+            8787,
+            router_workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create router app state");
+        app.ngrok_url = Some("https://router.example".into());
+        let router_slug = app.mcp_slug.clone();
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "route-test",
+            "method": "tools/call",
+            "params": {
+                "name": "catdesk_instruction",
+                "arguments": {},
+                "_meta": {"openai/session": "session-worker-test"}
+            }
+        });
+        let body = Bytes::from(request.to_string());
+        let headers = HeaderMap::new();
+
+        let response = route_workspace_tool_call(&server_state, &request, &body, &headers)
+            .await
+            .expect("request should be forwarded");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read forwarded response");
+        let response_json: Value =
+            serde_json::from_slice(&response_body).expect("parse forwarded response");
+        let expected = format!(
+            "https://router.example/{router_slug}/workspace/{worker_port}/agents/path-state"
+        );
+        assert_eq!(
+            response_json
+                .pointer("/result/_meta/catdesk~1widgetPayload/agentsPathStateUrl")
+                .and_then(Value::as_str),
+            Some(expected.as_str())
+        );
+
+        workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("unregister worker");
+        worker_task.abort();
+        let _ = worker_task.await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(config_root);
+        let _ = std::fs::remove_dir_all(router_workspace);
+        let _ = std::fs::remove_dir_all(worker_workspace);
+    }
+
+    #[tokio::test]
+    async fn workspace_widget_actions_proxy_to_registered_worker() {
+        let worker_workspace = unique_temp_path("catdesk-workspace-action-worker");
+        let router_workspace = unique_temp_path("catdesk-workspace-action-router");
+        let config_root = unique_temp_path("catdesk-workspace-action-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&worker_workspace).expect("create worker workspace");
+        std::fs::create_dir_all(&router_workspace).expect("create router workspace");
+        std::fs::create_dir_all(&config_root).expect("create config root");
+
+        let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind worker");
+        let worker_port = worker_listener.local_addr().expect("worker addr").port();
+        let worker_app = Router::new().fallback(get(|| async {
+            Json(json!({"ok": true, "workspace": "worker"}))
+        }));
+        let worker_task = tokio::spawn(async move {
+            axum::serve(worker_listener, worker_app)
+                .await
+                .expect("serve worker");
+        });
         workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
             .expect("register worker");
 
@@ -2896,27 +3121,24 @@ mod tests {
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
         };
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": "route-test",
-            "method": "tools/call",
-            "params": {
-                "name": "read",
-                "arguments": {"paths": ["README.md"]},
-                "_meta": {"openai/session": "session-worker-test"}
-            }
-        });
-        let body = Bytes::from(request.to_string());
-        let headers = HeaderMap::new();
 
-        let response = route_workspace_tool_call(&server_state, &request, &body, &headers)
-            .await
-            .expect("request should be forwarded");
+        let response = proxy_workspace_action(
+            State(server_state),
+            Path((worker_port, "agents/path-state".to_string())),
+            Method::GET,
+            HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let response_body = to_bytes(response.into_body(), usize::MAX)
+        let body = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("read forwarded response");
-        assert_eq!(response_body.as_ref(), br#"{"forwarded":true}"#);
+            .expect("read action response");
+        let payload: Value = serde_json::from_slice(&body).expect("parse action response");
+        assert_eq!(
+            payload.get("workspace").and_then(Value::as_str),
+            Some("worker")
+        );
 
         workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
             .expect("unregister worker");
@@ -2940,15 +3162,29 @@ async fn route_workspace_tool_call(
     }
 
     let session_id = workspace_router::session_id_from_request(body)?;
-    let (workspace_worker, local_port, mcp_path) = {
+    let (workspace_worker, local_port, mcp_path, router_public_url) = {
         let app = s.app.lock().await;
-        (app.workspace_worker, app.port, app.mcp_path())
+        (
+            app.workspace_worker,
+            app.port,
+            app.mcp_path(),
+            app.ngrok_url.clone(),
+        )
     };
     if workspace_worker {
         return None;
     }
 
-    let target = match workspace_router::resolve_session(session_id) {
+    let session_owned = session_id.to_string();
+    let resolved = match tokio::task::spawn_blocking(move || {
+        workspace_router::resolve_session(&session_owned)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("workspace routing task failed: {error}")),
+    };
+    let target = match resolved {
         Ok(target) => target,
         Err(message) => {
             return Some(modern_jsonrpc_error_response(
@@ -3001,7 +3237,7 @@ async fn route_workspace_tool_call(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
-    let bytes = match response.bytes().await {
+    let mut bytes = match response.bytes().await {
         Ok(bytes) => bytes,
         Err(error) => {
             return Some(modern_jsonrpc_error_response(
@@ -3013,6 +3249,25 @@ async fn route_workspace_tool_call(
             ));
         }
     };
+
+    if let Ok(mut forwarded_json) = serde_json::from_slice::<Value>(&bytes) {
+        let secret_prefix = mcp_path.strip_suffix("/mcp").unwrap_or_default();
+        let routed_mcp_path = format!("{secret_prefix}/workspace/{}/mcp", target.port);
+        let mut result = forwarded_json.get("result").cloned();
+        rewrite_catdesk_instruction_action_urls(
+            &mut result,
+            router_public_url.as_deref(),
+            &routed_mcp_path,
+        );
+        if let Some(result) = result
+            && let Some(object) = forwarded_json.as_object_mut()
+        {
+            object.insert("result".to_string(), result);
+            if let Ok(serialized) = serde_json::to_vec(&forwarded_json) {
+                bytes = Bytes::from(serialized);
+            }
+        }
+    }
 
     {
         let mut app = s.app.lock().await;
