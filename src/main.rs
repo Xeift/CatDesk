@@ -65,6 +65,11 @@ const STATUS_LABEL_WIDTH: usize = 19;
 const GPT_5_6_AND_EARLIER_INPUT_USD_PER_1M: f64 = 5.0;
 const GPT_5_6_AND_EARLIER_OUTPUT_USD_PER_1M: f64 = 30.0;
 const PRICE_DISPLAY_DECIMALS: usize = 6;
+const USAGE_VALUE_WIDTHS: [usize; 5] = [5, 5, 5, 5, 12];
+const FLOW_TELEMETRY_TOKEN_WIDTH: usize = 5;
+const FLOW_TELEMETRY_COST_WIDTH: usize = 9;
+const FLOW_TELEMETRY_REQUEST_WIDTH: usize = 3;
+const FLOW_TELEMETRY_ELAPSED_WIDTH: usize = 6;
 const USAGE_COUNT_ANIM_DURATION: Duration = Duration::from_millis(480);
 const NGROK_SETUP_URL: &str = "https://dashboard.ngrok.com/get-started/setup";
 const CHATGPT_CONNECTOR_SETTINGS_URL: &str = "https://chatgpt.com/apps#settings/Connectors";
@@ -738,17 +743,6 @@ fn formatted_usage_values(usage: &UsageTotals, cost_usd: f64) -> [String; 5] {
     ]
 }
 
-fn usage_value_widths(
-    first: &UsageTotals,
-    first_cost_usd: f64,
-    second: &UsageTotals,
-    second_cost_usd: f64,
-) -> [usize; 5] {
-    let first = formatted_usage_values(first, first_cost_usd);
-    let second = formatted_usage_values(second, second_cost_usd);
-    std::array::from_fn(|index| first[index].len().max(second[index].len()))
-}
-
 #[derive(Clone, Debug)]
 struct UsageAnimationFrame {
     usage: UsageTotals,
@@ -987,51 +981,59 @@ fn flow_telemetry_line(
         .fg(palette.success_fg)
         .add_modifier(Modifier::BOLD);
     let meta_value_style = Style::default().fg(palette.title_fg);
+
+    let input = usage
+        .map(|usage| format_token_compact(usage.tool_input_tokens))
+        .unwrap_or_else(|| "--".to_string());
+    let output = usage
+        .map(|usage| format_token_compact(usage.tool_output_tokens))
+        .unwrap_or_else(|| "--".to_string());
+    let cost = usage
+        .map(|usage| format_usd_compact(estimate_gpt_5_6_and_earlier_usage_cost_usd(usage)))
+        .unwrap_or_else(|| "--".to_string());
     let elapsed = format_last_tool_call_elapsed(last_tool_call_ms, now_millis);
 
-    let (usage_text, input, output, cost) = match usage {
-        Some(usage) => {
-            let input = format_token_compact(usage.tool_input_tokens);
-            let output = format_token_compact(usage.tool_output_tokens);
-            let cost = format_usd_compact(estimate_gpt_5_6_and_earlier_usage_cost_usd(usage));
-            (
-                format!("↓{input}  ↑{output}  ${cost}"),
-                Some(input),
-                Some(output),
-                Some(cost),
-            )
-        }
-        None => ("↓--  ↑--  $--".to_string(), None, None, None),
-    };
-    let meta_text = format!("⟨Req {request_count} · {elapsed}⟩");
-    let telemetry_text = format!("{usage_text}  {meta_text}");
+    let input_field = format!("{input:<FLOW_TELEMETRY_TOKEN_WIDTH$}");
+    let output_field = format!("{output:<FLOW_TELEMETRY_TOKEN_WIDTH$}");
+    let cost_field = format!("{cost:<FLOW_TELEMETRY_COST_WIDTH$}");
+    let request_field = format!("{request_count:<FLOW_TELEMETRY_REQUEST_WIDTH$}");
+    let elapsed_field = format!("{elapsed:>FLOW_TELEMETRY_ELAPSED_WIDTH$}");
+    let telemetry_text = format!(
+        "↓{input_field}  ↑{output_field}  ${cost_field}  ⟨Req {request_field}· {elapsed_field}⟩"
+    );
     let indent = format!(
         "    {}",
         flow_call_offset(&telemetry_text, flow_lane_left_label(ui_language))
     );
 
-    let mut spans = vec![Span::raw(indent)];
-    match (input, output, cost) {
-        (Some(input), Some(output), Some(cost)) => {
-            spans.push(Span::styled("↓", label_style));
-            spans.push(Span::styled(input, value_style));
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled("↑", label_style));
-            spans.push(Span::styled(output, value_style));
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled("$", label_style));
-            spans.push(Span::styled(cost, price_style));
-        }
-        _ => spans.push(Span::styled(usage_text, label_style)),
-    }
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled("⟨Req ", label_style));
-    spans.push(Span::styled(request_count.to_string(), meta_value_style));
-    spans.push(Span::styled(" · ", label_style));
-    spans.push(Span::styled(elapsed, meta_value_style));
-    spans.push(Span::styled("⟩", label_style));
+    let usage_style = if usage.is_some() {
+        value_style
+    } else {
+        label_style
+    };
+    let cost_style = if usage.is_some() {
+        price_style
+    } else {
+        label_style
+    };
 
-    Line::from(spans)
+    Line::from(vec![
+        Span::raw(indent),
+        Span::styled("↓", label_style),
+        Span::styled(input_field, usage_style),
+        Span::raw("  "),
+        Span::styled("↑", label_style),
+        Span::styled(output_field, usage_style),
+        Span::raw("  "),
+        Span::styled("$", label_style),
+        Span::styled(cost_field, cost_style),
+        Span::raw("  "),
+        Span::styled("⟨Req ", label_style),
+        Span::styled(request_field, meta_value_style),
+        Span::styled("· ", label_style),
+        Span::styled(elapsed_field, meta_value_style),
+        Span::styled("⟩", label_style),
+    ])
 }
 
 fn flow_phase(flow: &FlowLane, now_millis: u128) -> &'static str {
@@ -3191,6 +3193,100 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(text.contains("⟨Req 22 · 81.6 s⟩"));
+    }
+
+    #[test]
+    fn flow_telemetry_does_not_shift_when_values_gain_digits() {
+        let palette = super::theme::resolve("neon").palette;
+        let before = super::state::UsageTotals {
+            tool_input_tokens: 9,
+            tool_output_tokens: 99,
+            total_tokens: 108,
+            tool_call_count: 1,
+        };
+        let after = super::state::UsageTotals {
+            tool_input_tokens: 10,
+            tool_output_tokens: 100,
+            total_tokens: 110,
+            tool_call_count: 1,
+        };
+
+        let line_text = |usage: &super::state::UsageTotals, requests, now_millis| {
+            super::flow_telemetry_line(
+                Some(usage),
+                requests,
+                Some(10_000),
+                now_millis,
+                &palette,
+                UiLanguage::English,
+            )
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+        };
+
+        let before_text = line_text(&before, 9, 19_900);
+        let after_text = line_text(&after, 10, 20_000);
+        assert_eq!(
+            before_text.chars().take_while(|ch| *ch == ' ').count(),
+            after_text.chars().take_while(|ch| *ch == ' ').count()
+        );
+        assert_eq!(
+            super::terminal_cell_width(&before_text),
+            super::terminal_cell_width(&after_text)
+        );
+    }
+
+    #[test]
+    fn usage_line_columns_do_not_shift_when_values_gain_digits() {
+        let palette = super::theme::resolve("neon").palette;
+        let before = super::UsageAnimationFrame {
+            usage: super::state::UsageTotals {
+                tool_input_tokens: 9,
+                tool_output_tokens: 99,
+                total_tokens: 108,
+                tool_call_count: 9,
+            },
+            cost_usd: 0.001,
+        };
+        let after = super::UsageAnimationFrame {
+            usage: super::state::UsageTotals {
+                tool_input_tokens: 10,
+                tool_output_tokens: 100,
+                total_tokens: 110,
+                tool_call_count: 10,
+            },
+            cost_usd: 0.01,
+        };
+
+        let line_text = |frame: &super::UsageAnimationFrame| {
+            super::usage_line(
+                frame,
+                ratatui::text::Span::raw("Session "),
+                &palette,
+                &super::USAGE_VALUE_WIDTHS,
+                UiLanguage::English,
+            )
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+        };
+
+        let before_text = line_text(&before);
+        let after_text = line_text(&after);
+        for marker in ['↑', 'Σ', 'ƒ', '$'] {
+            assert_eq!(
+                before_text.find(marker),
+                after_text.find(marker),
+                "{marker} column shifted"
+            );
+        }
+        assert_eq!(
+            super::terminal_cell_width(&before_text),
+            super::terminal_cell_width(&after_text)
+        );
     }
 
     #[test]
@@ -5904,12 +6000,7 @@ fn draw_ui(
     let session_usage_cost_usd =
         estimate_gpt_5_6_and_earlier_usage_cost_usd(&app.session_usage_totals);
     let all_time_usage_cost_usd = estimate_all_time_usage_cost_usd(app);
-    let usage_widths = usage_value_widths(
-        &app.session_usage_totals,
-        session_usage_cost_usd,
-        &all_time_usage_totals,
-        all_time_usage_cost_usd,
-    );
+    let usage_widths = USAGE_VALUE_WIDTHS;
     let (session_usage_frame, all_time_usage_frame) = usage_animation.frames(
         &app.session_usage_totals,
         session_usage_cost_usd,
