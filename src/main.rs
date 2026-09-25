@@ -338,6 +338,44 @@ fn mcp_url_reveal_seconds(remaining: Duration) -> u64 {
         .min(MCP_URL_REVEAL_DURATION.as_secs() as u128) as u64
 }
 
+fn reveal_button_span(label: &str, palette: &theme::Palette, hovered: bool) -> Span<'static> {
+    let style = if hovered {
+        Style::default()
+            .fg(palette.toast_fg)
+            .bg(palette.toast_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.primary_fg)
+            .bg(palette.muted_fg)
+            .add_modifier(Modifier::BOLD)
+    };
+    Span::styled(format!(" {label} "), style)
+}
+
+fn reveal_button_hovered(
+    screen_lines: &[String],
+    column: u16,
+    row: u16,
+    ui_language: UiLanguage,
+) -> bool {
+    let Some(line) = screen_lines.get(row as usize) else {
+        return false;
+    };
+    if !(line.contains("MCP Server URL") || line.contains("MCP 伺服器 URL")) {
+        return false;
+    }
+    let label = ui_language.text("Click to reveal", "點擊顯示");
+    let Some(byte_start) = line.find(label) else {
+        return false;
+    };
+    let label_start = terminal_cell_width(&line[..byte_start]);
+    let button_start = label_start.saturating_sub(1);
+    let button_end = label_start + terminal_cell_width(label) + 1;
+    let column = column as usize;
+    (button_start..button_end).contains(&column)
+}
+
 fn post_mcp_path(message: &str) -> Option<&str> {
     let rest = message
         .strip_prefix("POST ")
@@ -2097,35 +2135,43 @@ fn draw_chatgpt_connector_refresh_notice(
             ];
             if mcp_url.is_some() {
                 spans.push(Span::raw("  "));
-                let security_text = mcp_url_security_status
-                    .as_deref()
-                    .unwrap_or(ui_language.text("Click to reveal", "點擊顯示"));
-                let security_color = match mcp_url_reveal_remaining {
-                    Some(remaining) if mcp_url_reveal_seconds(remaining) <= 3 => palette.danger_fg,
-                    Some(_) => palette.warning_fg,
-                    None => palette.muted_fg,
-                };
-                spans.push(Span::styled(
-                    security_text.to_string(),
-                    Style::default()
-                        .fg(security_color)
-                        .bg(modal_bg)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                if let Some(remaining) = mcp_url_reveal_remaining {
-                    let (remaining_bar, elapsed_bar) = mcp_url_reveal_bar_segments(remaining);
-                    spans.push(Span::raw("  "));
+                if mcp_url_reveal_remaining.is_none() {
+                    spans.push(reveal_button_span(
+                        ui_language.text("Click to reveal", "點擊顯示"),
+                        &palette,
+                        false,
+                    ));
+                } else {
+                    let security_text = mcp_url_security_status.as_deref().unwrap_or_default();
+                    let security_color = match mcp_url_reveal_remaining {
+                        Some(remaining) if mcp_url_reveal_seconds(remaining) <= 3 => {
+                            palette.danger_fg
+                        }
+                        Some(_) => palette.warning_fg,
+                        None => palette.muted_fg,
+                    };
                     spans.push(Span::styled(
-                        remaining_bar,
+                        security_text.to_string(),
                         Style::default()
                             .fg(security_color)
                             .bg(modal_bg)
                             .add_modifier(Modifier::BOLD),
                     ));
-                    spans.push(Span::styled(
-                        elapsed_bar,
-                        Style::default().fg(palette.muted_fg).bg(modal_bg),
-                    ));
+                    if let Some(remaining) = mcp_url_reveal_remaining {
+                        let (remaining_bar, elapsed_bar) = mcp_url_reveal_bar_segments(remaining);
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(
+                            remaining_bar,
+                            Style::default()
+                                .fg(security_color)
+                                .bg(modal_bg)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled(
+                            elapsed_bar,
+                            Style::default().fg(palette.muted_fg).bg(modal_bg),
+                        ));
+                    }
                 }
             }
             Line::from(spans)
@@ -3148,6 +3194,46 @@ mod tests {
     }
 
     #[test]
+    fn reveal_button_uses_compact_normal_and_hover_styles() {
+        let palette = super::theme::resolve("neon").palette;
+
+        let normal = super::reveal_button_span("Click to reveal", &palette, false);
+        assert_eq!(normal.content.as_ref(), " Click to reveal ");
+        assert_eq!(normal.style.fg, Some(palette.primary_fg));
+        assert_eq!(normal.style.bg, Some(palette.muted_fg));
+
+        let hovered = super::reveal_button_span("Click to reveal", &palette, true);
+        assert_eq!(hovered.content.as_ref(), " Click to reveal ");
+        assert_eq!(hovered.style.fg, Some(palette.toast_fg));
+        assert_eq!(hovered.style.bg, Some(palette.toast_bg));
+        assert!(
+            hovered
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn reveal_button_hover_detects_only_button_cells() {
+        let line = "  MCP Server URL  ▓▓▓▓  Click to reveal  ";
+        let lines = vec![line.to_string()];
+        let label_start = super::terminal_cell_width("  MCP Server URL  ▓▓▓▓  ");
+        assert!(super::reveal_button_hovered(
+            &lines,
+            label_start as u16,
+            0,
+            UiLanguage::English,
+        ));
+        assert!(!super::reveal_button_hovered(
+            &lines,
+            0,
+            0,
+            UiLanguage::English,
+        ));
+    }
+
+    #[test]
     fn formats_last_tool_call_elapsed() {
         assert_eq!(super::format_last_tool_call_elapsed(None, 12_300), "--");
         assert_eq!(
@@ -3194,6 +3280,7 @@ mod tests {
                     &mut log_view,
                     None,
                     None,
+                    false,
                     &revealed_logs,
                     &mut usage_animation,
                 )
@@ -5307,6 +5394,7 @@ async fn run_tui(
     #[allow(unused_assignments)]
     let mut last_mcp_url: Option<String> = None;
     let mut mcp_url_revealed_until: Option<Instant> = None;
+    let mut mcp_reveal_button_hovered = false;
     let mut log_secret_revealed_until: HashMap<u64, Instant> = HashMap::new();
     let mut usage_animation = UsageAnimationState::default();
 
@@ -5342,6 +5430,7 @@ async fn run_tui(
                     &mut latest_log_view,
                     toast_ref,
                     reveal_remaining,
+                    mcp_reveal_button_hovered,
                     &log_secret_revealed_until,
                     &mut usage_animation,
                 );
@@ -5630,6 +5719,14 @@ async fn run_tui(
                             }
                         }
                     }
+                    MouseEventKind::Moved => {
+                        mcp_reveal_button_hovered = reveal_button_hovered(
+                            &screen_lines,
+                            mouse.column,
+                            mouse.row,
+                            current_ui_language,
+                        );
+                    }
                     MouseEventKind::ScrollUp => {
                         if log_follow_tail {
                             log_follow_tail = false;
@@ -5666,6 +5763,7 @@ fn draw_ui(
     log_view: &mut Option<LogView>,
     toast: Option<(&str, (u16, u16))>,
     mcp_url_reveal_remaining: Option<Duration>,
+    mcp_reveal_button_hovered: bool,
     log_secret_revealed_until: &HashMap<u64, Instant>,
     usage_animation: &mut UsageAnimationState,
 ) {
@@ -5889,33 +5987,41 @@ fn draw_ui(
             ];
             if has_url {
                 spans.push(Span::raw("  "));
-                let security_text = mcp_url_security_status
-                    .as_deref()
-                    .unwrap_or(ui_language.text("Click to reveal", "點擊顯示"));
-                let security_color = match mcp_url_reveal_remaining {
-                    Some(remaining) if mcp_url_reveal_seconds(remaining) <= 3 => palette.danger_fg,
-                    Some(_) => palette.warning_fg,
-                    None => palette.muted_fg,
-                };
-                spans.push(Span::styled(
-                    security_text.to_string(),
-                    Style::default()
-                        .fg(security_color)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                if let Some(remaining) = mcp_url_reveal_remaining {
-                    let (remaining_bar, elapsed_bar) = mcp_url_reveal_bar_segments(remaining);
-                    spans.push(Span::raw("  "));
+                if mcp_url_reveal_remaining.is_none() {
+                    spans.push(reveal_button_span(
+                        ui_language.text("Click to reveal", "點擊顯示"),
+                        &palette,
+                        mcp_reveal_button_hovered,
+                    ));
+                } else {
+                    let security_text = mcp_url_security_status.as_deref().unwrap_or_default();
+                    let security_color = match mcp_url_reveal_remaining {
+                        Some(remaining) if mcp_url_reveal_seconds(remaining) <= 3 => {
+                            palette.danger_fg
+                        }
+                        Some(_) => palette.warning_fg,
+                        None => palette.muted_fg,
+                    };
                     spans.push(Span::styled(
-                        remaining_bar,
+                        security_text.to_string(),
                         Style::default()
                             .fg(security_color)
                             .add_modifier(Modifier::BOLD),
                     ));
-                    spans.push(Span::styled(
-                        elapsed_bar,
-                        Style::default().fg(palette.muted_fg),
-                    ));
+                    if let Some(remaining) = mcp_url_reveal_remaining {
+                        let (remaining_bar, elapsed_bar) = mcp_url_reveal_bar_segments(remaining);
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(
+                            remaining_bar,
+                            Style::default()
+                                .fg(security_color)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled(
+                            elapsed_bar,
+                            Style::default().fg(palette.muted_fg),
+                        ));
+                    }
                 }
             }
             Line::from(spans)
@@ -6192,36 +6298,43 @@ fn draw_ui(
                     ];
                     if has_url {
                         spans.push(Span::raw("  "));
-                        let security_text = mcp_url_security_status
-                            .as_deref()
-                            .unwrap_or(ui_language.text("Click to reveal", "點擊顯示"));
-                        let security_color = match mcp_url_reveal_remaining {
-                            Some(remaining) if mcp_url_reveal_seconds(remaining) <= 3 => {
-                                palette.danger_fg
-                            }
-                            Some(_) => palette.warning_fg,
-                            None => palette.muted_fg,
-                        };
-                        spans.push(Span::styled(
-                            security_text.to_string(),
-                            Style::default()
-                                .fg(security_color)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        if let Some(remaining) = mcp_url_reveal_remaining {
-                            let (remaining_bar, elapsed_bar) =
-                                mcp_url_reveal_bar_segments(remaining);
-                            spans.push(Span::raw("  "));
+                        if mcp_url_reveal_remaining.is_none() {
+                            spans.push(reveal_button_span(
+                                ui_language.text("Click to reveal", "點擊顯示"),
+                                &palette,
+                                mcp_reveal_button_hovered,
+                            ));
+                        } else {
+                            let security_text =
+                                mcp_url_security_status.as_deref().unwrap_or_default();
+                            let security_color = match mcp_url_reveal_remaining {
+                                Some(remaining) if mcp_url_reveal_seconds(remaining) <= 3 => {
+                                    palette.danger_fg
+                                }
+                                Some(_) => palette.warning_fg,
+                                None => palette.muted_fg,
+                            };
                             spans.push(Span::styled(
-                                remaining_bar,
+                                security_text.to_string(),
                                 Style::default()
                                     .fg(security_color)
                                     .add_modifier(Modifier::BOLD),
                             ));
-                            spans.push(Span::styled(
-                                elapsed_bar,
-                                Style::default().fg(palette.muted_fg),
-                            ));
+                            if let Some(remaining) = mcp_url_reveal_remaining {
+                                let (remaining_bar, elapsed_bar) =
+                                    mcp_url_reveal_bar_segments(remaining);
+                                spans.push(Span::raw("  "));
+                                spans.push(Span::styled(
+                                    remaining_bar,
+                                    Style::default()
+                                        .fg(security_color)
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                                spans.push(Span::styled(
+                                    elapsed_bar,
+                                    Style::default().fg(palette.muted_fg),
+                                ));
+                            }
                         }
                     }
                     Line::from(spans)
