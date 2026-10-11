@@ -3347,6 +3347,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_router_routes_tools_list_with_session_to_bound_worker() {
+        let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
+        let worker_workspace = unique_temp_path("catdesk-tools-list-worker");
+        let router_workspace = unique_temp_path("catdesk-tools-list-router");
+        let config_root = unique_temp_path("catdesk-tools-list-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&worker_workspace).expect("create worker workspace");
+        std::fs::create_dir_all(&router_workspace).expect("create router workspace");
+        std::fs::create_dir_all(&config_root).expect("create config root");
+
+        let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind worker");
+        let worker_port = worker_listener.local_addr().expect("worker addr").port();
+        let worker_app = Router::new().fallback(post(|| async {
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": "tools-list-test",
+                "result": {
+                    "tools": [{"name": "browser_worker_tool"}]
+                }
+            }))
+        }));
+        let worker_task = tokio::spawn(async move {
+            axum::serve(worker_listener, worker_app)
+                .await
+                .expect("serve worker");
+        });
+
+        workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("register worker");
+
+        let mut app = AppState::new_for_test(
+            8787,
+            router_workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create router app state");
+        app.workspace_router = true;
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "tools-list-test",
+            "method": "tools/list",
+            "params": {
+                "_meta": {"openai/session": "session-tools-list-test"}
+            }
+        });
+        let body = Bytes::from(request.to_string());
+        let response = route_workspace_tool_call(&server_state, &request, &body, &HeaderMap::new())
+            .await
+            .expect("tools/list should be forwarded");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read tools/list response");
+        let response_json: Value =
+            serde_json::from_slice(&response_body).expect("parse tools/list response");
+        assert_eq!(
+            response_json
+                .pointer("/result/tools/0/name")
+                .and_then(Value::as_str),
+            Some("browser_worker_tool")
+        );
+
+        workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("unregister worker");
+        worker_task.abort();
+        let _ = worker_task.await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(config_root);
+        let _ = std::fs::remove_dir_all(router_workspace);
+        let _ = std::fs::remove_dir_all(worker_workspace);
+    }
+
+    #[tokio::test]
     async fn workspace_widget_actions_proxy_to_registered_worker() {
         let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
         let worker_workspace = unique_temp_path("catdesk-workspace-action-worker");
@@ -3459,7 +3543,8 @@ async fn route_workspace_tool_call(
     body_bytes: &Bytes,
     headers: &HeaderMap,
 ) -> Option<Response<Body>> {
-    if body.get("method").and_then(Value::as_str) != Some("tools/call") {
+    let method = body.get("method").and_then(Value::as_str)?;
+    if method != "tools/call" && method != "tools/list" {
         return None;
     }
 
@@ -3480,6 +3565,9 @@ async fn route_workspace_tool_call(
         return None;
     }
     let Some(session_id) = workspace_router::session_id_from_request(body) else {
+        if method == "tools/list" {
+            return None;
+        }
         return Some(modern_jsonrpc_error_response(
             StatusCode::BAD_REQUEST,
             body.get("id"),

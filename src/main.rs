@@ -1498,57 +1498,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => std::env::current_dir()?.to_string_lossy().into_owned(),
     };
 
-    let mut app = AppState::new(
+    let app = AppState::new(
         explicit_port.unwrap_or(workspace_router::ROUTER_PORT),
         workspace_root.clone(),
     )?;
-    let (router_client, router_client_heartbeat) = if explicit_port.is_none() {
-        let _router_start_lock = workspace_router::acquire_router_start_lock()?;
-        let client = workspace_router::register_router_client(&workspace_root)?;
-        // The first workspace persists its generated slug. Concurrent starters
-        // wait above, then adopt that slug before checking or spawning the
-        // shared router.
-        if let Some(mcp_slug) = load_app_config()?.mcp_slug {
-            app.mcp_slug = mcp_slug;
-        }
-        app.persist_state_with_log();
-        ensure_background_router(&app.mcp_slug).await?;
-        app.port = workspace_router::reserve_worker_port(&workspace_root)?;
-        app.workspace_worker = true;
-        app.log(
-            "INFO",
-            format!(
-                "Shared CatDesk router is ready; registered this process as a workspace worker on port {}",
-                app.port
-            ),
-        );
-        let heartbeat_workspace = workspace_root.clone();
-        let heartbeat_mcp_slug = app.mcp_slug.clone();
-        let heartbeat = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let root = heartbeat_workspace.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    workspace_router::touch_router_client(&root)
-                })
-                .await;
-                if !workspace_router::router_is_running(&heartbeat_mcp_slug).await
-                    && let Some(start_lock) =
-                        tokio::task::spawn_blocking(workspace_router::acquire_router_start_lock)
-                            .await
-                            .ok()
-                            .and_then(Result::ok)
-                {
-                    let _start_lock = start_lock;
-                    let _ = ensure_background_router(&heartbeat_mcp_slug).await;
-                }
-            }
-        });
-        (Some(client), Some(heartbeat))
-    } else {
-        (None, None)
-    };
     let state: SharedState = Arc::new(Mutex::new(app));
     {
         let mut app = state.lock().await;
@@ -1629,12 +1582,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.last_remote_activity_ms = None;
     }
     let _ = workspace_router::unregister_workspace(&registered_workspace, registered_port);
-    if let Some(heartbeat) = router_client_heartbeat {
-        heartbeat.abort();
+    {
+        let mut app = state.lock().await;
+        if let Some(heartbeat) = app.router_client_heartbeat.take() {
+            heartbeat.abort();
+        }
+        app.router_client_guard.take();
     }
-    drop(router_client);
 
     result
+}
+
+async fn prepare_shared_workspace_router(state: SharedState) -> std::io::Result<()> {
+    if std::env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let start_lock = tokio::task::spawn_blocking(workspace_router::acquire_router_start_lock)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))??;
+    let workspace_root = { state.lock().await.workspace_root.clone() };
+    let client = workspace_router::register_router_client(&workspace_root)?;
+
+    let mcp_slug = {
+        let mut app = state.lock().await;
+        if let Some(mcp_slug) = load_app_config()?.mcp_slug {
+            app.mcp_slug = mcp_slug;
+        }
+        app.persist_state_with_log();
+        app.mcp_slug.clone()
+    };
+
+    if let Err(error) = ensure_background_router(&mcp_slug).await {
+        drop(client);
+        drop(start_lock);
+        return Err(error);
+    }
+    let port = workspace_router::reserve_worker_port(&workspace_root)?;
+
+    let heartbeat_workspace = workspace_root.clone();
+    let heartbeat_mcp_slug = mcp_slug.clone();
+    let heartbeat = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let root = heartbeat_workspace.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || workspace_router::touch_router_client(&root))
+                    .await;
+            if !workspace_router::router_is_running(&heartbeat_mcp_slug).await
+                && let Some(start_lock) =
+                    tokio::task::spawn_blocking(workspace_router::acquire_router_start_lock)
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+            {
+                let _start_lock = start_lock;
+                let _ = ensure_background_router(&heartbeat_mcp_slug).await;
+            }
+        }
+    });
+
+    {
+        let mut app = state.lock().await;
+        app.port = port;
+        app.workspace_worker = true;
+        app.router_client_guard = Some(client);
+        app.router_client_heartbeat = Some(heartbeat);
+        app.log(
+            "INFO",
+            format!(
+                "Shared CatDesk router is ready; registered this process as a workspace worker on port {port}"
+            ),
+        );
+    }
+    drop(start_lock);
+    Ok(())
 }
 
 async fn ensure_background_router(mcp_slug: &str) -> std::io::Result<()> {
@@ -1823,6 +1850,8 @@ async fn run_app(
     if !continue_run {
         return Ok(());
     }
+
+    prepare_shared_workspace_router(state.clone()).await?;
 
     // Start services
     let (ui_event_tx, mut ui_event_rx) = unbounded_channel();

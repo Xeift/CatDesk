@@ -785,6 +785,8 @@ pub struct AppState {
     pub ngrok_task: Option<tokio::task::JoinHandle<()>>,
     pub remote_browser_child: Option<tokio::process::Child>,
     pub devtools_child: Option<tokio::process::Child>,
+    pub router_client_guard: Option<crate::workspace_router::RouterClientGuard>,
+    pub router_client_heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub type SharedState = Arc<Mutex<AppState>>;
@@ -1137,6 +1139,8 @@ impl AppState {
             ngrok_task: None,
             remote_browser_child: None,
             devtools_child: None,
+            router_client_guard: None,
+            router_client_heartbeat: None,
         })
     }
 
@@ -1242,7 +1246,20 @@ impl AppState {
         let _lock = acquire_config_lock(&self.config_path)?;
         let config = self.app_config()?;
         config.save_to_path(&self.config_path)?;
-        self.persisted_usage_by_model = self.usage_by_model.clone();
+        self.theme = config.theme.clone();
+        self.mode = config.mode;
+        self.tool_mode = config.tool_mode;
+        self.show_detail_mode = config.show_detail_mode;
+        self.ui_language = config.ui_language;
+        self.ngrok_domain = config.ngrok_domain.clone();
+        self.chatgpt_connector_revision = config.chatgpt_connector_revision;
+        self.partner_binagotchy_seed = config.partner_binagotchy_seed.clone();
+        self.set_catdesk_as_co_author = config.set_catdesk_as_co_author;
+        self.handoff_enabled = config.handoff_enabled;
+        self.sandbox_enabled = config.sandbox_enabled;
+        self.selected_browser = config.selected_browser.clone();
+        self.usage_by_model = config.usage_by_model.clone();
+        self.persisted_usage_by_model = config.usage_by_model.clone();
         self.persisted_config = config;
         Ok(())
     }
@@ -1910,6 +1927,59 @@ toolCallCount = 1
         assert_eq!(usage.tool_call_count, 3);
 
         let _ = std::fs::remove_file(router_config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn shared_config_does_not_restore_stale_workspace_settings() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-shared-settings-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        }
+        .save_to_path(&config_path)
+        .expect("save initial config");
+
+        let mut workspace_a = AppState::from_config_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create workspace A");
+        let mut workspace_b = AppState::from_config_path(
+            8788,
+            workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create workspace B");
+
+        workspace_b.theme = "light".into();
+        workspace_b
+            .persist_state()
+            .expect("persist workspace B theme");
+
+        workspace_a.record_turn_usage(10, 5);
+        workspace_a
+            .persist_state()
+            .expect("persist workspace A usage");
+        assert_eq!(workspace_a.theme, "light");
+
+        workspace_a.record_turn_usage(3, 2);
+        workspace_a
+            .persist_state()
+            .expect("persist workspace A usage again");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("reload shared config");
+        assert_eq!(saved.theme, "light");
+
+        let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace);
     }
 
