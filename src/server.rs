@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -31,6 +33,38 @@ use crate::state::{
 use crate::workspace_router;
 
 const STATELESS_FLOW_ID: &str = "stateless";
+
+fn write_tools_list_diagnostic(has_session: bool) -> std::io::Result<()> {
+    let path = crate::state::user_home_dir()?
+        .join(".catdesk")
+        .join("router-diagnostic.log");
+    append_tools_list_diagnostic(&path, has_session)
+}
+
+fn append_tools_list_diagnostic(path: &std::path::Path, has_session: bool) -> std::io::Result<()> {
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "tools/list openai/session present={has_session}")
+}
+
+#[cfg(test)]
+#[test]
+fn tools_list_diagnostic_is_readable_and_omits_session_identifiers() {
+    let path = std::env::temp_dir().join(format!(
+        "catdesk-router-diagnostic-{}.log",
+        uuid::Uuid::new_v4()
+    ));
+    append_tools_list_diagnostic(&path, true).expect("append true");
+    append_tools_list_diagnostic(&path, false).expect("append false");
+    let contents = fs::read_to_string(&path).expect("read diagnostic");
+    assert_eq!(
+        contents,
+        "tools/list openai/session present=true\ntools/list openai/session present=false\n"
+    );
+    fs::remove_file(path).expect("remove diagnostic");
+}
 
 #[derive(Clone)]
 struct ServerState {
@@ -3767,6 +3801,16 @@ async fn post_mcp_inner(
             .status(StatusCode::ACCEPTED)
             .body(Body::empty())
             .unwrap();
+    }
+
+    // Record only whether a session is present. Never persist session IDs or bodies.
+    if body.get("method").and_then(Value::as_str) == Some("tools/list") {
+        let has_session = workspace_router::session_id_from_request(&body).is_some();
+        let is_router = s.app.lock().await.workspace_router;
+        if is_router {
+            let _ =
+                tokio::task::spawn_blocking(move || write_tools_list_diagnostic(has_session)).await;
+        }
     }
 
     let request_summary = summarize_request(&body);
