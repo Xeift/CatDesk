@@ -489,6 +489,16 @@ fn has_live_router_clients_at(path: &Path) -> io::Result<bool> {
     Ok(has_clients)
 }
 
+/// Return live workspace endpoints for session-independent tool discovery.
+pub fn live_workspaces() -> Result<Vec<WorkspaceRegistration>, String> {
+    let path = registry_path().map_err(|error| error.to_string())?;
+    let _lock = acquire_registry_lock(&path).map_err(|error| error.to_string())?;
+    let mut registry = load_registry(&path).map_err(|error| error.to_string())?;
+    prune_stale(&mut registry);
+    save_registry(&path, &registry).map_err(|error| error.to_string())?;
+    Ok(registry.workspaces)
+}
+
 pub fn resolve_session(session_id: &str) -> Result<WorkspaceRegistration, String> {
     let path = registry_path().map_err(|error| error.to_string())?;
     resolve_session_at(&path, session_id)

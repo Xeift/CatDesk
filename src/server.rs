@@ -3381,6 +3381,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sessionless_tools_list_merges_browser_tools_from_workers() {
+        let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
+        let workspace_a = unique_temp_path("catdesk-discovery-worker-a");
+        let workspace_b = unique_temp_path("catdesk-discovery-worker-b");
+        let router_workspace = unique_temp_path("catdesk-discovery-router");
+        let config_root = unique_temp_path("catdesk-discovery-config");
+        for dir in [&workspace_a, &workspace_b, &router_workspace, &config_root] {
+            std::fs::create_dir_all(dir).expect("create workspace");
+        }
+        let a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_a = a.local_addr().unwrap().port();
+        let port_b = b.local_addr().unwrap().port();
+        let task_a = tokio::spawn(async move {
+            axum::serve(a, Router::new().fallback(post(|| async {
+                Json(json!({"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"catdesk_instruction"},{"name":"run_command"}]}}))
+            }))).await.unwrap();
+        });
+        let task_b = tokio::spawn(async move {
+            axum::serve(b, Router::new().fallback(post(|| async {
+                Json(json!({"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"catdesk_instruction"},{"name":"browser_navigate"}]}}))
+            }))).await.unwrap();
+        });
+        workspace_router::register_workspace(&workspace_a.to_string_lossy(), port_a).unwrap();
+        workspace_router::register_workspace(&workspace_b.to_string_lossy(), port_b).unwrap();
+        let mut app = AppState::new_for_test(
+            8787,
+            router_workspace.to_string_lossy().into_owned(),
+            config_root.join("config.toml"),
+        )
+        .unwrap();
+        app.workspace_router = true;
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+        let body = json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{"_meta":{}}});
+        let bytes = Bytes::from(body.to_string());
+        let response = route_workspace_tool_call(&state, &body, &bytes, &HeaderMap::new())
+            .await
+            .expect("sessionless tools/list should be routed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let contents = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&contents).unwrap();
+        let names: Vec<_> = json
+            .pointer("/result/tools")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["browser_navigate", "catdesk_instruction", "run_command"]
+        );
+
+        // tools/list with a session must return the same connector-wide tools
+        // without eagerly assigning the session to either workspace.
+        let with_session = json!({
+            "jsonrpc":"2.0", "id":5, "method":"tools/list",
+            "params":{"_meta":{"openai/session":"discovery-session"}}
+        });
+        let with_session_bytes = Bytes::from(with_session.to_string());
+        let response = route_workspace_tool_call(
+            &state,
+            &with_session,
+            &with_session_bytes,
+            &HeaderMap::new(),
+        )
+        .await
+        .expect("tools/list with session should use global catalog");
+        assert_eq!(response.status(), StatusCode::OK);
+        let contents = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&contents).unwrap();
+        assert_eq!(
+            json.pointer("/result/tools")
+                .and_then(Value::as_array)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(
+            workspace_router::bound_registration("discovery-session")
+                .unwrap()
+                .is_none()
+        );
+
+        workspace_router::unregister_workspace(&workspace_a.to_string_lossy(), port_a).unwrap();
+        workspace_router::unregister_workspace(&workspace_b.to_string_lossy(), port_b).unwrap();
+        task_a.abort();
+        task_b.abort();
+        let _ = task_a.await;
+        let _ = task_b.await;
+        for dir in [&workspace_a, &workspace_b, &router_workspace, &config_root] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
     async fn workspace_router_routes_tools_list_with_session_to_bound_worker() {
         let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
         let worker_workspace = unique_temp_path("catdesk-tools-list-worker");
@@ -3571,6 +3676,93 @@ mod tests {
     }
 }
 
+/// Discover the union of tools offered by live workspace workers. The tool
+/// list itself must not bind a session: the first tools/call selects a worker.
+async fn discover_worker_tools(
+    body: &Value,
+    headers: &HeaderMap,
+    mcp_path: &str,
+) -> Result<Vec<Value>, String> {
+    let workspaces = tokio::task::spawn_blocking(workspace_router::live_workspaces)
+        .await
+        .map_err(|error| error.to_string())??;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut jobs = tokio::task::JoinSet::new();
+    for worker in workspaces {
+        let client = client.clone();
+        let request_body = body.clone();
+        let headers = headers.clone();
+        let path = mcp_path.to_owned();
+        jobs.spawn(async move {
+            let url = format!("http://127.0.0.1:{}{path}", worker.port);
+            let mut request = client.post(url).json(&request_body);
+            for name in ["mcp-protocol-version", "mcp-method", "mcp-name"] {
+                if let Some(value) = headers.get(name) {
+                    request = request.header(name, value.as_bytes());
+                }
+            }
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => return (worker.port, Err(error.to_string())),
+            };
+            if !response.status().is_success() {
+                return (worker.port, Err(format!("HTTP {}", response.status())));
+            }
+            let result = response
+                .json::<Value>()
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    value
+                        .pointer("/result/tools")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .ok_or_else(|| "invalid tool list".to_string())
+                });
+            (worker.port, result)
+        });
+    }
+
+    let mut replies = std::collections::BTreeMap::<u16, Vec<Value>>::new();
+    let mut errors = Vec::new();
+    while let Some(joined) = jobs.join_next().await {
+        match joined {
+            Ok((port, Ok(worker_tools))) => {
+                replies.insert(port, worker_tools);
+            }
+            Ok((port, Err(error))) => errors.push(format!("worker {port}: {error}")),
+            Err(error) => errors.push(format!("tool discovery task: {error}")),
+        }
+    }
+    if !errors.is_empty() || replies.is_empty() {
+        return Err(if errors.is_empty() {
+            "No active CatDesk workers are available for tool discovery".into()
+        } else {
+            errors.join("; ")
+        });
+    }
+    let mut tools = std::collections::BTreeMap::<String, Value>::new();
+    for worker_tools in replies.into_values() {
+        for tool in worker_tools {
+            if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                // A shared connector needs exactly one stable input schema
+                // for each tool name regardless of worker response order.
+                if let Some(existing) = tools.get(name) {
+                    if existing.get("inputSchema") != tool.get("inputSchema") {
+                        return Err(format!("Conflicting input schemas for tool {name}"));
+                    }
+                } else {
+                    tools.insert(name.to_owned(), tool.clone());
+                }
+            }
+        }
+    }
+    Ok(tools.into_values().collect())
+}
+
 async fn route_workspace_tool_call(
     s: &ServerState,
     body: &Value,
@@ -3598,10 +3790,32 @@ async fn route_workspace_tool_call(
     if !workspace_router {
         return None;
     }
+    // Discovery must not consume or assign a session, even if the client sends one.
+    if method == "tools/list" {
+        return Some(
+            match discover_worker_tools(body, headers, &mcp_path).await {
+                Ok(tools) => Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "jsonrpc": "2.0", "id": body.get("id").cloned().unwrap_or(Value::Null),
+                            "result": {"tools": tools}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+                Err(error) => modern_jsonrpc_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    body.get("id"),
+                    -32040,
+                    "WorkspaceToolDiscoveryUnavailable",
+                    Some(json!({"message": error})),
+                ),
+            },
+        );
+    }
     let Some(session_id) = workspace_router::session_id_from_request(body) else {
-        if method == "tools/list" {
-            return None;
-        }
         return Some(modern_jsonrpc_error_response(
             StatusCode::BAD_REQUEST,
             body.get("id"),
