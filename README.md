@@ -196,18 +196,18 @@ cd ~/ProjectA
 catdesk
 ```
 
-The first process owns the public connector and ngrok tunnel on port `3200`. Start CatDesk again from another project:
+The first command launches a **separate background router process** on port `3200`, hosting the single public connector and ngrok tunnel. The foreground CatDesk runs as a workspace worker on a port in `3201`–`3299`. Start CatDesk again from another project:
 
 ```bash
 cd ~/ProjectB
 catdesk
 ```
 
-When CatDesk detects the existing local router, the new process automatically starts as a workspace worker on a free local port in `3201`–`3299` and does not create another ngrok tunnel or connector.
+The new foreground process also runs as a workspace worker on a free local port in `3201`–`3299`, without opening another tunnel or connector.
 
-ChatGPT tool calls include `_meta["openai/session"]`, an anonymized conversation identifier. On the first tool call from a new ChatGPT conversation, the router binds that session to the first running workspace that is not already bound to another conversation. Later tool calls from the same conversation are routed to the same workspace process. CatDesk stores the local workspace/session mapping in `~/.catdesk/workspace_id.toml`.
+For `tools/call`, CatDesk requires `_meta["openai/session"]`, an anonymized conversation identifier. `tools/list` does not require a session ID: the router queries live workers to discover their tools. On the first tool call from a new conversation, the router binds the session to the first unbound running workspace. Later tool calls from the same conversation are routed to that workspace. A tool advertised by another worker may be unavailable in the selected workspace. CatDesk stores the local workspace/session mapping in `~/.catdesk/workspace_id.toml`.
 
-This means Project A and Project B can stay isolated behind their own CatDesk workspace guards while sharing one ChatGPT connector. Restarting CatDesk inside a workspace makes that workspace available for a new conversation again. The router process that owns port `3200` must remain running while worker workspaces are in use.
+This means Project A and Project B can stay isolated behind their own CatDesk workspace guards while sharing one ChatGPT connector. Restarting CatDesk inside a workspace makes that workspace available for a new conversation again. The separate background router on port `3200` stays alive while workers are registered, and workers attempt to restore it if its tunnel disappears. Connector identity settings (MCP slug and ngrok domain) cannot be changed while other CatDesk workspaces are active. Quit the other workspaces first, then make the change before starting services. Other shared configuration changes are persisted across workspaces, but running workers keep their startup mode and browser capabilities until restarted.
 
 # Stack
 

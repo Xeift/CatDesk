@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -100,16 +100,6 @@ struct RouterStartLockOwner {
     token: String,
 }
 
-struct RegistryLock {
-    path: PathBuf,
-}
-
-impl Drop for RegistryLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 fn registry_path() -> io::Result<PathBuf> {
     Ok(user_home_dir()?.join(".catdesk").join(REGISTRY_FILE_NAME))
 }
@@ -157,14 +147,9 @@ pub fn acquire_router_start_lock() -> io::Result<RouterStartupLock> {
                 let owner = fs::read_to_string(&path)
                     .ok()
                     .and_then(|text| toml::from_str::<RouterStartLockOwner>(&text).ok());
-                let invalid = owner.is_none();
-                let stale_invalid = invalid
-                    && fs::metadata(&path)
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| modified.elapsed().ok())
-                        .is_some_and(|age| age > Duration::from_secs(5));
-                if owner.is_some_and(|owner| !process_is_alive(owner.pid)) || stale_invalid {
+                // A partially written or legacy lock has no verifiable owner.
+                // Never steal it based on age alone; require a known dead PID.
+                if owner.is_some_and(|owner| !process_is_alive(owner.pid)) {
                     let _ = fs::remove_file(&path);
                     continue;
                 }
@@ -183,13 +168,16 @@ pub fn acquire_router_start_lock() -> io::Result<RouterStartupLock> {
 }
 
 #[cfg(unix)]
-fn process_is_alive(pid: u32) -> bool {
+pub(crate) fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
     let result = unsafe { libc::kill(pid as i32, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(windows)]
-fn process_is_alive(pid: u32) -> bool {
+pub(crate) fn process_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
         System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
@@ -204,41 +192,15 @@ fn process_is_alive(pid: u32) -> bool {
     true
 }
 
-fn acquire_registry_lock(path: &Path) -> io::Result<RegistryLock> {
+fn acquire_registry_lock(path: &Path) -> io::Result<crate::file_lock::OwnedFileLock> {
     acquire_registry_lock_with_retries(path, LOCK_RETRY_COUNT)
 }
 
-fn acquire_registry_lock_with_retries(path: &Path, retry_count: usize) -> io::Result<RegistryLock> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let lock_path = registry_lock_path(path);
-    for _ in 0..retry_count {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(_) => return Ok(RegistryLock { path: lock_path }),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&lock_path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > Duration::from_secs(5));
-                if stale {
-                    let _ = fs::remove_file(&lock_path);
-                    continue;
-                }
-                thread::sleep(LOCK_RETRY_DELAY);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::other(format!(
-        "timed out waiting for workspace registry lock: {}",
-        lock_path.display()
-    )))
+fn acquire_registry_lock_with_retries(
+    path: &Path,
+    retry_count: usize,
+) -> io::Result<crate::file_lock::OwnedFileLock> {
+    crate::file_lock::acquire(&registry_lock_path(path), retry_count)
 }
 
 fn load_registry(path: &Path) -> io::Result<WorkspaceRegistry> {
@@ -265,9 +227,50 @@ fn canonical_workspace(workspace_root: &str) -> io::Result<String> {
         .into_owned())
 }
 
-fn port_is_open(port: u16) -> bool {
-    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    TcpStream::connect_timeout(&address, PORT_PROBE_TIMEOUT).is_ok()
+/// Do not trust an open port on its own: it may belong to another process.
+/// Check the worker's authenticated local health identity against the registry.
+fn registration_is_live(registration: &WorkspaceRegistration) -> bool {
+    if !process_is_alive(registration.pid) {
+        return false;
+    }
+    #[cfg(test)]
+    let slug = "test".to_string();
+    #[cfg(not(test))]
+    let Some(slug) = crate::state::load_app_config()
+        .ok()
+        .and_then(|config| config.mcp_slug)
+    else {
+        return false;
+    };
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), registration.port);
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, PORT_PROBE_TIMEOUT) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(PORT_PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PORT_PROBE_TIMEOUT));
+    if write!(
+        stream,
+        "GET /{slug} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let mut response = Vec::new();
+    if stream.take(64 * 1024).read_to_end(&mut response).is_err() {
+        return false;
+    }
+    let Some(body_offset) = response.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(body) = serde_json::from_slice::<Value>(&response[body_offset + 4..]) else {
+        return false;
+    };
+    body.get("name").and_then(Value::as_str) == Some("CatDesk")
+        && body.get("pid").and_then(Value::as_u64) == Some(registration.pid as u64)
+        && body.get("workspaceCanonical").and_then(Value::as_str)
+            == Some(registration.workspace.as_str())
+        && body.get("router").and_then(Value::as_bool) == Some(false)
 }
 
 fn now_millis() -> u64 {
@@ -293,9 +296,7 @@ fn prune_stale_router_clients(registry: &mut WorkspaceRegistry) {
 }
 
 fn prune_stale(registry: &mut WorkspaceRegistry) {
-    registry
-        .workspaces
-        .retain(|workspace| port_is_open(workspace.port));
+    registry.workspaces.retain(registration_is_live);
     registry.sessions.retain(|_, workspace| {
         registry
             .workspaces
@@ -531,10 +532,12 @@ fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistra
                 .values()
                 .any(|workspace| workspace == &entry.workspace)
         })
-        .cloned()
-        .ok_or_else(|| {
-            "No unbound CatDesk workspace is available for this ChatGPT session. Start or restart CatDesk in the workspace you want to use, then retry the tool call.".to_string()
-        })?;
+        .cloned();
+    let Some(next) = next else {
+        // Persist stale-entry pruning even when no workspace can be assigned.
+        save_registry(path, &registry).map_err(|error| error.to_string())?;
+        return Err("No unbound CatDesk workspace is available for this ChatGPT session. Start or restart CatDesk in the workspace you want to use, then retry the tool call.".to_string());
+    };
 
     registry
         .sessions
@@ -595,22 +598,77 @@ pub async fn router_is_running(mcp_slug: &str) -> bool {
     if !response.status().is_success() {
         return false;
     }
-    response
-        .json::<Value>()
-        .await
-        .ok()
-        .and_then(|value| {
-            value
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .is_some_and(|name| name == "CatDesk")
+    response.json::<Value>().await.ok().is_some_and(|value| {
+        value.get("name").and_then(Value::as_str) == Some("CatDesk")
+            && value.get("router").and_then(Value::as_bool) == Some(true)
+            && value.get("ngrokRunning").and_then(Value::as_bool) == Some(true)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct MockHealthWorker {
+        port: u16,
+        active: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockHealthWorker {
+        fn new(workspace: &str) -> Self {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let active = Arc::new(AtomicBool::new(true));
+            let worker_active = active.clone();
+            let workspace = workspace.to_string();
+            let thread = std::thread::spawn(move || {
+                while worker_active.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                            let mut request = [0_u8; 1024];
+                            let _ = stream.read(&mut request);
+                            let body = serde_json::json!({
+                                "name":"CatDesk", "pid":std::process::id(),
+                                "router":false, "workspace":workspace,
+                                "workspaceCanonical":workspace
+                            })
+                            .to_string();
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                port,
+                active,
+                thread: Some(thread),
+            }
+        }
+    }
+    impl Drop for MockHealthWorker {
+        fn drop(&mut self) {
+            self.active.store(false, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
 
     fn test_registry_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -638,10 +696,10 @@ mod tests {
     #[test]
     fn sessions_bind_to_distinct_live_workspaces_and_stay_stable() {
         let path = test_registry_path("bindings");
-        let listener_a = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind A");
-        let listener_b = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind B");
-        let port_a = listener_a.local_addr().expect("addr A").port();
-        let port_b = listener_b.local_addr().expect("addr B").port();
+        let worker_a = MockHealthWorker::new("/tmp/project-a");
+        let worker_b = MockHealthWorker::new("/tmp/project-b");
+        let port_a = worker_a.port;
+        let port_b = worker_b.port;
 
         save_test_registry(
             &path,
@@ -650,12 +708,12 @@ mod tests {
                     WorkspaceRegistration {
                         workspace: "/tmp/project-a".into(),
                         port: port_a,
-                        pid: 1,
+                        pid: std::process::id(),
                     },
                     WorkspaceRegistration {
                         workspace: "/tmp/project-b".into(),
                         port: port_b,
-                        pid: 2,
+                        pid: std::process::id(),
                     },
                 ],
                 sessions: BTreeMap::new(),
@@ -675,10 +733,31 @@ mod tests {
     }
 
     #[test]
+    fn foreign_process_on_registered_port_is_not_trusted() {
+        let path = test_registry_path("foreign-worker");
+        let foreign = MockHealthWorker::new("/tmp/different-workspace");
+        save_test_registry(
+            &path,
+            &WorkspaceRegistry {
+                workspaces: vec![WorkspaceRegistration {
+                    workspace: "/tmp/expected-workspace".into(),
+                    port: foreign.port,
+                    pid: std::process::id(),
+                }],
+                ..WorkspaceRegistry::default()
+            },
+        );
+        assert!(resolve_session_at(&path, "new-session").is_err());
+        let remaining = load_registry(&path).unwrap();
+        assert!(remaining.workspaces.is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn no_unbound_workspace_is_reported() {
         let path = test_registry_path("exhausted");
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
-        let port = listener.local_addr().expect("addr").port();
+        let worker = MockHealthWorker::new("/tmp/project-a");
+        let port = worker.port;
         let mut sessions = BTreeMap::new();
         sessions.insert("existing".into(), "/tmp/project-a".into());
         save_test_registry(
@@ -687,7 +766,7 @@ mod tests {
                 workspaces: vec![WorkspaceRegistration {
                     workspace: "/tmp/project-a".into(),
                     port,
-                    pid: 1,
+                    pid: std::process::id(),
                 }],
                 sessions,
                 ..WorkspaceRegistry::default()

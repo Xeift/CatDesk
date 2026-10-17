@@ -4,6 +4,7 @@ mod change_tracking;
 mod command;
 mod command_jobs;
 mod devtools;
+mod file_lock;
 mod handoff;
 #[cfg(target_os = "linux")]
 mod linux_sandbox;
@@ -1606,7 +1607,12 @@ async fn prepare_shared_workspace_router(state: SharedState) -> std::io::Result<
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))??;
     let workspace_root = { state.lock().await.workspace_root.clone() };
-    let client = workspace_router::register_router_client(&workspace_root)?;
+    let client = tokio::task::spawn_blocking({
+        let root = workspace_root.clone();
+        move || workspace_router::register_router_client(&root)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
 
     let mcp_slug = {
         let mut app = state.lock().await;
@@ -1622,10 +1628,16 @@ async fn prepare_shared_workspace_router(state: SharedState) -> std::io::Result<
         drop(start_lock);
         return Err(error);
     }
-    let port = workspace_router::reserve_worker_port(&workspace_root)?;
+    let port = tokio::task::spawn_blocking({
+        let root = workspace_root.clone();
+        move || workspace_router::reserve_worker_port(&root)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
 
     let heartbeat_workspace = workspace_root.clone();
     let heartbeat_mcp_slug = mcp_slug.clone();
+    let heartbeat_state = state.clone();
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -1634,7 +1646,41 @@ async fn prepare_shared_workspace_router(state: SharedState) -> std::io::Result<
             let _ =
                 tokio::task::spawn_blocking(move || workspace_router::touch_router_client(&root))
                     .await;
-            if !workspace_router::router_is_running(&heartbeat_mcp_slug).await
+            let router_url = format!("http://127.0.0.1:3200/{}", heartbeat_mcp_slug);
+            let router_health = async {
+                reqwest::Client::new()
+                    .get(router_url)
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+            }
+            .await;
+            let (connected, ngrok_url) = router_health
+                .as_ref()
+                .map(|health| {
+                    (
+                        health.get("router").and_then(serde_json::Value::as_bool) == Some(true)
+                            && health
+                                .get("ngrokRunning")
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true),
+                        health
+                            .get("ngrokUrl")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                    )
+                })
+                .unwrap_or((false, None));
+            {
+                let mut app = heartbeat_state.lock().await;
+                app.ngrok_running = connected;
+                app.ngrok_url = if connected { ngrok_url } else { None };
+            }
+            if !connected
                 && let Some(start_lock) =
                     tokio::task::spawn_blocking(workspace_router::acquire_router_start_lock)
                         .await
@@ -1670,16 +1716,22 @@ async fn ensure_background_router(mcp_slug: &str) -> std::io::Result<()> {
     }
 
     let executable = std::env::current_exe()?;
-    std::process::Command::new(executable)
+    let mut child = std::process::Command::new(executable)
         .arg("--background-router")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    for _ in 0..50 {
+    // ngrok authentication and tunnel setup may take longer than five seconds.
+    for _ in 0..300 {
         if workspace_router::router_is_running(mcp_slug).await {
             return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(std::io::Error::other(format!(
+                "CatDesk background router exited during startup ({status}); check ngrok credentials and domain"
+            )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -3781,6 +3833,22 @@ async fn run_settings(
                     }
                     KeyCode::Enter => {
                         confirm_reset_token_billing = false;
+                        // Changing the connector identity while other workers
+                        // are live would desynchronize their URLs and the router.
+                        let config_identity_row = themes.len()
+                            + tool_modes.len()
+                            + show_detail_modes.len()
+                            + widget_corner_styles.len()
+                            + 4;
+                        let connector_change_blocked = if selected_row == config_identity_row
+                            || selected_row == config_identity_row + 1
+                        {
+                            tokio::task::spawn_blocking(workspace_router::has_live_router_clients)
+                                .await
+                                .map_err(std::io::Error::other)??
+                        } else {
+                            false
+                        };
                         let mut app = state.lock().await;
                         if selected_row < themes.len() {
                             let picked = themes[selected_row];
@@ -3880,10 +3948,18 @@ async fn run_settings(
                                 } else if selected_row == corner_end + 3 {
                                     // Keep existing slug, do nothing
                                 } else if selected_row == corner_end + 4 {
-                                    app.regenerate_mcp_slug();
-                                    app.log("INFO", "Generated new random MCP slug".into());
-                                    app.persist_state_with_log();
+                                    if connector_change_blocked {
+                                        app.log("WARN", "Stop all other CatDesk workspaces before changing the MCP slug or ngrok domain.".into());
+                                    } else {
+                                        app.regenerate_mcp_slug();
+                                        app.log("INFO", "Generated new random MCP slug".into());
+                                        app.persist_state_with_log();
+                                    }
                                 } else if selected_row == corner_end + 5 {
+                                    if connector_change_blocked {
+                                        app.log("WARN", "Stop all other CatDesk workspaces before changing the MCP slug or ngrok domain.".into());
+                                        continue;
+                                    }
                                     let current_domain =
                                         app.ngrok_domain.clone().unwrap_or_default();
                                     drop(app);
@@ -3920,7 +3996,7 @@ async fn run_settings(
                             continue;
                         }
                         let mut app = state.lock().await;
-                        app.usage_by_model.clear();
+                        app.reset_token_billing();
                         app.log("INFO", "Token billing totals reset".into());
                         app.persist_state_with_log();
                         confirm_reset_token_billing = false;
@@ -5268,16 +5344,24 @@ async fn start_services(
         let app = state.lock().await;
         (app.workspace_root.clone(), app.workspace_worker)
     };
-    if let Err(error) = workspace_router::register_workspace(&workspace_root, port) {
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    // Registration checks existing workers over HTTP. Keep the listener live
+    // while probing, and never block the Tokio executor on registry I/O.
+    let registration = tokio::task::spawn_blocking(move || {
+        workspace_router::register_workspace(&workspace_root, port)
+    })
+    .await;
+    if let Err(error) = registration.unwrap_or_else(|error| Err(std::io::Error::other(error))) {
+        handle.abort();
         state.lock().await.log(
             "ERROR",
             format!("Failed to register workspace for session routing: {error}"),
         );
+        return devtools_bridge;
     }
-
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
-    });
 
     {
         let mut app = state.lock().await;

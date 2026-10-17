@@ -1031,6 +1031,13 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
         "mode": app.mode.label(),
         "tool_mode": app.tool_mode.label(),
         "workspace": app.workspace_root,
+        "workspaceCanonical": std::path::Path::new(&app.workspace_root)
+            .canonicalize().unwrap_or_else(|_| std::path::PathBuf::from(&app.workspace_root))
+            .to_string_lossy().to_string(),
+        "ngrokRunning": app.ngrok_running,
+        "ngrokUrl": app.ngrok_url,
+        "router": app.workspace_router,
+        "pid": std::process::id(),
     }))
 }
 
@@ -1623,6 +1630,66 @@ mod tests {
     use tokio::sync::{Mutex, mpsc::unbounded_channel};
 
     static WORKSPACE_ROUTING_TEST_MUTEX: Mutex<()> = Mutex::const_new(());
+
+    fn mock_worker_health(workspace: &std::path::Path) -> Router {
+        let workspace = workspace
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        Router::new().route(
+            "/{slug}",
+            get(move || {
+                let workspace = workspace.clone();
+                async move {
+                    Json(json!({
+                        "name": "CatDesk", "router": false,
+                        "workspace": workspace, "workspaceCanonical": workspace,
+                    "pid": std::process::id()
+                    }))
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn health_reports_background_router_tunnel_and_process_identity() {
+        let root = unique_temp_path("catdesk-router-health-test");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = AppState::new_for_test(
+            3200,
+            root.to_string_lossy().into_owned(),
+            root.join("config.toml"),
+        )
+        .unwrap();
+        app.workspace_router = true;
+        app.ngrok_running = true;
+        app.ngrok_url = Some("https://example.ngrok.app".into());
+        let (events, _rx) = unbounded_channel();
+        let state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: events,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(false)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+        let Json(body) = health(State(state)).await;
+        assert_eq!(body.get("router").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            body.get("ngrokRunning").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("ngrokUrl").and_then(Value::as_str),
+            Some("https://example.ngrok.app")
+        );
+        assert_eq!(
+            body.get("pid").and_then(Value::as_u64),
+            Some(std::process::id() as u64)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn tool_flow_label_includes_selected_argument_summary() {
@@ -3183,7 +3250,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(config_root);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_router_forwards_tool_calls_to_bound_worker() {
         let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
         let worker_workspace = unique_temp_path("catdesk-workspace-route-worker");
@@ -3198,7 +3265,7 @@ mod tests {
             .await
             .expect("bind worker");
         let worker_port = worker_listener.local_addr().expect("worker addr").port();
-        let worker_app = Router::new().fallback(post(|| async {
+        let worker_app = mock_worker_health(&worker_workspace).fallback(post(|| async {
             Json(json!({
                 "jsonrpc": "2.0",
                 "id": "route-test",
@@ -3226,6 +3293,9 @@ mod tests {
                 .expect("serve worker");
         });
 
+        // Allow the mock HTTP server to begin accepting requests before its
+        // synchronous registration health probe runs.
+        tokio::task::yield_now().await;
         workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
             .expect("register worker");
 
@@ -3380,32 +3450,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(config_root);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sessionless_tools_list_merges_browser_tools_from_workers() {
         let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
         let workspace_a = unique_temp_path("catdesk-discovery-worker-a");
         let workspace_b = unique_temp_path("catdesk-discovery-worker-b");
+        let workspace_c = unique_temp_path("catdesk-discovery-worker-unavailable");
         let router_workspace = unique_temp_path("catdesk-discovery-router");
         let config_root = unique_temp_path("catdesk-discovery-config");
-        for dir in [&workspace_a, &workspace_b, &router_workspace, &config_root] {
+        for dir in [
+            &workspace_a,
+            &workspace_b,
+            &workspace_c,
+            &router_workspace,
+            &config_root,
+        ] {
             std::fs::create_dir_all(dir).expect("create workspace");
         }
         let a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let c = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port_a = a.local_addr().unwrap().port();
         let port_b = b.local_addr().unwrap().port();
+        let port_c = c.local_addr().unwrap().port();
+        let app_a = mock_worker_health(&workspace_a);
+        let app_b = mock_worker_health(&workspace_b);
+        let app_c = mock_worker_health(&workspace_c);
         let task_a = tokio::spawn(async move {
-            axum::serve(a, Router::new().fallback(post(|| async {
+            axum::serve(a, app_a.fallback(post(|| async {
                 Json(json!({"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"catdesk_instruction"},{"name":"run_command"}]}}))
             }))).await.unwrap();
         });
         let task_b = tokio::spawn(async move {
-            axum::serve(b, Router::new().fallback(post(|| async {
+            axum::serve(b, app_b.fallback(post(|| async {
                 Json(json!({"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"catdesk_instruction"},{"name":"browser_navigate"}]}}))
             }))).await.unwrap();
         });
+        let task_c = tokio::spawn(async move {
+            axum::serve(
+                c,
+                app_c.fallback(post(|| async { StatusCode::SERVICE_UNAVAILABLE })),
+            )
+            .await
+            .unwrap();
+        });
+        tokio::task::yield_now().await;
         workspace_router::register_workspace(&workspace_a.to_string_lossy(), port_a).unwrap();
         workspace_router::register_workspace(&workspace_b.to_string_lossy(), port_b).unwrap();
+        workspace_router::register_workspace(&workspace_c.to_string_lossy(), port_c).unwrap();
         let mut app = AppState::new_for_test(
             8787,
             router_workspace.to_string_lossy().into_owned(),
@@ -3476,16 +3568,24 @@ mod tests {
 
         workspace_router::unregister_workspace(&workspace_a.to_string_lossy(), port_a).unwrap();
         workspace_router::unregister_workspace(&workspace_b.to_string_lossy(), port_b).unwrap();
+        workspace_router::unregister_workspace(&workspace_c.to_string_lossy(), port_c).unwrap();
         task_a.abort();
         task_b.abort();
+        task_c.abort();
         let _ = task_a.await;
         let _ = task_b.await;
-        for dir in [&workspace_a, &workspace_b, &router_workspace, &config_root] {
+        for dir in [
+            &workspace_a,
+            &workspace_b,
+            &workspace_c,
+            &router_workspace,
+            &config_root,
+        ] {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_router_routes_tools_list_with_session_to_bound_worker() {
         let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
         let worker_workspace = unique_temp_path("catdesk-tools-list-worker");
@@ -3500,7 +3600,7 @@ mod tests {
             .await
             .expect("bind worker");
         let worker_port = worker_listener.local_addr().expect("worker addr").port();
-        let worker_app = Router::new().fallback(post(|| async {
+        let worker_app = mock_worker_health(&worker_workspace).fallback(post(|| async {
             Json(json!({
                 "jsonrpc": "2.0",
                 "id": "tools-list-test",
@@ -3515,6 +3615,9 @@ mod tests {
                 .expect("serve worker");
         });
 
+        // Allow the mock HTTP server to begin accepting requests before its
+        // synchronous registration health probe runs.
+        tokio::task::yield_now().await;
         workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
             .expect("register worker");
 
@@ -3569,7 +3672,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(worker_workspace);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_widget_actions_proxy_to_registered_worker() {
         let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
         let worker_workspace = unique_temp_path("catdesk-workspace-action-worker");
@@ -3584,7 +3687,7 @@ mod tests {
             .await
             .expect("bind worker");
         let worker_port = worker_listener.local_addr().expect("worker addr").port();
-        let worker_app = Router::new().fallback(get(|| async {
+        let worker_app = mock_worker_health(&worker_workspace).fallback(get(|| async {
             Json(json!({"ok": true, "workspace": "worker"}))
         }));
         let worker_task = tokio::spawn(async move {
@@ -3592,6 +3695,9 @@ mod tests {
                 .await
                 .expect("serve worker");
         });
+        // Allow the mock HTTP server to begin accepting requests before its
+        // synchronous registration health probe runs.
+        tokio::task::yield_now().await;
         workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
             .expect("register worker");
 
@@ -3737,7 +3843,8 @@ async fn discover_worker_tools(
             Err(error) => errors.push(format!("tool discovery task: {error}")),
         }
     }
-    if !errors.is_empty() || replies.is_empty() {
+    // Keep the healthy workers available even when one worker times out.
+    if replies.is_empty() {
         return Err(if errors.is_empty() {
             "No active CatDesk workers are available for tool discovery".into()
         } else {

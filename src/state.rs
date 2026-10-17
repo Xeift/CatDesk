@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread;
 use std::time::SystemTime;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::Mutex;
@@ -130,44 +129,8 @@ impl UsageTotals {
     }
 }
 
-struct ConfigLock {
-    path: PathBuf,
-}
-
-impl Drop for ConfigLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn acquire_config_lock(path: &Path) -> std::io::Result<ConfigLock> {
-    let lock_path = path.with_extension("lock");
-    for _ in 0..3_000 {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(_) => return Ok(ConfigLock { path: lock_path }),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&lock_path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > std::time::Duration::from_secs(5));
-                if stale {
-                    let _ = fs::remove_file(&lock_path);
-                } else {
-                    thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(std::io::Error::other(format!(
-        "timed out waiting for config lock: {}",
-        lock_path.display()
-    )))
+fn acquire_config_lock(path: &Path) -> std::io::Result<crate::file_lock::OwnedFileLock> {
+    crate::file_lock::acquire(&path.with_extension("lock"), 3_000)
 }
 
 fn update_app_config(update: impl FnOnce(&mut AppConfig)) -> std::io::Result<PathBuf> {
@@ -455,6 +418,8 @@ pub struct AppConfig {
     pub tool_mode: ToolMode,
     #[serde(default)]
     pub usage_by_model: BTreeMap<String, UsageTotals>,
+    #[serde(default)]
+    pub usage_epoch: Option<String>,
     pub selected_browser: Option<DetectedBrowser>,
 }
 
@@ -484,6 +449,7 @@ impl Default for AppConfig {
             mode: Mode::Both,
             tool_mode: ToolMode::MultiTools,
             usage_by_model: BTreeMap::new(),
+            usage_epoch: None,
             selected_browser: None,
         }
     }
@@ -644,7 +610,7 @@ pub struct FlowAnimSegment {
 }
 
 /// Which MCP backends to enable.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
     Computer, // run_command only
@@ -777,6 +743,7 @@ pub struct AppState {
     pub request_count: u64,
     pub usage_by_model: BTreeMap<String, UsageTotals>,
     persisted_usage_by_model: BTreeMap<String, UsageTotals>,
+    usage_reset_requested: bool,
     persisted_config: AppConfig,
     pub session_usage_totals: UsageTotals,
     pub command_jobs: CommandJobManager,
@@ -1131,6 +1098,7 @@ impl AppState {
             request_count: 0,
             usage_by_model: config.usage_by_model,
             persisted_usage_by_model,
+            usage_reset_requested: false,
             persisted_config,
             session_usage_totals: UsageTotals::default(),
             command_jobs: CommandJobManager::new(),
@@ -1200,10 +1168,13 @@ impl AppState {
         if self.theme != self.persisted_config.theme {
             config.theme = self.theme.clone();
         }
-        if self.mode != self.persisted_config.mode {
+        // Mode and tool mode describe live server capabilities. A worker must
+        // never write stale in-memory values over another worker's settings.
+        // They are editable only before this worker starts serving requests.
+        if !self.server_running && self.mode != self.persisted_config.mode {
             config.mode = self.mode;
         }
-        if self.tool_mode != self.persisted_config.tool_mode {
+        if !self.server_running && self.tool_mode != self.persisted_config.tool_mode {
             config.tool_mode = self.tool_mode;
         }
         if self.show_detail_mode != self.persisted_config.show_detail_mode {
@@ -1212,7 +1183,17 @@ impl AppState {
         if self.ui_language != self.persisted_config.ui_language {
             config.ui_language = self.ui_language;
         }
+        if self.usage_reset_requested {
+            config.usage_epoch = Some(Uuid::new_v4().to_string());
+            config.usage_by_model.clear();
+        }
+        // Do not resurrect pre-reset usage from another process's stale snapshot.
+        let stale_epoch =
+            !self.usage_reset_requested && config.usage_epoch != self.persisted_config.usage_epoch;
         for (bucket, usage) in &self.usage_by_model {
+            if stale_epoch {
+                break;
+            }
             let previous = self
                 .persisted_usage_by_model
                 .get(bucket)
@@ -1225,8 +1206,9 @@ impl AppState {
                 .or_default()
                 .merge(&delta);
         }
-        if serde_json::to_value(&self.selected_browser).ok()
-            != serde_json::to_value(&self.persisted_config.selected_browser).ok()
+        if !self.server_running
+            && serde_json::to_value(&self.selected_browser).ok()
+                != serde_json::to_value(&self.persisted_config.selected_browser).ok()
         {
             config.selected_browser = self.selected_browser.clone();
         }
@@ -1243,12 +1225,25 @@ impl AppState {
     }
 
     pub fn persist_state(&mut self) -> std::io::Result<()> {
+        // Config locks can wait for another process. On a multi-thread Tokio
+        // runtime, let the executor replace this blocked worker thread.
+        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        }) {
+            return tokio::task::block_in_place(|| self.persist_state_inner());
+        }
+        self.persist_state_inner()
+    }
+
+    fn persist_state_inner(&mut self) -> std::io::Result<()> {
         let _lock = acquire_config_lock(&self.config_path)?;
         let config = self.app_config()?;
         config.save_to_path(&self.config_path)?;
         self.theme = config.theme.clone();
-        self.mode = config.mode;
-        self.tool_mode = config.tool_mode;
+        if !self.server_running {
+            self.mode = config.mode;
+            self.tool_mode = config.tool_mode;
+        }
         self.show_detail_mode = config.show_detail_mode;
         self.ui_language = config.ui_language;
         self.ngrok_domain = config.ngrok_domain.clone();
@@ -1257,10 +1252,13 @@ impl AppState {
         self.set_catdesk_as_co_author = config.set_catdesk_as_co_author;
         self.handoff_enabled = config.handoff_enabled;
         self.sandbox_enabled = config.sandbox_enabled;
-        self.selected_browser = config.selected_browser.clone();
+        if !self.server_running {
+            self.selected_browser = config.selected_browser.clone();
+        }
         self.usage_by_model = config.usage_by_model.clone();
         self.persisted_usage_by_model = config.usage_by_model.clone();
         self.persisted_config = config;
+        self.usage_reset_requested = false;
         Ok(())
     }
 
@@ -1278,7 +1276,22 @@ impl AppState {
         totals
     }
 
+    pub fn reset_token_billing(&mut self) {
+        self.usage_by_model.clear();
+        self.persisted_usage_by_model.clear();
+        self.usage_reset_requested = true;
+    }
+
     pub fn record_turn_usage(&mut self, tool_input_tokens: u64, tool_output_tokens: u64) {
+        if !self.usage_reset_requested {
+            if let Ok(config) = AppConfig::load_from_path(&self.config_path) {
+                if config.usage_epoch != self.persisted_config.usage_epoch {
+                    self.usage_by_model = config.usage_by_model.clone();
+                    self.persisted_usage_by_model = config.usage_by_model;
+                    self.persisted_config.usage_epoch = config.usage_epoch;
+                }
+            }
+        }
         self.usage_by_model
             .entry(CURRENT_USAGE_BUCKET.to_string())
             .or_default()
@@ -1928,6 +1941,122 @@ toolCallCount = 1
 
         let _ = std::fs::remove_file(router_config_path);
         let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn reset_token_billing_invalidates_other_workers_stale_usage() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("catdesk-reset-multi-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(APP_CONFIG_FILE_NAME);
+        let mut first =
+            AppState::from_config_path(8787, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        let mut second =
+            AppState::from_config_path(8788, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        first.record_turn_usage(100, 50);
+        first.persist_state().unwrap();
+        second.record_turn_usage(20, 10);
+        second.persist_state().unwrap();
+        first.reset_token_billing();
+        first.persist_state().unwrap();
+        assert!(
+            AppConfig::load_from_path(&path)
+                .unwrap()
+                .usage_by_model
+                .is_empty()
+        );
+        second.record_turn_usage(1, 2);
+        second.persist_state().unwrap();
+        let config = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(
+            config
+                .usage_by_model
+                .values()
+                .map(|u| u.total_tokens)
+                .sum::<u64>(),
+            3
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reset_token_billing_clears_persisted_usage_and_survives_reload() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("catdesk-reset-usage-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(APP_CONFIG_FILE_NAME);
+        let mut app =
+            AppState::from_config_path(8787, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        app.record_turn_usage(100, 70);
+        app.persist_state().unwrap();
+        assert!(app.all_time_usage_totals().total_tokens > 0);
+        app.reset_token_billing();
+        app.persist_state().unwrap();
+        assert_eq!(app.all_time_usage_totals().total_tokens, 0);
+        let mut reloaded =
+            AppState::from_config_path(8787, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        assert_eq!(reloaded.all_time_usage_totals().total_tokens, 0);
+        reloaded.record_turn_usage(2, 3);
+        reloaded.persist_state().unwrap();
+        assert_eq!(
+            AppConfig::load_from_path(&path)
+                .unwrap()
+                .usage_by_model
+                .values()
+                .map(|usage| usage.total_tokens)
+                .sum::<u64>(),
+            5
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_config_does_not_override_running_worker_mode() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("catdesk-shared-live-mode-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(APP_CONFIG_FILE_NAME);
+        let mut running =
+            AppState::from_config_path(8787, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        let mut settings =
+            AppState::from_config_path(8788, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        running.server_running = true;
+        let original = running.mode;
+        settings.mode = if original == Mode::Browser {
+            Mode::Computer
+        } else {
+            Mode::Browser
+        };
+        settings.persist_state().unwrap();
+        running.record_turn_usage(3, 4);
+        running.persist_state().unwrap();
+        assert_eq!(running.mode, original);
+        assert_eq!(
+            AppConfig::load_from_path(&path).unwrap().mode,
+            settings.mode
+        );
+        running.record_turn_usage(1, 2);
+        running.persist_state().unwrap();
+        assert_eq!(
+            AppConfig::load_from_path(&path).unwrap().mode,
+            settings.mode
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
