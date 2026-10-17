@@ -3270,6 +3270,7 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": "route-test",
                 "result": {
+                    "tools": [{"name":"catdesk_instruction"}],
                     "structuredContent": {
                         "toolName": "catdesk_instruction",
                         "instructionText": "worker instruction",
@@ -3564,6 +3565,70 @@ mod tests {
             workspace_router::bound_registration("discovery-session")
                 .unwrap()
                 .is_none()
+        );
+
+        // First browser-only call must bind to browser Worker B even though A
+        // appears first in the registry. A later incompatible tool is rejected
+        // rather than silently executing in another workspace.
+        let browser_call = json!({
+            "jsonrpc":"2.0", "id":6, "method":"tools/call",
+            "params":{"name":"browser_navigate", "arguments":{},
+                "_meta":{"openai/session":"browser-session"}}
+        });
+        let browser_bytes = Bytes::from(browser_call.to_string());
+        let response =
+            route_workspace_tool_call(&state, &browser_call, &browser_bytes, &HeaderMap::new())
+                .await
+                .expect("route browser call");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            workspace_router::bound_registration("browser-session")
+                .unwrap()
+                .unwrap()
+                .port,
+            port_b
+        );
+
+        let incompatible = json!({
+            "jsonrpc":"2.0", "id":7, "method":"tools/call",
+            "params":{"name":"run_command", "arguments":{"command":"echo test"},
+                "_meta":{"openai/session":"browser-session"}}
+        });
+        let incompatible_bytes = Bytes::from(incompatible.to_string());
+        let response = route_workspace_tool_call(
+            &state,
+            &incompatible,
+            &incompatible_bytes,
+            &HeaderMap::new(),
+        )
+        .await
+        .expect("reject incompatible call");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            workspace_router::bound_registration("browser-session")
+                .unwrap()
+                .unwrap()
+                .port,
+            port_b
+        );
+
+        let computer_call = json!({
+            "jsonrpc":"2.0", "id":8, "method":"tools/call",
+            "params":{"name":"run_command", "arguments":{"command":"echo test"},
+                "_meta":{"openai/session":"computer-session"}}
+        });
+        let computer_bytes = Bytes::from(computer_call.to_string());
+        let response =
+            route_workspace_tool_call(&state, &computer_call, &computer_bytes, &HeaderMap::new())
+                .await
+                .expect("route computer call");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            workspace_router::bound_registration("computer-session")
+                .unwrap()
+                .unwrap()
+                .port,
+            port_a
         );
 
         workspace_router::unregister_workspace(&workspace_a.to_string_lossy(), port_a).unwrap();
@@ -3870,6 +3935,62 @@ async fn discover_worker_tools(
     Ok(tools.into_values().collect())
 }
 
+async fn worker_ports_with_tool(
+    tool_name: &str,
+    headers: &HeaderMap,
+    mcp_path: &str,
+) -> Result<Vec<u16>, String> {
+    let workers = tokio::task::spawn_blocking(workspace_router::live_workspaces)
+        .await
+        .map_err(|error| error.to_string())??;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut jobs = tokio::task::JoinSet::new();
+    let request_body =
+        json!({"jsonrpc":"2.0", "id":0, "method":"tools/list", "params":{"_meta":{}}});
+    for worker in workers {
+        let client = client.clone();
+        let body = request_body.clone();
+        let path = mcp_path.to_owned();
+        let version = headers.get("mcp-protocol-version").cloned();
+        jobs.spawn(async move {
+            let mut request = client
+                .post(format!("http://127.0.0.1:{}{path}", worker.port))
+                .json(&body)
+                .header("mcp-method", "tools/list");
+            if let Some(version) = version {
+                request = request.header("mcp-protocol-version", version.as_bytes());
+            }
+            let tools = match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    response.json::<Value>().await.ok().and_then(|value| {
+                        value
+                            .pointer("/result/tools")
+                            .and_then(Value::as_array)
+                            .cloned()
+                    })
+                }
+                _ => None,
+            };
+            (worker.port, tools)
+        });
+    }
+    let mut eligible = Vec::new();
+    while let Some(result) = jobs.join_next().await {
+        if let Ok((port, Some(tools))) = result {
+            if tools
+                .iter()
+                .any(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+            {
+                eligible.push(port);
+            }
+        }
+    }
+    Ok(eligible)
+}
+
 async fn route_workspace_tool_call(
     s: &ServerState,
     body: &Value,
@@ -3935,8 +4056,33 @@ async fn route_workspace_tool_call(
     };
 
     let session_owned = session_id.to_string();
+    let requested_tool = body
+        .pointer("/params/name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let eligible_ports = match worker_ports_with_tool(requested_tool, headers, &mcp_path).await {
+        Ok(ports) => ports,
+        Err(message) => {
+            return Some(modern_jsonrpc_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                body.get("id"),
+                -32040,
+                "WorkspaceToolDiscoveryUnavailable",
+                Some(json!({"message": message})),
+            ));
+        }
+    };
+    if eligible_ports.is_empty() {
+        return Some(modern_jsonrpc_error_response(
+            StatusCode::CONFLICT,
+            body.get("id"),
+            -32040,
+            "WorkspaceToolUnavailable",
+            Some(json!({"message": "No live CatDesk workspace supports this tool"})),
+        ));
+    }
     let resolved = match tokio::task::spawn_blocking(move || {
-        workspace_router::resolve_session(&session_owned)
+        workspace_router::resolve_session_for_ports(&session_owned, Some(eligible_ports))
     })
     .await
     {

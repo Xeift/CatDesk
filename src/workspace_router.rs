@@ -501,11 +501,26 @@ pub fn live_workspaces() -> Result<Vec<WorkspaceRegistration>, String> {
 }
 
 pub fn resolve_session(session_id: &str) -> Result<WorkspaceRegistration, String> {
+    resolve_session_for_ports(session_id, None)
+}
+
+pub fn resolve_session_for_ports(
+    session_id: &str,
+    supported_ports: Option<Vec<u16>>,
+) -> Result<WorkspaceRegistration, String> {
     let path = registry_path().map_err(|error| error.to_string())?;
-    resolve_session_at(&path, session_id)
+    resolve_session_at_for_ports(&path, session_id, supported_ports.as_deref())
 }
 
 fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistration, String> {
+    resolve_session_at_for_ports(path, session_id, None)
+}
+
+fn resolve_session_at_for_ports(
+    path: &Path,
+    session_id: &str,
+    supported_ports: Option<&[u16]>,
+) -> Result<WorkspaceRegistration, String> {
     let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
     let mut registry = load_registry(path).map_err(|error| error.to_string())?;
     prune_stale(&mut registry);
@@ -518,6 +533,9 @@ fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistra
             .cloned()
         {
             save_registry(path, &registry).map_err(|error| error.to_string())?;
+            if supported_ports.is_some_and(|ports| !ports.contains(&registration.port)) {
+                return Err("This tool is not available in the workspace already bound to this ChatGPT session. Switch to a session assigned to a compatible workspace.".into());
+            }
             return Ok(registration);
         }
         registry.sessions.remove(session_id);
@@ -527,10 +545,11 @@ fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistra
         .workspaces
         .iter()
         .find(|entry| {
-            !registry
-                .sessions
-                .values()
-                .any(|workspace| workspace == &entry.workspace)
+            supported_ports.is_none_or(|ports| ports.contains(&entry.port))
+                && !registry
+                    .sessions
+                    .values()
+                    .any(|workspace| workspace == &entry.workspace)
         })
         .cloned();
     let Some(next) = next else {
@@ -729,6 +748,46 @@ mod tests {
         assert_eq!(second.workspace, "/tmp/project-b");
         assert_eq!(first_again, first);
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn tool_capability_selects_a_compatible_workspace_and_keeps_binding() {
+        let path = test_registry_path("capability-routing");
+        let worker_a = MockHealthWorker::new("/tmp/project-a");
+        let worker_b = MockHealthWorker::new("/tmp/project-b");
+        save_test_registry(
+            &path,
+            &WorkspaceRegistry {
+                workspaces: vec![
+                    WorkspaceRegistration {
+                        workspace: "/tmp/project-a".into(),
+                        port: worker_a.port,
+                        pid: std::process::id(),
+                    },
+                    WorkspaceRegistration {
+                        workspace: "/tmp/project-b".into(),
+                        port: worker_b.port,
+                        pid: std::process::id(),
+                    },
+                ],
+                ..WorkspaceRegistry::default()
+            },
+        );
+        let chosen = resolve_session_at_for_ports(&path, "session-browser", Some(&[worker_b.port]))
+            .expect("route first browser call to capable worker");
+        assert_eq!(chosen.port, worker_b.port);
+        assert!(
+            resolve_session_at_for_ports(&path, "session-browser", Some(&[worker_a.port])).is_err()
+        );
+        assert_eq!(
+            resolve_session_at(&path, "session-browser").unwrap().port,
+            worker_b.port
+        );
+        let second =
+            resolve_session_at_for_ports(&path, "session-computer", Some(&[worker_a.port]))
+                .expect("route other session to computer worker");
+        assert_eq!(second.port, worker_a.port);
         let _ = fs::remove_file(path);
     }
 
