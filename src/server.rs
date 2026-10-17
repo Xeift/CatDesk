@@ -3567,9 +3567,28 @@ mod tests {
                 .is_none()
         );
 
-        // First browser-only call must bind to browser Worker B even though A
-        // appears first in the registry. A later incompatible tool is rejected
-        // rather than silently executing in another workspace.
+        // An initial instruction goes to Worker A provisionally. The next
+        // actual browser call may move it once to the compatible Worker B.
+        let intro = json!({
+            "jsonrpc":"2.0", "id":9, "method":"tools/call",
+            "params":{"name":"catdesk_instruction", "arguments":{},
+                "_meta":{"openai/session":"browser-session"}}
+        });
+        let intro_bytes = Bytes::from(intro.to_string());
+        let response = route_workspace_tool_call(&state, &intro, &intro_bytes, &HeaderMap::new())
+            .await
+            .expect("route introductory call");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            workspace_router::bound_registration("browser-session")
+                .unwrap()
+                .unwrap()
+                .port,
+            port_a
+        );
+
+        // Browser tool then upgrades the provisional binding once. A later
+        // incompatible tool must be rejected without migrating again.
         let browser_call = json!({
             "jsonrpc":"2.0", "id":6, "method":"tools/call",
             "params":{"name":"browser_navigate", "arguments":{},
@@ -4081,8 +4100,9 @@ async fn route_workspace_tool_call(
             Some(json!({"message": "No live CatDesk workspace supports this tool"})),
         ));
     }
+    let instruction_only = requested_tool == "catdesk_instruction";
     let resolved = match tokio::task::spawn_blocking(move || {
-        workspace_router::resolve_session_for_ports(&session_owned, Some(eligible_ports))
+        workspace_router::resolve_session_for_tool(&session_owned, eligible_ports, instruction_only)
     })
     .await
     {

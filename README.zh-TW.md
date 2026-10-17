@@ -205,7 +205,7 @@ catdesk
 
 新的前景 CatDesk 同樣作為工作區 Worker，使用 `3201`–`3299` 中的可用連接埠，不再建立第二條 ngrok 隧道或 connector。
 
-CatDesk 要求 `tools/call` 帶有 `_meta["openai/session"]`，作為匿名對話識別碼；`tools/list` 則不需要 Session ID，Router 會向運作中的 Worker 取得工具清單。新對話第一次呼叫工具時，Router 才綁定尚未被其他對話使用的工作區，後續呼叫會固定路由到該工作區。如果某項工具僅在其他 Worker 上啟用，目前工作區可能無法執行該工具。CatDesk 會把本機 workspace/session 對應關係存在 `~/.catdesk/workspace_id.toml`。
+CatDesk 要求 `tools/call` 帶有 `_meta["openai/session"]`，作為匿名對話識別碼；`tools/list` 則不需要 Session ID，Router 會向運作中的 Worker 取得工具清單。新對話第一次呼叫工具時，Router 會選擇支援該工具、尚未被其他對話使用的工作區。如果目前只呼叫過 `catdesk_instruction`，此綁定仍是暫時的；第一次呼叫其他工具時可以改綁一次到有該工具的可用 Worker。真正派送非指引工具後，工作區就固定，日後不相容的工具呼叫會明確報錯，不會暗中跨工作區執行。CatDesk 會把本機 workspace/session 對應關係存在 `~/.catdesk/workspace_id.toml`。
 
 因此 Project A 與 Project B 仍各自保有 CatDesk 原本的 workspace path guard，但只需要一個公開 connector。重新啟動某個 workspace 裡的 CatDesk，會讓該 workspace 重新變成可供新對話綁定的狀態。獨立的背景 Router（連接埠 `3200`）會在還有 Worker 註冊時持續運作；隧道中斷時 Worker 會嘗試恢復 Router。當其他 CatDesk 工作區仍在執行時，不能修改 MCP slug 或 ngrok domain；請先退出其他工作區，再於啟動服務前修改連接器設定。已執行的 Worker 會保留啟動時的模式及瀏覽器能力；修改共用模式設定後，須重新啟動 Worker 才能套用。
 
