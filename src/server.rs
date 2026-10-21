@@ -3270,7 +3270,6 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": "route-test",
                 "result": {
-                    "tools": [{"name":"catdesk_instruction"}],
                     "structuredContent": {
                         "toolName": "catdesk_instruction",
                         "instructionText": "worker instruction",
@@ -3531,10 +3530,10 @@ mod tests {
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect();
-        assert_eq!(
-            names,
-            vec!["browser_navigate", "catdesk_instruction", "run_command"]
-        );
+        assert!(names.contains(&"run_command"));
+        assert!(names.contains(&"navigate_page"));
+        assert!(names.contains(&"catdesk_instruction"));
+        assert!(!names.contains(&"browser_worker_tool"));
 
         // tools/list with a session must return the same connector-wide tools
         // without eagerly assigning the session to either workspace.
@@ -3559,95 +3558,12 @@ mod tests {
                 .and_then(Value::as_array)
                 .unwrap()
                 .len(),
-            3
+            names.len()
         );
         assert!(
             workspace_router::bound_registration("discovery-session")
                 .unwrap()
                 .is_none()
-        );
-
-        // An initial instruction goes to Worker A provisionally. The next
-        // actual browser call may move it once to the compatible Worker B.
-        let intro = json!({
-            "jsonrpc":"2.0", "id":9, "method":"tools/call",
-            "params":{"name":"catdesk_instruction", "arguments":{},
-                "_meta":{"openai/session":"browser-session"}}
-        });
-        let intro_bytes = Bytes::from(intro.to_string());
-        let response = route_workspace_tool_call(&state, &intro, &intro_bytes, &HeaderMap::new())
-            .await
-            .expect("route introductory call");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            workspace_router::bound_registration("browser-session")
-                .unwrap()
-                .unwrap()
-                .port,
-            port_a
-        );
-
-        // Browser tool then upgrades the provisional binding once. A later
-        // incompatible tool must be rejected without migrating again.
-        let browser_call = json!({
-            "jsonrpc":"2.0", "id":6, "method":"tools/call",
-            "params":{"name":"browser_navigate", "arguments":{},
-                "_meta":{"openai/session":"browser-session"}}
-        });
-        let browser_bytes = Bytes::from(browser_call.to_string());
-        let response =
-            route_workspace_tool_call(&state, &browser_call, &browser_bytes, &HeaderMap::new())
-                .await
-                .expect("route browser call");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            workspace_router::bound_registration("browser-session")
-                .unwrap()
-                .unwrap()
-                .port,
-            port_b
-        );
-
-        let incompatible = json!({
-            "jsonrpc":"2.0", "id":7, "method":"tools/call",
-            "params":{"name":"run_command", "arguments":{"command":"echo test"},
-                "_meta":{"openai/session":"browser-session"}}
-        });
-        let incompatible_bytes = Bytes::from(incompatible.to_string());
-        let response = route_workspace_tool_call(
-            &state,
-            &incompatible,
-            &incompatible_bytes,
-            &HeaderMap::new(),
-        )
-        .await
-        .expect("reject incompatible call");
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            workspace_router::bound_registration("browser-session")
-                .unwrap()
-                .unwrap()
-                .port,
-            port_b
-        );
-
-        let computer_call = json!({
-            "jsonrpc":"2.0", "id":8, "method":"tools/call",
-            "params":{"name":"run_command", "arguments":{"command":"echo test"},
-                "_meta":{"openai/session":"computer-session"}}
-        });
-        let computer_bytes = Bytes::from(computer_call.to_string());
-        let response =
-            route_workspace_tool_call(&state, &computer_call, &computer_bytes, &HeaderMap::new())
-                .await
-                .expect("route computer call");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            workspace_router::bound_registration("computer-session")
-                .unwrap()
-                .unwrap()
-                .port,
-            port_a
         );
 
         workspace_router::unregister_workspace(&workspace_a.to_string_lossy(), port_a).unwrap();
@@ -3743,7 +3659,7 @@ mod tests {
             response_json
                 .pointer("/result/tools/0/name")
                 .and_then(Value::as_str),
-            Some("browser_worker_tool")
+            Some("run_command")
         );
 
         workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
@@ -3866,150 +3782,8 @@ mod tests {
     }
 }
 
-/// Discover the union of tools offered by live workspace workers. The tool
+/// Legacy worker catalog discovery, to be removed in favor of the fixed catalog. The tool
 /// list itself must not bind a session: the first tools/call selects a worker.
-async fn discover_worker_tools(
-    body: &Value,
-    headers: &HeaderMap,
-    mcp_path: &str,
-) -> Result<Vec<Value>, String> {
-    let workspaces = tokio::task::spawn_blocking(workspace_router::live_workspaces)
-        .await
-        .map_err(|error| error.to_string())??;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut jobs = tokio::task::JoinSet::new();
-    for worker in workspaces {
-        let client = client.clone();
-        let request_body = body.clone();
-        let headers = headers.clone();
-        let path = mcp_path.to_owned();
-        jobs.spawn(async move {
-            let url = format!("http://127.0.0.1:{}{path}", worker.port);
-            let mut request = client.post(url).json(&request_body);
-            for name in ["mcp-protocol-version", "mcp-method", "mcp-name"] {
-                if let Some(value) = headers.get(name) {
-                    request = request.header(name, value.as_bytes());
-                }
-            }
-            let response = match request.send().await {
-                Ok(response) => response,
-                Err(error) => return (worker.port, Err(error.to_string())),
-            };
-            if !response.status().is_success() {
-                return (worker.port, Err(format!("HTTP {}", response.status())));
-            }
-            let result = response
-                .json::<Value>()
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|value| {
-                    value
-                        .pointer("/result/tools")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .ok_or_else(|| "invalid tool list".to_string())
-                });
-            (worker.port, result)
-        });
-    }
-
-    let mut replies = std::collections::BTreeMap::<u16, Vec<Value>>::new();
-    let mut errors = Vec::new();
-    while let Some(joined) = jobs.join_next().await {
-        match joined {
-            Ok((port, Ok(worker_tools))) => {
-                replies.insert(port, worker_tools);
-            }
-            Ok((port, Err(error))) => errors.push(format!("worker {port}: {error}")),
-            Err(error) => errors.push(format!("tool discovery task: {error}")),
-        }
-    }
-    // Keep the healthy workers available even when one worker times out.
-    if replies.is_empty() {
-        return Err(if errors.is_empty() {
-            "No active CatDesk workers are available for tool discovery".into()
-        } else {
-            errors.join("; ")
-        });
-    }
-    let mut tools = std::collections::BTreeMap::<String, Value>::new();
-    for worker_tools in replies.into_values() {
-        for tool in worker_tools {
-            if let Some(name) = tool.get("name").and_then(Value::as_str) {
-                // A shared connector needs exactly one stable input schema
-                // for each tool name regardless of worker response order.
-                if let Some(existing) = tools.get(name) {
-                    if existing.get("inputSchema") != tool.get("inputSchema") {
-                        return Err(format!("Conflicting input schemas for tool {name}"));
-                    }
-                } else {
-                    tools.insert(name.to_owned(), tool.clone());
-                }
-            }
-        }
-    }
-    Ok(tools.into_values().collect())
-}
-
-async fn worker_ports_with_tool(
-    tool_name: &str,
-    headers: &HeaderMap,
-    mcp_path: &str,
-) -> Result<Vec<u16>, String> {
-    let workers = tokio::task::spawn_blocking(workspace_router::live_workspaces)
-        .await
-        .map_err(|error| error.to_string())??;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut jobs = tokio::task::JoinSet::new();
-    let request_body =
-        json!({"jsonrpc":"2.0", "id":0, "method":"tools/list", "params":{"_meta":{}}});
-    for worker in workers {
-        let client = client.clone();
-        let body = request_body.clone();
-        let path = mcp_path.to_owned();
-        let version = headers.get("mcp-protocol-version").cloned();
-        jobs.spawn(async move {
-            let mut request = client
-                .post(format!("http://127.0.0.1:{}{path}", worker.port))
-                .json(&body)
-                .header("mcp-method", "tools/list");
-            if let Some(version) = version {
-                request = request.header("mcp-protocol-version", version.as_bytes());
-            }
-            let tools = match request.send().await {
-                Ok(response) if response.status().is_success() => {
-                    response.json::<Value>().await.ok().and_then(|value| {
-                        value
-                            .pointer("/result/tools")
-                            .and_then(Value::as_array)
-                            .cloned()
-                    })
-                }
-                _ => None,
-            };
-            (worker.port, tools)
-        });
-    }
-    let mut eligible = Vec::new();
-    while let Some(result) = jobs.join_next().await {
-        if let Ok((port, Some(tools))) = result {
-            if tools
-                .iter()
-                .any(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
-            {
-                eligible.push(port);
-            }
-        }
-    }
-    Ok(eligible)
-}
-
 async fn route_workspace_tool_call(
     s: &ServerState,
     body: &Value,
@@ -4037,29 +3811,16 @@ async fn route_workspace_tool_call(
     if !workspace_router {
         return None;
     }
-    // Discovery must not consume or assign a session, even if the client sends one.
     if method == "tools/list" {
+        let response = mcp::router_tool_catalog(body.get("id").cloned()).await;
         return Some(
-            match discover_worker_tools(body, headers, &mcp_path).await {
-                Ok(tools) => Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "jsonrpc": "2.0", "id": body.get("id").cloned().unwrap_or(Value::Null),
-                            "result": {"tools": tools}
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-                Err(error) => modern_jsonrpc_error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    body.get("id"),
-                    -32040,
-                    "WorkspaceToolDiscoveryUnavailable",
-                    Some(json!({"message": error})),
-                ),
-            },
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&response).expect("catalog JSON"),
+                ))
+                .unwrap(),
         );
     }
     let Some(session_id) = workspace_router::session_id_from_request(body) else {
@@ -4075,34 +3836,8 @@ async fn route_workspace_tool_call(
     };
 
     let session_owned = session_id.to_string();
-    let requested_tool = body
-        .pointer("/params/name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let eligible_ports = match worker_ports_with_tool(requested_tool, headers, &mcp_path).await {
-        Ok(ports) => ports,
-        Err(message) => {
-            return Some(modern_jsonrpc_error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                body.get("id"),
-                -32040,
-                "WorkspaceToolDiscoveryUnavailable",
-                Some(json!({"message": message})),
-            ));
-        }
-    };
-    if eligible_ports.is_empty() {
-        return Some(modern_jsonrpc_error_response(
-            StatusCode::CONFLICT,
-            body.get("id"),
-            -32040,
-            "WorkspaceToolUnavailable",
-            Some(json!({"message": "No live CatDesk workspace supports this tool"})),
-        ));
-    }
-    let instruction_only = requested_tool == "catdesk_instruction";
     let resolved = match tokio::task::spawn_blocking(move || {
-        workspace_router::resolve_session_for_tool(&session_owned, eligible_ports, instruction_only)
+        workspace_router::resolve_session(&session_owned)
     })
     .await
     {

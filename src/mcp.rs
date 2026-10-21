@@ -828,6 +828,43 @@ async fn handle_tools_list(
     .await
 }
 
+/// Stable connector catalog independent of live workers and sessions.
+pub async fn router_tool_catalog(id: Option<Value>) -> JsonRpcResponse {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id,
+        method: "tools/list".into(),
+        params: json!({}),
+    };
+    let mut response = handle_tools_list_with_show_detail_mode(
+        &req,
+        Mode::Both,
+        ToolMode::MultiTools,
+        true,
+        &None,
+        ShowDetailMode::Expanded,
+    )
+    .await;
+    let browser_tools: Vec<Value> =
+        serde_json::from_str(include_str!("devtools_tool_catalog.json"))
+            .expect("bundled DevTools catalog is valid JSON");
+    if let Some(tools) = response
+        .result
+        .as_mut()
+        .and_then(|result| result.get_mut("tools"))
+        .and_then(Value::as_array_mut)
+    {
+        for mut tool in browser_tools {
+            ensure_tool_descriptor_widget_template_with_show_detail_mode(
+                &mut tool,
+                ShowDetailMode::Expanded,
+            );
+            tools.push(tool);
+        }
+    }
+    response
+}
+
 async fn handle_tools_list_with_show_detail_mode(
     req: &JsonRpcRequest,
     mode: Mode,
@@ -3936,6 +3973,57 @@ fn handle_delete_path(req: &JsonRpcRequest, workspace_root: &str) -> JsonRpcResp
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn computer_only_worker_rejects_browser_tool() {
+        let req = tool_call_request("navigate_page", json!({"url":"https://example.com"}));
+        let response = handle_tools_call(
+            &req,
+            ".",
+            1,
+            Mode::Computer,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|r| r.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn router_catalog_is_fixed_without_any_workers() {
+        let response = router_tool_catalog(Some(json!("catalog-test"))).await;
+        let tools = response
+            .result
+            .as_ref()
+            .unwrap()
+            .get("tools")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let names: std::collections::HashSet<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains("catdesk_instruction"));
+        assert!(names.contains("run_command"));
+        assert!(names.contains("navigate_page"));
+        assert!(names.contains("take_screenshot"));
+        assert_eq!(
+            names.len(),
+            tools.len(),
+            "catalog must not duplicate tool names"
+        );
+        assert!(tools.iter().all(|tool| tool.get("inputSchema").is_some()));
+    }
 
     fn resources_list_request() -> JsonRpcRequest {
         JsonRpcRequest {

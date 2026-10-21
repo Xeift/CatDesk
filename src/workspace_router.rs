@@ -37,8 +37,6 @@ struct WorkspaceRegistry {
     #[serde(default)]
     sessions: BTreeMap<String, String>,
     #[serde(default)]
-    provisional_sessions: std::collections::BTreeSet<String>,
-    #[serde(default)]
     router_clients: Vec<RouterClient>,
     #[serde(default)]
     worker_port_reservations: Vec<WorkerPortReservation>,
@@ -305,9 +303,6 @@ fn prune_stale(registry: &mut WorkspaceRegistry) {
             .iter()
             .any(|registration| &registration.workspace == workspace)
     });
-    registry
-        .provisional_sessions
-        .retain(|session| registry.sessions.contains_key(session));
 }
 
 pub fn register_workspace(workspace_root: &str, port: u16) -> io::Result<WorkspaceRegistration> {
@@ -337,9 +332,6 @@ pub fn register_workspace(workspace_root: &str, port: u16) -> io::Result<Workspa
     // Restarting CatDesk in a workspace explicitly makes that workspace available
     // for the next unbound ChatGPT conversation.
     registry.sessions.retain(|_, bound| bound != &workspace);
-    registry
-        .provisional_sessions
-        .retain(|session| registry.sessions.contains_key(session));
     registry.worker_port_reservations.retain(|reservation| {
         !(reservation.workspace == workspace
             && reservation.pid == std::process::id()
@@ -408,9 +400,6 @@ pub fn unregister_workspace(workspace_root: &str, port: u16) -> io::Result<()> {
         .workspaces
         .retain(|entry| !(entry.workspace == workspace && entry.port == port));
     registry.sessions.retain(|_, bound| bound != &workspace);
-    registry
-        .provisional_sessions
-        .retain(|session| registry.sessions.contains_key(session));
 
     if registry.workspaces.is_empty()
         && registry.sessions.is_empty()
@@ -502,54 +491,12 @@ fn has_live_router_clients_at(path: &Path) -> io::Result<bool> {
 }
 
 /// Return live workspace endpoints for session-independent tool discovery.
-pub fn live_workspaces() -> Result<Vec<WorkspaceRegistration>, String> {
-    let path = registry_path().map_err(|error| error.to_string())?;
-    let _lock = acquire_registry_lock(&path).map_err(|error| error.to_string())?;
-    let mut registry = load_registry(&path).map_err(|error| error.to_string())?;
-    prune_stale(&mut registry);
-    save_registry(&path, &registry).map_err(|error| error.to_string())?;
-    Ok(registry.workspaces)
-}
-
 pub fn resolve_session(session_id: &str) -> Result<WorkspaceRegistration, String> {
-    resolve_session_for_ports(session_id, None)
-}
-
-pub fn resolve_session_for_ports(
-    session_id: &str,
-    supported_ports: Option<Vec<u16>>,
-) -> Result<WorkspaceRegistration, String> {
     let path = registry_path().map_err(|error| error.to_string())?;
-    resolve_session_at_for_ports(&path, session_id, supported_ports.as_deref())
+    resolve_session_at(&path, session_id)
 }
 
 fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistration, String> {
-    resolve_session_at_for_ports(path, session_id, None)
-}
-
-fn resolve_session_at_for_ports(
-    path: &Path,
-    session_id: &str,
-    supported_ports: Option<&[u16]>,
-) -> Result<WorkspaceRegistration, String> {
-    resolve_session_at_for_tool(path, session_id, supported_ports, false)
-}
-
-pub fn resolve_session_for_tool(
-    session_id: &str,
-    supported_ports: Vec<u16>,
-    instruction_only: bool,
-) -> Result<WorkspaceRegistration, String> {
-    let path = registry_path().map_err(|error| error.to_string())?;
-    resolve_session_at_for_tool(&path, session_id, Some(&supported_ports), instruction_only)
-}
-
-fn resolve_session_at_for_tool(
-    path: &Path,
-    session_id: &str,
-    supported_ports: Option<&[u16]>,
-    instruction_only: bool,
-) -> Result<WorkspaceRegistration, String> {
     let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
     let mut registry = load_registry(path).map_err(|error| error.to_string())?;
     prune_stale(&mut registry);
@@ -561,38 +508,8 @@ fn resolve_session_at_for_tool(
             .find(|entry| entry.workspace == workspace)
             .cloned()
         {
-            let compatible = supported_ports.is_none_or(|ports| ports.contains(&registration.port));
-            if compatible {
-                if !instruction_only {
-                    registry.provisional_sessions.remove(session_id);
-                }
-                save_registry(path, &registry).map_err(|error| error.to_string())?;
-                return Ok(registration);
-            }
-            if registry.provisional_sessions.contains(session_id) && !instruction_only {
-                // Never migrate after an actual tool has been dispatched.
-                if let Some(next) = registry
-                    .workspaces
-                    .iter()
-                    .find(|entry| {
-                        supported_ports.is_some_and(|ports| ports.contains(&entry.port))
-                            && !registry
-                                .sessions
-                                .values()
-                                .any(|workspace| workspace == &entry.workspace)
-                    })
-                    .cloned()
-                {
-                    registry
-                        .sessions
-                        .insert(session_id.to_owned(), next.workspace.clone());
-                    registry.provisional_sessions.remove(session_id);
-                    save_registry(path, &registry).map_err(|error| error.to_string())?;
-                    return Ok(next);
-                }
-            }
             save_registry(path, &registry).map_err(|error| error.to_string())?;
-            return Err("This tool is not available in the workspace already bound to this ChatGPT session. Switch to a session assigned to a compatible workspace.".into());
+            return Ok(registration);
         }
         registry.sessions.remove(session_id);
     }
@@ -601,11 +518,10 @@ fn resolve_session_at_for_tool(
         .workspaces
         .iter()
         .find(|entry| {
-            supported_ports.is_none_or(|ports| ports.contains(&entry.port))
-                && !registry
-                    .sessions
-                    .values()
-                    .any(|workspace| workspace == &entry.workspace)
+            !registry
+                .sessions
+                .values()
+                .any(|workspace| workspace == &entry.workspace)
         })
         .cloned();
     let Some(next) = next else {
@@ -617,9 +533,6 @@ fn resolve_session_at_for_tool(
     registry
         .sessions
         .insert(session_id.to_string(), next.workspace.clone());
-    if instruction_only {
-        registry.provisional_sessions.insert(session_id.to_owned());
-    }
     save_registry(path, &registry).map_err(|error| error.to_string())?;
     Ok(next)
 }
@@ -807,92 +720,6 @@ mod tests {
         assert_eq!(second.workspace, "/tmp/project-b");
         assert_eq!(first_again, first);
 
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn tool_capability_selects_a_compatible_workspace_and_keeps_binding() {
-        let path = test_registry_path("capability-routing");
-        let worker_a = MockHealthWorker::new("/tmp/project-a");
-        let worker_b = MockHealthWorker::new("/tmp/project-b");
-        save_test_registry(
-            &path,
-            &WorkspaceRegistry {
-                workspaces: vec![
-                    WorkspaceRegistration {
-                        workspace: "/tmp/project-a".into(),
-                        port: worker_a.port,
-                        pid: std::process::id(),
-                    },
-                    WorkspaceRegistration {
-                        workspace: "/tmp/project-b".into(),
-                        port: worker_b.port,
-                        pid: std::process::id(),
-                    },
-                ],
-                ..WorkspaceRegistry::default()
-            },
-        );
-        let chosen = resolve_session_at_for_ports(&path, "session-browser", Some(&[worker_b.port]))
-            .expect("route first browser call to capable worker");
-        assert_eq!(chosen.port, worker_b.port);
-        assert!(
-            resolve_session_at_for_ports(&path, "session-browser", Some(&[worker_a.port])).is_err()
-        );
-        assert_eq!(
-            resolve_session_at(&path, "session-browser").unwrap().port,
-            worker_b.port
-        );
-        let second =
-            resolve_session_at_for_ports(&path, "session-computer", Some(&[worker_a.port]))
-                .expect("route other session to computer worker");
-        assert_eq!(second.port, worker_a.port);
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn instruction_only_binding_can_upgrade_once_to_browser_worker() {
-        let path = test_registry_path("provisional-upgrade");
-        let computer = MockHealthWorker::new("/tmp/project-computer");
-        let browser = MockHealthWorker::new("/tmp/project-browser");
-        save_test_registry(
-            &path,
-            &WorkspaceRegistry {
-                workspaces: vec![
-                    WorkspaceRegistration {
-                        workspace: "/tmp/project-computer".into(),
-                        port: computer.port,
-                        pid: std::process::id(),
-                    },
-                    WorkspaceRegistration {
-                        workspace: "/tmp/project-browser".into(),
-                        port: browser.port,
-                        pid: std::process::id(),
-                    },
-                ],
-                ..WorkspaceRegistry::default()
-            },
-        );
-        let initial = resolve_session_at_for_tool(
-            &path,
-            "session-1",
-            Some(&[computer.port, browser.port]),
-            true,
-        )
-        .unwrap();
-        assert_eq!(initial.port, computer.port);
-        let upgraded =
-            resolve_session_at_for_tool(&path, "session-1", Some(&[browser.port]), false).unwrap();
-        assert_eq!(upgraded.port, browser.port);
-        assert!(
-            resolve_session_at_for_tool(&path, "session-1", Some(&[computer.port]), false).is_err()
-        );
-        assert_eq!(
-            resolve_session_at(&path, "session-1").unwrap().port,
-            browser.port
-        );
-        let registry = load_registry(&path).unwrap();
-        assert!(!registry.provisional_sessions.contains("session-1"));
         let _ = fs::remove_file(path);
     }
 
