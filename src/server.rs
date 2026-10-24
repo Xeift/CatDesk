@@ -3812,7 +3812,18 @@ async fn route_workspace_tool_call(
         return None;
     }
     if method == "tools/list" {
-        let response = mcp::router_tool_catalog(body.get("id").cloned()).await;
+        let response = match mcp::router_tool_catalog(body.get("id").cloned()).await {
+            Ok(response) => response,
+            Err(message) => {
+                return Some(modern_jsonrpc_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    body.get("id"),
+                    -32040,
+                    "DevToolsDiscoveryUnavailable",
+                    Some(json!({"message":message})),
+                ));
+            }
+        };
         return Some(
             Response::builder()
                 .status(StatusCode::OK)

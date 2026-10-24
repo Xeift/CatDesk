@@ -828,8 +828,38 @@ async fn handle_tools_list(
     .await
 }
 
-/// Stable connector catalog independent of live workers and sessions.
-pub async fn router_tool_catalog(id: Option<Value>) -> JsonRpcResponse {
+static ROUTER_DEVTOOLS_TOOLS: tokio::sync::OnceCell<Vec<Value>> =
+    tokio::sync::OnceCell::const_new();
+
+/// Query chrome-devtools-mcp directly and cache successful discovery only.
+async fn router_devtools_tools() -> Result<Vec<Value>, String> {
+    ROUTER_DEVTOOLS_TOOLS
+        .get_or_try_init(|| async {
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                let bridge = DevtoolsBridge::start(None).await?;
+                let tools = fetch_devtools_tools(&bridge).await.ok_or_else(|| {
+                    "chrome-devtools-mcp tools/list returned no tool definitions".to_string()
+                });
+                bridge.lock().await.stop().await;
+                tools
+            })
+            .await
+            .map_err(|_| "chrome-devtools-mcp tool discovery timed out".to_string())?
+        })
+        .await
+        .cloned()
+}
+
+/// Connector catalog independent of live Workers and session binding.
+pub async fn router_tool_catalog(id: Option<Value>) -> Result<JsonRpcResponse, String> {
+    let browser_tools = router_devtools_tools().await?;
+    Ok(router_tool_catalog_with_browser_tools(id, browser_tools).await)
+}
+
+async fn router_tool_catalog_with_browser_tools(
+    id: Option<Value>,
+    browser_tools: Vec<Value>,
+) -> JsonRpcResponse {
     let req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
         id,
@@ -845,9 +875,6 @@ pub async fn router_tool_catalog(id: Option<Value>) -> JsonRpcResponse {
         ShowDetailMode::Expanded,
     )
     .await;
-    let browser_tools: Vec<Value> =
-        serde_json::from_str(include_str!("devtools_tool_catalog.json"))
-            .expect("bundled DevTools catalog is valid JSON");
     if let Some(tools) = response
         .result
         .as_mut()
@@ -4000,7 +4027,13 @@ mod tests {
 
     #[tokio::test]
     async fn router_catalog_is_fixed_without_any_workers() {
-        let response = router_tool_catalog(Some(json!("catalog-test"))).await;
+        let browser_tools = vec![
+            json!({"name":"navigate_page","inputSchema":{"type":"object"}}),
+            json!({"name":"take_screenshot","inputSchema":{"type":"object"}}),
+        ];
+        let response =
+            router_tool_catalog_with_browser_tools(Some(json!("catalog-test")), browser_tools)
+                .await;
         let tools = response
             .result
             .as_ref()
