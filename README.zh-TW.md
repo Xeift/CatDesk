@@ -185,6 +185,30 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
+# 單一 connector 的多 workspace
+
+CatDesk 可以讓多個本機 workspace 共用同一個 ChatGPT connector，不需要每個專案各自建立 ngrok domain 與 connector。
+
+先在第一個專案正常啟動 CatDesk：
+
+```bash
+cd ~/ProjectA
+catdesk
+```
+
+第一個指令會啟動**獨立的背景 Router 程序**，在 `3200` 連接埠管理公開 connector 與 ngrok 隧道。前景 CatDesk 本身則是工作區 Worker，使用 `3201`–`3299` 中的連接埠。接著在另一個專案再次啟動：
+
+```bash
+cd ~/ProjectB
+catdesk
+```
+
+新的前景 CatDesk 同樣作為工作區 Worker，使用 `3201`–`3299` 中的可用連接埠，不再建立第二條 ngrok 隧道或 connector。
+
+CatDesk 要求 `tools/call` 帶有 `_meta["openai/session"]`，作為匿名對話識別碼；Router 的 `tools/list` 不需要 Session ID，也不查詢正在執行的 Worker；首次探索時會啟動 `chrome-devtools-mcp`，取得實際瀏覽器工具 schema，並於 Router 程序內快取成功的探索結果，連同 CatDesk 電腦工具一起公開。若探索失敗，會回傳 `DevToolsDiscoveryUnavailable`，下次呼叫 `tools/list` 時可以重新嘗試。新對話第一次呼叫工具時，Router 按先綁先贏原則選擇尚未被其他對話使用的工作區；之後不會遷移 Session。如果綁定的 Worker 不支援某項工具，就由該 Worker 回傳錯誤。CatDesk 會把本機 workspace/session 對應關係存在 `~/.catdesk/workspace_id.toml`。
+
+因此 Project A 與 Project B 仍各自保有 CatDesk 原本的 workspace path guard，但只需要一個公開 connector。重新啟動某個 workspace 裡的 CatDesk，會讓該 workspace 重新變成可供新對話綁定的狀態。獨立的背景 Router（連接埠 `3200`）會在還有 Worker 註冊時持續運作；隧道中斷時 Worker 會嘗試恢復 Router。當其他 CatDesk 工作區仍在執行時，不能修改 MCP slug 或 ngrok domain；請先退出其他工作區，再於啟動服務前修改連接器設定。已執行的 Worker 會保留啟動時的模式及瀏覽器能力；修改共用模式設定後，須重新啟動 Worker 才能套用。
+
 # 技術架構
 
 | 項目 | 技術 |

@@ -185,6 +185,30 @@ CatDesk is a coding tool and a custom connector. Always use CatDesk if the user 
   </tr>
 </table>
 
+# Multiple workspaces with one connector
+
+CatDesk can keep one public ChatGPT connector while multiple local CatDesk processes are open in different workspaces.
+
+Start CatDesk normally in the first project:
+
+```bash
+cd ~/ProjectA
+catdesk
+```
+
+The first command launches a **separate background router process** on port `3200`, hosting the single public connector and ngrok tunnel. The foreground CatDesk runs as a workspace worker on a port in `3201`–`3299`. Start CatDesk again from another project:
+
+```bash
+cd ~/ProjectB
+catdesk
+```
+
+The new foreground process also runs as a workspace worker on a free local port in `3201`–`3299`, without opening another tunnel or connector.
+
+For `tools/call`, CatDesk requires `_meta["openai/session"]`, an anonymized conversation identifier. The router's `tools/list` exposes CatDesk computer tools and discovers browser tools directly from `chrome-devtools-mcp` on the first discovery request, without consulting live workers or requiring a session ID. It starts `chrome-devtools-mcp` to fetch the actual tool schemas and caches successful discovery for the router process; a failed discovery returns `DevToolsDiscoveryUnavailable` and can be retried by a subsequent `tools/list` request. The first tool call binds the session to the first unbound live workspace; later tool calls stay in that workspace. If the bound worker does not support a requested tool, it returns an error. The router never migrates a bound session. CatDesk stores the local workspace/session mapping in `~/.catdesk/workspace_id.toml`.
+
+This means Project A and Project B can stay isolated behind their own CatDesk workspace guards while sharing one ChatGPT connector. Restarting CatDesk inside a workspace makes that workspace available for a new conversation again. The separate background router on port `3200` stays alive while workers are registered, and workers attempt to restore it if its tunnel disappears. Connector identity settings (MCP slug and ngrok domain) cannot be changed while other CatDesk workspaces are active. Quit the other workspaces first, then make the change before starting services. Other shared configuration changes are persisted across workspaces, but running workers keep their startup mode and browser capabilities until restarted.
+
 # Stack
 
 | Part | Stack |

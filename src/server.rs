@@ -1,18 +1,25 @@
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::{Form, Path, State},
-    http::{HeaderMap, Response, StatusCode, header},
+    extract::{Form, Path, Query, State},
+    http::{HeaderMap, Method, Response, StatusCode, header},
     response::Json,
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
 };
-use base64::Engine as _;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, KeyInit, Mac};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::command_jobs::CommandJobManager;
@@ -23,8 +30,41 @@ use crate::state::{
     TokenStatsLayout, UsageTotals, parse_seed_hex, save_agents_path_mode, save_show_detail_mode,
     save_token_stats_layout,
 };
+use crate::workspace_router;
 
 const STATELESS_FLOW_ID: &str = "stateless";
+
+fn write_tools_list_diagnostic(has_session: bool) -> std::io::Result<()> {
+    let path = crate::state::user_home_dir()?
+        .join(".catdesk")
+        .join("router-diagnostic.log");
+    append_tools_list_diagnostic(&path, has_session)
+}
+
+fn append_tools_list_diagnostic(path: &std::path::Path, has_session: bool) -> std::io::Result<()> {
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "tools/list openai/session present={has_session}")
+}
+
+#[cfg(test)]
+#[test]
+fn tools_list_diagnostic_is_readable_and_omits_session_identifiers() {
+    let path = std::env::temp_dir().join(format!(
+        "catdesk-router-diagnostic-{}.log",
+        uuid::Uuid::new_v4()
+    ));
+    append_tools_list_diagnostic(&path, true).expect("append true");
+    append_tools_list_diagnostic(&path, false).expect("append false");
+    let contents = fs::read_to_string(&path).expect("read diagnostic");
+    assert_eq!(
+        contents,
+        "tools/list openai/session present=true\ntools/list openai/session present=false\n"
+    );
+    fs::remove_file(path).expect("remove diagnostic");
+}
 
 #[derive(Clone)]
 struct ServerState {
@@ -33,6 +73,80 @@ struct ServerState {
     command_jobs: CommandJobManager,
     ui_events: UnboundedSender<ServerUiEvent>,
     catdesk_instruction_called: Arc<AtomicBool>,
+    workspace_action_secret: Arc<[u8; 32]>,
+}
+
+const WORKSPACE_ACTION_CAPABILITY_TTL_SECS: u64 = 24 * 60 * 60;
+
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkspaceActionCapability {
+    session: String,
+    port: u16,
+    path: String,
+    expires_at: u64,
+}
+
+fn new_workspace_action_secret() -> Arc<[u8; 32]> {
+    let mut secret = [0_u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    Arc::new(secret)
+}
+
+fn unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn sign_workspace_action_capability(
+    secret: &[u8],
+    session: &str,
+    port: u16,
+    path: &str,
+) -> Option<String> {
+    let capability = WorkspaceActionCapability {
+        session: session.to_string(),
+        port,
+        path: path.to_string(),
+        expires_at: unix_time_secs().saturating_add(WORKSPACE_ACTION_CAPABILITY_TTL_SECS),
+    };
+    let payload = serde_json::to_vec(&capability).ok()?;
+    let payload = URL_SAFE_NO_PAD.encode(payload);
+    let mut mac = HmacSha256::new_from_slice(secret).ok()?;
+    mac.update(payload.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    Some(format!("{payload}.{signature}"))
+}
+
+fn verify_workspace_action_capability(
+    secret: &[u8],
+    token: &str,
+    port: u16,
+    path: &str,
+) -> Result<WorkspaceActionCapability, &'static str> {
+    let (payload, signature) = token.split_once('.').ok_or("invalid action capability")?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| "invalid action capability")?;
+    let mut mac = HmacSha256::new_from_slice(secret).map_err(|_| "invalid action capability")?;
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&signature)
+        .map_err(|_| "invalid action capability")?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| "invalid action capability")?;
+    let capability: WorkspaceActionCapability =
+        serde_json::from_slice(&payload).map_err(|_| "invalid action capability")?;
+    if capability.expires_at < unix_time_secs() {
+        return Err("expired action capability");
+    }
+    if capability.port != port || capability.path != path || capability.session.is_empty() {
+        return Err("action capability does not match this workspace action");
+    }
+    Ok(capability)
 }
 
 /// Build the axum router.
@@ -49,6 +163,7 @@ pub fn router(
         command_jobs,
         ui_events,
         catdesk_instruction_called: Arc::new(AtomicBool::new(false)),
+        workspace_action_secret: new_workspace_action_secret(),
     };
     let secret_prefix = mcp_path
         .strip_suffix("/mcp")
@@ -60,6 +175,7 @@ pub fn router(
     let agents_path_state = format!("{secret_prefix}/agents/path-state");
     let token_stats_layout = format!("{secret_prefix}/layout/token-stats");
     let show_detail_mode = format!("{secret_prefix}/layout/show-detail");
+    let workspace_action_path = format!("{secret_prefix}/workspace/{{port}}/{{*path}}");
 
     Router::new()
         .route(&health_path, get(health))
@@ -92,7 +208,141 @@ pub fn router(
         .route(&mcp_path, post(post_mcp_http))
         .route(&mcp_path, get(get_mcp))
         .route(&mcp_path, delete(delete_mcp))
+        .route(&workspace_action_path, any(proxy_workspace_action))
         .with_state(state)
+}
+
+async fn proxy_workspace_action(
+    State(s): State<ServerState>,
+    Path((port, path)): Path<(u16, String)>,
+    Query(query): Query<HashMap<String, String>>,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let Some(capability) = query.get("cap") else {
+        return with_widget_action_cors(Response::builder())
+            .status(StatusCode::FORBIDDEN)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "ok": false, "error": "missing action capability" }).to_string(),
+            ))
+            .unwrap();
+    };
+    let capability = match verify_workspace_action_capability(
+        s.workspace_action_secret.as_ref(),
+        capability,
+        port,
+        path.trim_start_matches('/'),
+    ) {
+        Ok(capability) => capability,
+        Err(message) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::FORBIDDEN)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": message }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let session = capability.session.clone();
+    let registration = match tokio::task::spawn_blocking(move || {
+        workspace_router::bound_registration(&session)
+    })
+    .await
+    {
+        Ok(Ok(Some(registration))) if registration.port == port => registration,
+        Ok(Ok(_)) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::FORBIDDEN)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": "action capability is no longer bound to this workspace" }).to_string(),
+                ))
+                .unwrap();
+        }
+        Ok(Err(message)) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": message }).to_string(),
+                ))
+                .unwrap();
+        }
+        Err(error) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": error.to_string() }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let secret_prefix = {
+        let app = s.app.lock().await;
+        app.mcp_path()
+            .strip_suffix("/mcp")
+            .unwrap_or_default()
+            .to_string()
+    };
+    let url = format!(
+        "http://127.0.0.1:{}{}/{}",
+        registration.port,
+        secret_prefix,
+        path.trim_start_matches('/')
+    );
+    let client = reqwest::Client::new();
+    let mut request = client.request(method, url).body(body.to_vec());
+    if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
+        request = request.header(header::CONTENT_TYPE, content_type);
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::BAD_GATEWAY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": error.to_string() }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return with_widget_action_cors(Response::builder())
+                .status(StatusCode::BAD_GATEWAY)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ok": false, "error": error.to_string() }).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    let mut builder = Response::builder().status(status.as_u16());
+    for name in [
+        header::CONTENT_TYPE,
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        header::CACHE_CONTROL,
+    ] {
+        if let Some(value) = response_headers.get(&name) {
+            builder = builder.header(name, value);
+        }
+    }
+    builder.body(Body::from(bytes)).unwrap()
 }
 
 fn with_widget_action_cors(
@@ -781,7 +1031,145 @@ async fn health(State(s): State<ServerState>) -> Json<Value> {
         "mode": app.mode.label(),
         "tool_mode": app.tool_mode.label(),
         "workspace": app.workspace_root,
+        "workspaceCanonical": std::path::Path::new(&app.workspace_root)
+            .canonicalize().unwrap_or_else(|_| std::path::PathBuf::from(&app.workspace_root))
+            .to_string_lossy().to_string(),
+        "ngrokRunning": app.ngrok_running,
+        "ngrokUrl": app.ngrok_url,
+        "router": app.workspace_router,
+        "pid": std::process::id(),
     }))
+}
+
+fn build_workspace_action_url(
+    public_action_base_url: Option<&str>,
+    action_path: &str,
+    capability: Option<(&[u8], &str, u16)>,
+) -> String {
+    let Some(base) = public_action_base_url else {
+        return String::new();
+    };
+    let url = format!("{base}/{action_path}");
+    let Some((secret, session, port)) = capability else {
+        return url;
+    };
+    let Some(token) = sign_workspace_action_capability(secret, session, port, action_path) else {
+        return String::new();
+    };
+    format!("{url}?cap={token}")
+}
+
+fn rewrite_catdesk_instruction_action_urls(
+    result: &mut Option<Value>,
+    public_base_url: Option<&str>,
+    mcp_path: &str,
+    capability: Option<(&[u8], &str, u16)>,
+) {
+    let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(structured) = result_obj
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if structured.get("toolName").and_then(Value::as_str) != Some("catdesk_instruction") {
+        return;
+    }
+    let Some(widget_payload) = result_obj
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    let public_action_base_url = public_base_url
+        .zip(mcp_path.strip_suffix("/mcp"))
+        .map(|(base, secret_prefix)| format!("{base}{secret_prefix}"));
+    let public_action_base_url = public_action_base_url.as_deref();
+    let local_binagotchy_base = capability.is_none().then(|| {
+        public_action_base_url
+            .map(|base| format!("{base}/binagotchy"))
+            .unwrap_or_default()
+    });
+    widget_payload.insert(
+        "binagotchyApiBaseUrl".to_string(),
+        json!(local_binagotchy_base.unwrap_or_default()),
+    );
+    widget_payload.insert(
+        "binagotchyPartnerUrl".to_string(),
+        json!(build_workspace_action_url(
+            public_action_base_url,
+            "binagotchy/partner",
+            capability,
+        )),
+    );
+    widget_payload.insert(
+        "agentsPathModeUrl".to_string(),
+        json!(build_workspace_action_url(
+            public_action_base_url,
+            "agents/path-mode",
+            capability,
+        )),
+    );
+    widget_payload.insert(
+        "agentsPathStateUrl".to_string(),
+        json!(build_workspace_action_url(
+            public_action_base_url,
+            "agents/path-state",
+            capability,
+        )),
+    );
+    widget_payload.insert(
+        "tokenStatsLayoutUrl".to_string(),
+        json!(build_workspace_action_url(
+            public_action_base_url,
+            "layout/token-stats",
+            capability,
+        )),
+    );
+    widget_payload.insert(
+        "showDetailModeUrl".to_string(),
+        json!(build_workspace_action_url(
+            public_action_base_url,
+            "layout/show-detail",
+            capability,
+        )),
+    );
+
+    if let Some(cards) = widget_payload
+        .get_mut("binagotchyCards")
+        .and_then(Value::as_array_mut)
+    {
+        for card in cards.iter_mut().filter_map(Value::as_object_mut) {
+            let Some(folder) = card
+                .get("folder")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            card.insert(
+                "saveFolderUrl".to_string(),
+                json!(build_workspace_action_url(
+                    public_action_base_url,
+                    &format!("binagotchy/archive/{folder}/save"),
+                    capability,
+                )),
+            );
+            card.insert(
+                "setPartnerUrl".to_string(),
+                json!(build_workspace_action_url(
+                    public_action_base_url,
+                    "binagotchy/partner",
+                    capability,
+                )),
+            );
+        }
+    }
 }
 
 fn attach_catdesk_instruction_actions(
@@ -791,6 +1179,7 @@ fn attach_catdesk_instruction_actions(
     mascot_seed: u64,
     partner_binagotchy_seed: Option<&str>,
 ) {
+    rewrite_catdesk_instruction_action_urls(result, public_base_url, mcp_path, None);
     let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
         return;
     };
@@ -816,52 +1205,6 @@ fn attach_catdesk_instruction_actions(
         return;
     };
 
-    let public_action_base_url = public_base_url
-        .zip(mcp_path.strip_suffix("/mcp"))
-        .map(|(base, secret_prefix)| format!("{base}{secret_prefix}"));
-    let binagotchy_action_base_url = public_action_base_url
-        .as_deref()
-        .map(|base| format!("{base}/binagotchy"));
-    widget_payload.insert(
-        "binagotchyApiBaseUrl".to_string(),
-        json!(binagotchy_action_base_url.clone().unwrap_or_default()),
-    );
-    widget_payload.insert(
-        "agentsPathModeUrl".to_string(),
-        json!(
-            public_action_base_url
-                .as_deref()
-                .map(|base| format!("{base}/agents/path-mode"))
-                .unwrap_or_default()
-        ),
-    );
-    widget_payload.insert(
-        "agentsPathStateUrl".to_string(),
-        json!(
-            public_action_base_url
-                .as_deref()
-                .map(|base| format!("{base}/agents/path-state"))
-                .unwrap_or_default()
-        ),
-    );
-    widget_payload.insert(
-        "tokenStatsLayoutUrl".to_string(),
-        json!(
-            public_action_base_url
-                .as_deref()
-                .map(|base| format!("{base}/layout/token-stats"))
-                .unwrap_or_default()
-        ),
-    );
-    widget_payload.insert(
-        "showDetailModeUrl".to_string(),
-        json!(
-            public_action_base_url
-                .as_deref()
-                .map(|base| format!("{base}/layout/show-detail"))
-                .unwrap_or_default()
-        ),
-    );
     widget_payload.insert(
         "partnerBinagotchySeed".to_string(),
         json!(partner_binagotchy_seed.unwrap_or("")),
@@ -879,27 +1222,10 @@ fn attach_catdesk_instruction_actions(
             let Some(card_obj) = card.as_object_mut() else {
                 continue;
             };
-            let Some(folder) = card_obj
-                .get("folder")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-            else {
-                continue;
-            };
             let is_partner = partner_binagotchy_seed
                 .zip(card_obj.get("seed").and_then(Value::as_str))
                 .is_some_and(|(partner_seed, card_seed)| partner_seed == card_seed);
             card_obj.insert("isPartner".to_string(), json!(is_partner));
-            if let Some(base) = binagotchy_action_base_url.as_deref() {
-                card_obj.insert(
-                    "saveFolderUrl".to_string(),
-                    json!(format!("{base}/archive/{folder}/save")),
-                );
-                card_obj.insert(
-                    "setPartnerUrl".to_string(),
-                    json!(format!("{base}/partner")),
-                );
-            }
         }
     }
 }
@@ -1303,6 +1629,68 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::{Mutex, mpsc::unbounded_channel};
 
+    static WORKSPACE_ROUTING_TEST_MUTEX: Mutex<()> = Mutex::const_new(());
+
+    fn mock_worker_health(workspace: &std::path::Path) -> Router {
+        let workspace = workspace
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        Router::new().route(
+            "/{slug}",
+            get(move || {
+                let workspace = workspace.clone();
+                async move {
+                    Json(json!({
+                        "name": "CatDesk", "router": false,
+                        "workspace": workspace, "workspaceCanonical": workspace,
+                    "pid": std::process::id()
+                    }))
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn health_reports_background_router_tunnel_and_process_identity() {
+        let root = unique_temp_path("catdesk-router-health-test");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = AppState::new_for_test(
+            3200,
+            root.to_string_lossy().into_owned(),
+            root.join("config.toml"),
+        )
+        .unwrap();
+        app.workspace_router = true;
+        app.ngrok_running = true;
+        app.ngrok_url = Some("https://example.ngrok.app".into());
+        let (events, _rx) = unbounded_channel();
+        let state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: events,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(false)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+        let Json(body) = health(State(state)).await;
+        assert_eq!(body.get("router").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            body.get("ngrokRunning").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("ngrokUrl").and_then(Value::as_str),
+            Some("https://example.ngrok.app")
+        );
+        assert_eq!(
+            body.get("pid").and_then(Value::as_u64),
+            Some(std::process::id() as u64)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn tool_flow_label_includes_selected_argument_summary() {
         let run_command = json!({
@@ -1522,6 +1910,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         sync_show_detail_mode_state(&server_state, ShowDetailMode::Disable).await;
@@ -1558,6 +1947,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let response = post_mcp(
@@ -1608,6 +1998,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let response = post_mcp(
@@ -1666,6 +2057,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let response = post_mcp(
@@ -1739,6 +2131,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let response = post_mcp(
@@ -1881,6 +2274,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let discover = post_mcp_http(
@@ -2028,6 +2422,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let legacy_shape = post_mcp_http(
@@ -2398,6 +2793,7 @@ mod tests {
             command_jobs: command_jobs.clone(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
         let command = if cfg!(windows) {
             "Start-Sleep -Milliseconds 250; Write-Output http-job-done"
@@ -2516,6 +2912,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: instruction_called.clone(),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let blocked_response = post_mcp(
@@ -2625,6 +3022,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: instruction_called.clone(),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let discover = post_mcp_json_with_show_detail_mode(
@@ -2799,6 +3197,7 @@ mod tests {
             command_jobs: CommandJobManager::new(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
         };
 
         let response = post_mcp(
@@ -2850,6 +3249,718 @@ mod tests {
         let _ = std::fs::remove_dir_all(workspace_root);
         let _ = std::fs::remove_dir_all(config_root);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_router_forwards_tool_calls_to_bound_worker() {
+        let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
+        let worker_workspace = unique_temp_path("catdesk-workspace-route-worker");
+        let router_workspace = unique_temp_path("catdesk-workspace-route-router");
+        let config_root = unique_temp_path("catdesk-workspace-route-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&worker_workspace).expect("create worker workspace");
+        std::fs::create_dir_all(&router_workspace).expect("create router workspace");
+        std::fs::create_dir_all(&config_root).expect("create config root");
+
+        let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind worker");
+        let worker_port = worker_listener.local_addr().expect("worker addr").port();
+        let worker_app = mock_worker_health(&worker_workspace).fallback(post(|| async {
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": "route-test",
+                "result": {
+                    "structuredContent": {
+                        "toolName": "catdesk_instruction",
+                        "instructionText": "worker instruction",
+                        "workspaceRoot": "/tmp/worker"
+                    },
+                    "_meta": {
+                        WIDGET_PAYLOAD_META_KEY: {
+                            "agentsPathStateUrl": "",
+                            "binagotchyCards": [{
+                                "folder": "20260925T000000000Z_deadbeef",
+                                "seed": "deadbeef"
+                            }]
+                        }
+                    }
+                }
+            }))
+        }));
+        let worker_task = tokio::spawn(async move {
+            axum::serve(worker_listener, worker_app)
+                .await
+                .expect("serve worker");
+        });
+
+        // Allow the mock HTTP server to begin accepting requests before its
+        // synchronous registration health probe runs.
+        tokio::task::yield_now().await;
+        workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("register worker");
+
+        let mut app = AppState::new_for_test(
+            8787,
+            router_workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create router app state");
+        app.workspace_router = true;
+        app.ngrok_url = Some("https://router.example".into());
+        let router_slug = app.mcp_slug.clone();
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "route-test",
+            "method": "tools/call",
+            "params": {
+                "name": "catdesk_instruction",
+                "arguments": {},
+                "_meta": {"openai/session": "session-worker-test"}
+            }
+        });
+        let body = Bytes::from(request.to_string());
+        let headers = HeaderMap::new();
+
+        let response = route_workspace_tool_call(&server_state, &request, &body, &headers)
+            .await
+            .expect("request should be forwarded");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read forwarded response");
+        let response_json: Value =
+            serde_json::from_slice(&response_body).expect("parse forwarded response");
+        let expected = format!(
+            "https://router.example/{router_slug}/workspace/{worker_port}/agents/path-state"
+        );
+        let agents_url = response_json
+            .pointer("/result/_meta/catdesk~1widgetPayload/agentsPathStateUrl")
+            .and_then(Value::as_str)
+            .expect("routed agents action URL");
+        let (agents_base, agents_capability) = agents_url
+            .split_once("?cap=")
+            .expect("agents action capability");
+        assert_eq!(agents_base, expected);
+        let verified = verify_workspace_action_capability(
+            server_state.workspace_action_secret.as_ref(),
+            agents_capability,
+            worker_port,
+            "agents/path-state",
+        )
+        .expect("verify agents action capability");
+        assert_eq!(verified.session, "session-worker-test");
+
+        let card_base =
+            format!("https://router.example/{router_slug}/workspace/{worker_port}/binagotchy");
+        let save_url = response_json
+            .pointer("/result/_meta/catdesk~1widgetPayload/binagotchyCards/0/saveFolderUrl")
+            .and_then(Value::as_str)
+            .expect("routed save action URL");
+        let (save_base, save_capability) = save_url
+            .split_once("?cap=")
+            .expect("save action capability");
+        assert_eq!(
+            save_base,
+            format!("{card_base}/archive/20260925T000000000Z_deadbeef/save")
+        );
+        verify_workspace_action_capability(
+            server_state.workspace_action_secret.as_ref(),
+            save_capability,
+            worker_port,
+            "binagotchy/archive/20260925T000000000Z_deadbeef/save",
+        )
+        .expect("verify save action capability");
+
+        let partner_url = response_json
+            .pointer("/result/_meta/catdesk~1widgetPayload/binagotchyCards/0/setPartnerUrl")
+            .and_then(Value::as_str)
+            .expect("routed partner action URL");
+        let (partner_base, partner_capability) = partner_url
+            .split_once("?cap=")
+            .expect("partner action capability");
+        assert_eq!(partner_base, format!("{card_base}/partner"));
+        verify_workspace_action_capability(
+            server_state.workspace_action_secret.as_ref(),
+            partner_capability,
+            worker_port,
+            "binagotchy/partner",
+        )
+        .expect("verify partner action capability");
+
+        workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("unregister worker");
+        worker_task.abort();
+        let _ = worker_task.await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(config_root);
+        let _ = std::fs::remove_dir_all(router_workspace);
+        let _ = std::fs::remove_dir_all(worker_workspace);
+    }
+
+    #[tokio::test]
+    async fn workspace_router_rejects_tool_calls_without_openai_session() {
+        let config_root = unique_temp_path("catdesk-router-session-required");
+        std::fs::create_dir_all(&config_root).expect("create config root");
+        let mut app = AppState::new_for_test(
+            8787,
+            config_root.to_string_lossy().into_owned(),
+            config_root.join("config.toml"),
+        )
+        .expect("create router app state");
+        app.workspace_router = true;
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "session-required",
+            "method": "tools/call",
+            "params": {"name": "run_command", "arguments": {"command": "pwd"}}
+        });
+        let body = Bytes::from(request.to_string());
+        let response = route_workspace_tool_call(&server_state, &request, &body, &HeaderMap::new())
+            .await
+            .expect("router should reject sessionless call");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body)
+                .expect("parse error response")
+                .pointer("/error/message")
+                .and_then(Value::as_str),
+            Some("WorkspaceSessionRequired")
+        );
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sessionless_tools_list_uses_router_catalog_without_workers() {
+        let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
+        mcp::seed_router_devtools_tools_for_tests();
+        let workspace_a = unique_temp_path("catdesk-discovery-worker-a");
+        let workspace_b = unique_temp_path("catdesk-discovery-worker-b");
+        let workspace_c = unique_temp_path("catdesk-discovery-worker-unavailable");
+        let router_workspace = unique_temp_path("catdesk-discovery-router");
+        let config_root = unique_temp_path("catdesk-discovery-config");
+        for dir in [
+            &workspace_a,
+            &workspace_b,
+            &workspace_c,
+            &router_workspace,
+            &config_root,
+        ] {
+            std::fs::create_dir_all(dir).expect("create workspace");
+        }
+        let a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let c = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_a = a.local_addr().unwrap().port();
+        let port_b = b.local_addr().unwrap().port();
+        let port_c = c.local_addr().unwrap().port();
+        let app_a = mock_worker_health(&workspace_a);
+        let app_b = mock_worker_health(&workspace_b);
+        let app_c = mock_worker_health(&workspace_c);
+        let task_a = tokio::spawn(async move {
+            axum::serve(a, app_a.fallback(post(|| async {
+                Json(json!({"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"catdesk_instruction"},{"name":"run_command"}]}}))
+            }))).await.unwrap();
+        });
+        let task_b = tokio::spawn(async move {
+            axum::serve(b, app_b.fallback(post(|| async {
+                Json(json!({"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"catdesk_instruction"},{"name":"browser_navigate"}]}}))
+            }))).await.unwrap();
+        });
+        let task_c = tokio::spawn(async move {
+            axum::serve(
+                c,
+                app_c.fallback(post(|| async { StatusCode::SERVICE_UNAVAILABLE })),
+            )
+            .await
+            .unwrap();
+        });
+        tokio::task::yield_now().await;
+        workspace_router::register_workspace(&workspace_a.to_string_lossy(), port_a).unwrap();
+        workspace_router::register_workspace(&workspace_b.to_string_lossy(), port_b).unwrap();
+        workspace_router::register_workspace(&workspace_c.to_string_lossy(), port_c).unwrap();
+        let mut app = AppState::new_for_test(
+            8787,
+            router_workspace.to_string_lossy().into_owned(),
+            config_root.join("config.toml"),
+        )
+        .unwrap();
+        app.workspace_router = true;
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+        let body = json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{"_meta":{}}});
+        let bytes = Bytes::from(body.to_string());
+        let response = route_workspace_tool_call(&state, &body, &bytes, &HeaderMap::new())
+            .await
+            .expect("sessionless tools/list should be routed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let contents = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&contents).unwrap();
+        let names: Vec<_> = json
+            .pointer("/result/tools")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains(&"run_command"));
+        assert!(names.contains(&"navigate_page"));
+        assert!(names.contains(&"catdesk_instruction"));
+        assert!(!names.contains(&"browser_worker_tool"));
+
+        // tools/list with a session must return the same connector-wide tools
+        // without eagerly assigning the session to either workspace.
+        let with_session = json!({
+            "jsonrpc":"2.0", "id":5, "method":"tools/list",
+            "params":{"_meta":{"openai/session":"discovery-session"}}
+        });
+        let with_session_bytes = Bytes::from(with_session.to_string());
+        let response = route_workspace_tool_call(
+            &state,
+            &with_session,
+            &with_session_bytes,
+            &HeaderMap::new(),
+        )
+        .await
+        .expect("tools/list with session should use global catalog");
+        assert_eq!(response.status(), StatusCode::OK);
+        let contents = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&contents).unwrap();
+        assert_eq!(
+            json.pointer("/result/tools")
+                .and_then(Value::as_array)
+                .unwrap()
+                .len(),
+            names.len()
+        );
+        assert!(
+            workspace_router::bound_registration("discovery-session")
+                .unwrap()
+                .is_none()
+        );
+
+        workspace_router::unregister_workspace(&workspace_a.to_string_lossy(), port_a).unwrap();
+        workspace_router::unregister_workspace(&workspace_b.to_string_lossy(), port_b).unwrap();
+        workspace_router::unregister_workspace(&workspace_c.to_string_lossy(), port_c).unwrap();
+        task_a.abort();
+        task_b.abort();
+        task_c.abort();
+        let _ = task_a.await;
+        let _ = task_b.await;
+        for dir in [
+            &workspace_a,
+            &workspace_b,
+            &workspace_c,
+            &router_workspace,
+            &config_root,
+        ] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_router_lists_same_catalog_without_binding_session() {
+        let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
+        mcp::seed_router_devtools_tools_for_tests();
+        let worker_workspace = unique_temp_path("catdesk-tools-list-worker");
+        let router_workspace = unique_temp_path("catdesk-tools-list-router");
+        let config_root = unique_temp_path("catdesk-tools-list-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&worker_workspace).expect("create worker workspace");
+        std::fs::create_dir_all(&router_workspace).expect("create router workspace");
+        std::fs::create_dir_all(&config_root).expect("create config root");
+
+        let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind worker");
+        let worker_port = worker_listener.local_addr().expect("worker addr").port();
+        let worker_app = mock_worker_health(&worker_workspace).fallback(post(|| async {
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": "tools-list-test",
+                "result": {
+                    "tools": [{"name": "browser_worker_tool"}]
+                }
+            }))
+        }));
+        let worker_task = tokio::spawn(async move {
+            axum::serve(worker_listener, worker_app)
+                .await
+                .expect("serve worker");
+        });
+
+        // Allow the mock HTTP server to begin accepting requests before its
+        // synchronous registration health probe runs.
+        tokio::task::yield_now().await;
+        workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("register worker");
+
+        let mut app = AppState::new_for_test(
+            8787,
+            router_workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create router app state");
+        app.workspace_router = true;
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "tools-list-test",
+            "method": "tools/list",
+            "params": {
+                "_meta": {"openai/session": "session-tools-list-test"}
+            }
+        });
+        let body = Bytes::from(request.to_string());
+        let response = route_workspace_tool_call(&server_state, &request, &body, &HeaderMap::new())
+            .await
+            .expect("tools/list should be forwarded");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read tools/list response");
+        let response_json: Value =
+            serde_json::from_slice(&response_body).expect("parse tools/list response");
+        assert_eq!(
+            response_json
+                .pointer("/result/tools/0/name")
+                .and_then(Value::as_str),
+            Some("run_command")
+        );
+
+        workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("unregister worker");
+        worker_task.abort();
+        let _ = worker_task.await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(config_root);
+        let _ = std::fs::remove_dir_all(router_workspace);
+        let _ = std::fs::remove_dir_all(worker_workspace);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_widget_actions_proxy_to_registered_worker() {
+        let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
+        let worker_workspace = unique_temp_path("catdesk-workspace-action-worker");
+        let router_workspace = unique_temp_path("catdesk-workspace-action-router");
+        let config_root = unique_temp_path("catdesk-workspace-action-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&worker_workspace).expect("create worker workspace");
+        std::fs::create_dir_all(&router_workspace).expect("create router workspace");
+        std::fs::create_dir_all(&config_root).expect("create config root");
+
+        let worker_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind worker");
+        let worker_port = worker_listener.local_addr().expect("worker addr").port();
+        let worker_app = mock_worker_health(&worker_workspace).fallback(get(|| async {
+            Json(json!({"ok": true, "workspace": "worker"}))
+        }));
+        let worker_task = tokio::spawn(async move {
+            axum::serve(worker_listener, worker_app)
+                .await
+                .expect("serve worker");
+        });
+        // Allow the mock HTTP server to begin accepting requests before its
+        // synchronous registration health probe runs.
+        tokio::task::yield_now().await;
+        workspace_router::register_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("register worker");
+
+        let app = AppState::new_for_test(
+            8787,
+            router_workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create router app state");
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+
+        let bound =
+            workspace_router::resolve_session("session-action-test").expect("bind action session");
+        assert_eq!(bound.port, worker_port);
+        let capability = sign_workspace_action_capability(
+            server_state.workspace_action_secret.as_ref(),
+            "session-action-test",
+            worker_port,
+            "agents/path-state",
+        )
+        .expect("sign action capability");
+        let response = proxy_workspace_action(
+            State(server_state.clone()),
+            Path((worker_port, "agents/path-state".to_string())),
+            Query(HashMap::from([("cap".to_string(), capability.clone())])),
+            Method::GET,
+            HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read action response");
+        let payload: Value = serde_json::from_slice(&body).expect("parse action response");
+        assert_eq!(
+            payload.get("workspace").and_then(Value::as_str),
+            Some("worker")
+        );
+
+        let tampered = proxy_workspace_action(
+            State(server_state.clone()),
+            Path((
+                worker_port.saturating_add(1),
+                "agents/path-state".to_string(),
+            )),
+            Query(HashMap::from([("cap".to_string(), capability.clone())])),
+            Method::GET,
+            HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(tampered.status(), StatusCode::FORBIDDEN);
+
+        let missing = proxy_workspace_action(
+            State(server_state),
+            Path((worker_port, "agents/path-state".to_string())),
+            Query(HashMap::new()),
+            Method::GET,
+            HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+
+        workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
+            .expect("unregister worker");
+        worker_task.abort();
+        let _ = worker_task.await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(config_root);
+        let _ = std::fs::remove_dir_all(router_workspace);
+        let _ = std::fs::remove_dir_all(worker_workspace);
+    }
+}
+
+/// Legacy worker catalog discovery, to be removed in favor of the fixed catalog. The tool
+/// list itself must not bind a session: the first tools/call selects a worker.
+async fn route_workspace_tool_call(
+    s: &ServerState,
+    body: &Value,
+    body_bytes: &Bytes,
+    headers: &HeaderMap,
+) -> Option<Response<Body>> {
+    let method = body.get("method").and_then(Value::as_str)?;
+    if method != "tools/call" && method != "tools/list" {
+        return None;
+    }
+
+    let (workspace_worker, workspace_router, local_port, mcp_path, router_public_url) = {
+        let app = s.app.lock().await;
+        (
+            app.workspace_worker,
+            app.workspace_router,
+            app.port,
+            app.mcp_path(),
+            app.ngrok_url.clone(),
+        )
+    };
+    if workspace_worker {
+        return None;
+    }
+    if !workspace_router {
+        return None;
+    }
+    if method == "tools/list" {
+        let response = match mcp::router_tool_catalog(body.get("id").cloned()).await {
+            Ok(response) => response,
+            Err(message) => {
+                return Some(modern_jsonrpc_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    body.get("id"),
+                    -32040,
+                    "DevToolsDiscoveryUnavailable",
+                    Some(json!({"message":message})),
+                ));
+            }
+        };
+        return Some(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&response).expect("catalog JSON"),
+                ))
+                .unwrap(),
+        );
+    }
+    let Some(session_id) = workspace_router::session_id_from_request(body) else {
+        return Some(modern_jsonrpc_error_response(
+            StatusCode::BAD_REQUEST,
+            body.get("id"),
+            -32042,
+            "WorkspaceSessionRequired",
+            Some(json!({
+                "message": "The shared CatDesk router requires params._meta.openai/session to route tools/call requests to a workspace worker."
+            })),
+        ));
+    };
+
+    let session_owned = session_id.to_string();
+    let resolved = match tokio::task::spawn_blocking(move || {
+        workspace_router::resolve_session(&session_owned)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("workspace routing task failed: {error}")),
+    };
+    let target = match resolved {
+        Ok(target) => target,
+        Err(message) => {
+            return Some(modern_jsonrpc_error_response(
+                StatusCode::CONFLICT,
+                body.get("id"),
+                -32040,
+                "WorkspaceRoutingError",
+                Some(json!({ "message": message })),
+            ));
+        }
+    };
+    if target.port == local_port {
+        return None;
+    }
+
+    let url = format!("http://127.0.0.1:{}{}", target.port, mcp_path);
+    let client = reqwest::Client::new();
+    let mut request = client
+        .post(url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body_bytes.to_vec());
+
+    for name in ["mcp-protocol-version", "mcp-method", "mcp-name"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            request = request.header(name, value);
+        }
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return Some(modern_jsonrpc_error_response(
+                StatusCode::BAD_GATEWAY,
+                body.get("id"),
+                -32041,
+                "WorkspaceWorkerUnavailable",
+                Some(json!({
+                    "workspace": target.workspace,
+                    "port": target.port,
+                    "message": error.to_string(),
+                })),
+            ));
+        }
+    };
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let mut bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Some(modern_jsonrpc_error_response(
+                StatusCode::BAD_GATEWAY,
+                body.get("id"),
+                -32042,
+                "WorkspaceWorkerResponseError",
+                Some(json!({ "message": error.to_string() })),
+            ));
+        }
+    };
+
+    if let Ok(mut forwarded_json) = serde_json::from_slice::<Value>(&bytes) {
+        let secret_prefix = mcp_path.strip_suffix("/mcp").unwrap_or_default();
+        let routed_mcp_path = format!("{secret_prefix}/workspace/{}/mcp", target.port);
+        let mut result = forwarded_json.get("result").cloned();
+        rewrite_catdesk_instruction_action_urls(
+            &mut result,
+            router_public_url.as_deref(),
+            &routed_mcp_path,
+            Some((s.workspace_action_secret.as_ref(), session_id, target.port)),
+        );
+        if let Some(result) = result
+            && let Some(object) = forwarded_json.as_object_mut()
+        {
+            object.insert("result".to_string(), result);
+            if let Ok(serialized) = serde_json::to_vec(&forwarded_json) {
+                bytes = Bytes::from(serialized);
+            }
+        }
+    }
+
+    {
+        let mut app = s.app.lock().await;
+        app.log(
+            "INFO",
+            format!(
+                "Routed ChatGPT session {} to workspace {} on local port {}",
+                session_id, target.workspace, target.port
+            ),
+        );
+    }
+
+    Some(
+        Response::builder()
+            .status(status.as_u16())
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(bytes))
+            .unwrap(),
+    )
 }
 
 // ── POST /<slug>/mcp ────────────────────────────────────────
@@ -2927,6 +4038,16 @@ async fn post_mcp_inner(
             .unwrap();
     }
 
+    // Record only whether a session is present. Never persist session IDs or bodies.
+    if body.get("method").and_then(Value::as_str) == Some("tools/list") {
+        let has_session = workspace_router::session_id_from_request(&body).is_some();
+        let is_router = s.app.lock().await.workspace_router;
+        if is_router {
+            let _ =
+                tokio::task::spawn_blocking(move || write_tools_list_diagnostic(has_session)).await;
+        }
+    }
+
     let request_summary = summarize_request(&body);
     let request_flow_event = request_flow_label(&body);
 
@@ -2992,6 +4113,15 @@ async fn post_mcp_inner(
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "ERROR",
             message: format!("← POST {mcp_path} {request_summary} validation-error"),
+        });
+        return response;
+    }
+
+    if let Some(response) = route_workspace_tool_call(&s, &body, &body_bytes, headers).await {
+        let _ = s.ui_events.send(ServerUiEvent::RecordFlow {
+            flow_id: STATELESS_FLOW_ID.to_string(),
+            events: vec![request_flow_event],
+            direction: FlowDirection::Backward,
         });
         return response;
     }
