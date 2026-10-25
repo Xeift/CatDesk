@@ -3451,8 +3451,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sessionless_tools_list_merges_browser_tools_from_workers() {
+    async fn sessionless_tools_list_uses_router_catalog_without_workers() {
         let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
+        mcp::seed_router_devtools_tools_for_tests();
         let workspace_a = unique_temp_path("catdesk-discovery-worker-a");
         let workspace_b = unique_temp_path("catdesk-discovery-worker-b");
         let workspace_c = unique_temp_path("catdesk-discovery-worker-unavailable");
@@ -3586,8 +3587,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn workspace_router_routes_tools_list_with_session_to_bound_worker() {
+    async fn workspace_router_lists_same_catalog_without_binding_session() {
         let _routing_guard = WORKSPACE_ROUTING_TEST_MUTEX.lock().await;
+        mcp::seed_router_devtools_tools_for_tests();
         let worker_workspace = unique_temp_path("catdesk-tools-list-worker");
         let router_workspace = unique_temp_path("catdesk-tools-list-router");
         let config_root = unique_temp_path("catdesk-tools-list-config");

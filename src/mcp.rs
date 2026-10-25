@@ -831,6 +831,15 @@ async fn handle_tools_list(
 static ROUTER_DEVTOOLS_TOOLS: tokio::sync::OnceCell<Vec<Value>> =
     tokio::sync::OnceCell::const_new();
 
+/// Seed a deterministic DevTools catalog in HTTP router tests without spawning Chrome.
+#[cfg(test)]
+pub(crate) fn seed_router_devtools_tools_for_tests() {
+    let _ = ROUTER_DEVTOOLS_TOOLS.set(vec![
+        json!({"name":"navigate_page","inputSchema":{"type":"object"}}),
+        json!({"name":"take_screenshot","inputSchema":{"type":"object"}}),
+    ]);
+}
+
 /// Query chrome-devtools-mcp directly and cache successful discovery only.
 async fn router_devtools_tools() -> Result<Vec<Value>, String> {
     ROUTER_DEVTOOLS_TOOLS
