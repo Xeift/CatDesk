@@ -3843,9 +3843,12 @@ async fn run_settings(
                         let connector_change_blocked = if selected_row == config_identity_row
                             || selected_row == config_identity_row + 1
                         {
-                            tokio::task::spawn_blocking(workspace_router::has_live_router_clients)
-                                .await
-                                .map_err(std::io::Error::other)??
+                            let current_workspace = state.lock().await.workspace_root.clone();
+                            tokio::task::spawn_blocking(move || {
+                                workspace_router::has_other_live_router_clients(&current_workspace)
+                            })
+                            .await
+                            .map_err(std::io::Error::other)??
                         } else {
                             false
                         };

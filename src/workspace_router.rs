@@ -473,6 +473,20 @@ pub fn has_live_router_clients() -> io::Result<bool> {
     has_live_router_clients_at(&path)
 }
 
+/// Connector identity changes must ignore this worker's own keepalive.
+pub fn has_other_live_router_clients(workspace: &str) -> io::Result<bool> {
+    let path = registry_path()?;
+    let _lock = acquire_registry_lock(&path)?;
+    let mut registry = load_registry(&path)?;
+    prune_stale_router_clients(&mut registry);
+    let has_others = registry
+        .router_clients
+        .iter()
+        .any(|client| client.pid != std::process::id() || client.workspace != workspace);
+    save_registry(&path, &registry)?;
+    Ok(has_others)
+}
+
 fn has_live_router_clients_at(path: &Path) -> io::Result<bool> {
     let _lock = acquire_registry_lock(path)?;
     let mut registry = load_registry(path)?;
