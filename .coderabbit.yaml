@@ -1,0 +1,12 @@
+language: "zh-TW"
+
+reviews:
+  profile: "chill"
+  poem: false
+
+path_filters:
+  - "**/*" 
+  - "!npm/**"
+  - "!**/.github/**"
+  - "!**/.vscode/**"
+  - "!**/.DS_Store"
