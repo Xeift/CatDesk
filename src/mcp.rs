@@ -860,14 +860,18 @@ async fn router_devtools_tools() -> Result<Vec<Value>, String> {
 }
 
 /// Connector catalog independent of live Workers and session binding.
-pub async fn router_tool_catalog(id: Option<Value>) -> Result<JsonRpcResponse, String> {
+pub async fn router_tool_catalog(
+    id: Option<Value>,
+    show_detail_mode: ShowDetailMode,
+) -> Result<JsonRpcResponse, String> {
     let browser_tools = router_devtools_tools().await?;
-    Ok(router_tool_catalog_with_browser_tools(id, browser_tools).await)
+    Ok(router_tool_catalog_with_browser_tools(id, browser_tools, show_detail_mode).await)
 }
 
 async fn router_tool_catalog_with_browser_tools(
     id: Option<Value>,
     browser_tools: Vec<Value>,
+    show_detail_mode: ShowDetailMode,
 ) -> JsonRpcResponse {
     let req = JsonRpcRequest {
         jsonrpc: "2.0".into(),
@@ -881,7 +885,7 @@ async fn router_tool_catalog_with_browser_tools(
         ToolMode::MultiTools,
         true,
         &None,
-        ShowDetailMode::Expanded,
+        show_detail_mode,
     )
     .await;
     if let Some(tools) = response
@@ -893,7 +897,7 @@ async fn router_tool_catalog_with_browser_tools(
         for mut tool in browser_tools {
             ensure_tool_descriptor_widget_template_with_show_detail_mode(
                 &mut tool,
-                ShowDetailMode::Expanded,
+                show_detail_mode,
             );
             tools.push(tool);
         }
@@ -4040,9 +4044,12 @@ mod tests {
             json!({"name":"navigate_page","inputSchema":{"type":"object"}}),
             json!({"name":"take_screenshot","inputSchema":{"type":"object"}}),
         ];
-        let response =
-            router_tool_catalog_with_browser_tools(Some(json!("catalog-test")), browser_tools)
-                .await;
+        let response = router_tool_catalog_with_browser_tools(
+            Some(json!("catalog-test")),
+            browser_tools,
+            ShowDetailMode::Expanded,
+        )
+        .await;
         let tools = response
             .result
             .as_ref()

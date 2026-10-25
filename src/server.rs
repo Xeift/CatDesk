@@ -2341,6 +2341,38 @@ mod tests {
             Some("private")
         );
 
+        mcp::seed_router_devtools_tools_for_tests();
+        server_state.app.lock().await.workspace_router = true;
+        let router_tools = post_mcp_http(
+            State(server_state.clone()),
+            modern_mcp_headers("tools/list", None),
+            mcp_request_body("tools/list", json!({})),
+        )
+        .await;
+        assert_eq!(router_tools.status(), StatusCode::OK);
+        let router_body = to_bytes(router_tools.into_body(), usize::MAX)
+            .await
+            .expect("read router tools response");
+        let router_json: Value =
+            serde_json::from_slice(&router_body).expect("parse router tools response");
+        assert_eq!(router_json.get("id"), tools_json.get("id"));
+        let router_result = router_json.get("result").expect("router tools result");
+        for key in ["resultType", "ttlMs", "cacheScope", "_meta"] {
+            assert_eq!(
+                router_result.get(key),
+                tools_result.get(key),
+                "router tools/list must preserve the modern response field {key}"
+            );
+        }
+        assert!(
+            router_result["tools"]
+                .as_array()
+                .expect("router tools array")
+                .iter()
+                .any(|tool| tool["name"] == "navigate_page"),
+            "router tools/list must include the connector-wide browser tools"
+        );
+
         let mut read_result = json!({ "contents": [] });
         mcp::decorate_modern_result("resources/read", &mut read_result);
         assert_eq!(read_result.get("ttlMs").and_then(Value::as_u64), Some(0));
@@ -2398,6 +2430,104 @@ mod tests {
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace_root);
         let _ = std::fs::remove_dir_all(config_root);
+    }
+
+    #[tokio::test]
+    async fn workspace_router_discovery_keeps_widget_resources_consistent() {
+        mcp::seed_router_devtools_tools_for_tests();
+        let root = unique_temp_path("catdesk-router-widget-discovery");
+        std::fs::create_dir_all(&root).expect("create test workspace");
+        let mut app = AppState::new_for_test(
+            8787,
+            root.to_string_lossy().into_owned(),
+            root.join("config.toml"),
+        )
+        .expect("create router app state");
+        app.workspace_router = true;
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let server_state = ServerState {
+            app: Arc::new(Mutex::new(app)),
+            devtools: None,
+            command_jobs: CommandJobManager::new(),
+            ui_events: ui_tx,
+            catdesk_instruction_called: Arc::new(AtomicBool::new(false)),
+            workspace_action_secret: new_workspace_action_secret(),
+        };
+
+        for &mode in ShowDetailMode::all() {
+            server_state.app.lock().await.show_detail_mode = mode;
+            let widgets_enabled = mode != ShowDetailMode::Disable;
+            let discover = post_mcp_json_with_show_detail_mode(
+                &server_state,
+                mcp_request_body("server/discover", json!({})),
+                mode,
+            )
+            .await;
+            assert_eq!(
+                discover.pointer("/result/capabilities/resources").is_some(),
+                widgets_enabled
+            );
+
+            let response = post_mcp_json_with_show_detail_mode(
+                &server_state,
+                mcp_request_body("tools/list", json!({})),
+                mode,
+            )
+            .await;
+            let tools = response["result"]["tools"]
+                .as_array()
+                .expect("router tools array");
+            assert!(tools.iter().any(|tool| tool["name"] == "navigate_page"));
+            let widget_uris: Vec<&str> = tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.pointer("/_meta/ui/resourceUri")
+                        .and_then(Value::as_str)
+                })
+                .collect();
+            assert_eq!(
+                !widget_uris.is_empty(),
+                widgets_enabled,
+                "router tool widgets must match discovery capabilities for {mode:?}"
+            );
+            if !widgets_enabled {
+                assert!(
+                    tools
+                        .iter()
+                        .all(|tool| tool.pointer("/_meta/openai~1outputTemplate").is_none())
+                );
+            }
+
+            let resources = post_mcp_json_with_show_detail_mode(
+                &server_state,
+                mcp_request_body("resources/list", json!({})),
+                mode,
+            )
+            .await;
+            assert_eq!(
+                !resources["result"]["resources"]
+                    .as_array()
+                    .expect("router resources array")
+                    .is_empty(),
+                widgets_enabled
+            );
+            for uri in widget_uris {
+                let resource = post_mcp_json_with_show_detail_mode(
+                    &server_state,
+                    mcp_request_body("resources/read", json!({"uri": uri})),
+                    mode,
+                )
+                .await;
+                assert!(resource.get("error").is_none(), "{resource}");
+                assert_eq!(resource["result"]["contents"][0]["uri"], uri);
+                assert_eq!(
+                    resource["result"]["contents"][0]["mimeType"],
+                    "text/html;profile=mcp-app"
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(root).expect("remove test workspace");
     }
 
     #[tokio::test]
@@ -3797,7 +3927,14 @@ async fn route_workspace_tool_call(
         return None;
     }
 
-    let (workspace_worker, workspace_router, local_port, mcp_path, router_public_url) = {
+    let (
+        workspace_worker,
+        workspace_router,
+        local_port,
+        mcp_path,
+        router_public_url,
+        show_detail_mode,
+    ) = {
         let app = s.app.lock().await;
         (
             app.workspace_worker,
@@ -3805,6 +3942,7 @@ async fn route_workspace_tool_call(
             app.port,
             app.mcp_path(),
             app.ngrok_url.clone(),
+            app.show_detail_mode,
         )
     };
     if workspace_worker {
@@ -3814,18 +3952,22 @@ async fn route_workspace_tool_call(
         return None;
     }
     if method == "tools/list" {
-        let response = match mcp::router_tool_catalog(body.get("id").cloned()).await {
-            Ok(response) => response,
-            Err(message) => {
-                return Some(modern_jsonrpc_error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    body.get("id"),
-                    -32040,
-                    "DevToolsDiscoveryUnavailable",
-                    Some(json!({"message":message})),
-                ));
-            }
-        };
+        let mut response =
+            match mcp::router_tool_catalog(body.get("id").cloned(), show_detail_mode).await {
+                Ok(response) => response,
+                Err(message) => {
+                    return Some(modern_jsonrpc_error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        body.get("id"),
+                        -32040,
+                        "DevToolsDiscoveryUnavailable",
+                        Some(json!({"message":message})),
+                    ));
+                }
+            };
+        if let Some(result) = response.result.as_mut() {
+            mcp::decorate_modern_result(method, result);
+        }
         return Some(
             Response::builder()
                 .status(StatusCode::OK)
