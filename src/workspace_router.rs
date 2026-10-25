@@ -148,11 +148,19 @@ fn canonical_workspace(workspace_root: &str) -> io::Result<String> {
         .into_owned())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegistrationStatus {
+    Live,
+    Uncertain,
+    Stale,
+}
+
 /// Do not trust an open port on its own: it may belong to another process.
-/// Check the worker's authenticated local health identity against the registry.
-fn registration_is_live(registration: &WorkspaceRegistration) -> bool {
+/// A dead PID or a positive identity mismatch is stale. Transport failures are
+/// inconclusive while the PID is still alive, so keep the registration/session.
+fn registration_status(registration: &WorkspaceRegistration) -> RegistrationStatus {
     if !process_is_alive(registration.pid) {
-        return false;
+        return RegistrationStatus::Stale;
     }
     #[cfg(test)]
     let slug = "test".to_string();
@@ -161,11 +169,11 @@ fn registration_is_live(registration: &WorkspaceRegistration) -> bool {
         .ok()
         .and_then(|config| config.mcp_slug)
     else {
-        return false;
+        return RegistrationStatus::Uncertain;
     };
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), registration.port);
     let Ok(mut stream) = TcpStream::connect_timeout(&address, PORT_PROBE_TIMEOUT) else {
-        return false;
+        return RegistrationStatus::Uncertain;
     };
     let _ = stream.set_read_timeout(Some(PORT_PROBE_TIMEOUT));
     let _ = stream.set_write_timeout(Some(PORT_PROBE_TIMEOUT));
@@ -175,23 +183,28 @@ fn registration_is_live(registration: &WorkspaceRegistration) -> bool {
     )
     .is_err()
     {
-        return false;
+        return RegistrationStatus::Uncertain;
     }
     let mut response = Vec::new();
     if stream.take(64 * 1024).read_to_end(&mut response).is_err() {
-        return false;
+        return RegistrationStatus::Uncertain;
     }
     let Some(body_offset) = response.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
-        return false;
+        return RegistrationStatus::Stale;
     };
     let Ok(body) = serde_json::from_slice::<Value>(&response[body_offset + 4..]) else {
-        return false;
+        return RegistrationStatus::Stale;
     };
-    body.get("name").and_then(Value::as_str) == Some("CatDesk")
+    if body.get("name").and_then(Value::as_str) == Some("CatDesk")
         && body.get("pid").and_then(Value::as_u64) == Some(registration.pid as u64)
         && body.get("workspaceCanonical").and_then(Value::as_str)
             == Some(registration.workspace.as_str())
         && body.get("router").and_then(Value::as_bool) == Some(false)
+    {
+        RegistrationStatus::Live
+    } else {
+        RegistrationStatus::Stale
+    }
 }
 
 fn now_millis() -> u64 {
@@ -216,14 +229,27 @@ fn prune_stale_router_clients(registry: &mut WorkspaceRegistry) {
     });
 }
 
-fn prune_stale(registry: &mut WorkspaceRegistry) {
-    registry.workspaces.retain(registration_is_live);
+fn prune_stale(registry: &mut WorkspaceRegistry) -> BTreeMap<String, RegistrationStatus> {
+    let statuses = registry
+        .workspaces
+        .iter()
+        .map(|registration| {
+            (
+                registration.workspace.clone(),
+                registration_status(registration),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    registry.workspaces.retain(|registration| {
+        statuses.get(&registration.workspace) != Some(&RegistrationStatus::Stale)
+    });
     registry.sessions.retain(|_, workspace| {
         registry
             .workspaces
             .iter()
             .any(|registration| &registration.workspace == workspace)
     });
+    statuses
 }
 
 pub fn register_workspace(workspace_root: &str, port: u16) -> io::Result<WorkspaceRegistration> {
@@ -434,7 +460,7 @@ pub fn resolve_session(session_id: &str) -> Result<WorkspaceRegistration, String
 fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistration, String> {
     let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
     let mut registry = load_registry(path).map_err(|error| error.to_string())?;
-    prune_stale(&mut registry);
+    let statuses = prune_stale(&mut registry);
 
     if let Some(workspace) = registry.sessions.get(session_id).cloned() {
         if let Some(registration) = registry
@@ -453,10 +479,11 @@ fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistra
         .workspaces
         .iter()
         .find(|entry| {
-            !registry
-                .sessions
-                .values()
-                .any(|workspace| workspace == &entry.workspace)
+            statuses.get(&entry.workspace) == Some(&RegistrationStatus::Live)
+                && !registry
+                    .sessions
+                    .values()
+                    .any(|workspace| workspace == &entry.workspace)
         })
         .cloned();
     let Some(next) = next else {
@@ -654,6 +681,90 @@ mod tests {
         assert_eq!(first.workspace, "/tmp/project-a");
         assert_eq!(second.workspace, "/tmp/project-b");
         assert_eq!(first_again, first);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn live_pid_with_unreachable_worker_keeps_existing_session_binding() {
+        let path = test_registry_path("unreachable-live-worker");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let mut sessions = BTreeMap::new();
+        sessions.insert("existing-session".into(), "/tmp/project-a".into());
+        save_test_registry(
+            &path,
+            &WorkspaceRegistry {
+                workspaces: vec![WorkspaceRegistration {
+                    workspace: "/tmp/project-a".into(),
+                    port,
+                    pid: std::process::id(),
+                }],
+                sessions,
+                ..WorkspaceRegistry::default()
+            },
+        );
+
+        let existing = resolve_session_at(&path, "existing-session")
+            .expect("existing binding survives inconclusive health probe");
+        assert_eq!(existing.workspace, "/tmp/project-a");
+        assert!(resolve_session_at(&path, "new-session").is_err());
+
+        let remaining = load_registry(&path).unwrap();
+        assert_eq!(remaining.workspaces.len(), 1);
+        assert_eq!(
+            remaining
+                .sessions
+                .get("existing-session")
+                .map(String::as_str),
+            Some("/tmp/project-a")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn foreign_service_with_non_catdesk_response_is_stale() {
+        let path = test_registry_path("foreign-non-catdesk");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let body = "<html>not CatDesk</html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+        });
+
+        let mut sessions = BTreeMap::new();
+        sessions.insert("existing-session".into(), "/tmp/project-a".into());
+        save_test_registry(
+            &path,
+            &WorkspaceRegistry {
+                workspaces: vec![WorkspaceRegistration {
+                    workspace: "/tmp/project-a".into(),
+                    port,
+                    pid: std::process::id(),
+                }],
+                sessions,
+                ..WorkspaceRegistry::default()
+            },
+        );
+
+        assert!(resolve_session_at(&path, "existing-session").is_err());
+        thread.join().unwrap();
+        let remaining = load_registry(&path).unwrap();
+        assert!(remaining.workspaces.is_empty());
+        assert!(remaining.sessions.is_empty());
 
         let _ = fs::remove_file(path);
     }
