@@ -1,11 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -16,7 +15,6 @@ pub const WORKER_PORT_START: u16 = 3201;
 pub const WORKER_PORT_END: u16 = 3299;
 const REGISTRY_FILE_NAME: &str = "workspace_id.toml";
 const LOCK_RETRY_COUNT: usize = 100;
-const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 const ROUTER_START_LOCK_RETRY_COUNT: usize = 3_000;
 const PORT_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const ROUTER_CLIENT_TTL: Duration = Duration::from_secs(30);
@@ -73,31 +71,7 @@ impl Drop for RouterClientGuard {
 /// Serializes first-router startup so simultaneously launched workspaces agree
 /// on the persisted connector slug and only one of them spawns the router.
 pub struct RouterStartupLock {
-    path: PathBuf,
-    token: String,
-}
-
-impl RouterStartupLock {
-    fn owns_lock(&self) -> bool {
-        fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|text| toml::from_str::<RouterStartLockOwner>(&text).ok())
-            .is_some_and(|owner| owner.token == self.token)
-    }
-}
-
-impl Drop for RouterStartupLock {
-    fn drop(&mut self) {
-        if self.owns_lock() {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct RouterStartLockOwner {
-    pid: u32,
-    token: String,
+    _guard: crate::file_lock::OwnedFileLock,
 }
 
 fn registry_path() -> io::Result<PathBuf> {
@@ -110,61 +84,8 @@ fn registry_lock_path(path: &Path) -> PathBuf {
 
 pub fn acquire_router_start_lock() -> io::Result<RouterStartupLock> {
     let path = registry_path()?.with_file_name("router_start.toml");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    for _ in 0..ROUTER_START_LOCK_RETRY_COUNT {
-        let token = Uuid::new_v4().to_string();
-        let owner = RouterStartLockOwner {
-            pid: std::process::id(),
-            token: token.clone(),
-        };
-        let temporary_path = path.with_extension(format!("{}.tmp", token));
-        let write_owner = (|| -> io::Result<()> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary_path)?;
-            use std::io::Write as _;
-            file.write_all(
-                toml::to_string(&owner)
-                    .map_err(io::Error::other)?
-                    .as_bytes(),
-            )?;
-            file.flush()
-        })();
-        if let Err(error) = write_owner {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(error);
-        }
-        match fs::hard_link(&temporary_path, &path) {
-            Ok(()) => {
-                let _ = fs::remove_file(&temporary_path);
-                return Ok(RouterStartupLock { path, token });
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(&temporary_path);
-                let owner = fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|text| toml::from_str::<RouterStartLockOwner>(&text).ok());
-                // A partially written or legacy lock has no verifiable owner.
-                // Never steal it based on age alone; require a known dead PID.
-                if owner.is_some_and(|owner| !process_is_alive(owner.pid)) {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                thread::sleep(LOCK_RETRY_DELAY);
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&temporary_path);
-                return Err(error);
-            }
-        }
-    }
-    Err(io::Error::other(format!(
-        "timed out waiting for CatDesk router startup lock: {}",
-        path.display()
-    )))
+    let guard = crate::file_lock::acquire(&path, ROUTER_START_LOCK_RETRY_COUNT)?;
+    Ok(RouterStartupLock { _guard: guard })
 }
 
 #[cfg(unix)]

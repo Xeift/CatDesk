@@ -1,85 +1,37 @@
-use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use fs4::fs_std::FileExt;
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
-use uuid::Uuid;
 
-#[derive(Serialize, Deserialize)]
-struct Owner {
-    pid: u32,
-    token: String,
-}
-
+/// OS-backed advisory lock on a persistent inode. Never unlink a lock file:
+/// removing it permits another process to lock a different inode at the same path.
 pub struct OwnedFileLock {
-    path: PathBuf,
-    token: String,
-}
-
-impl Drop for OwnedFileLock {
-    fn drop(&mut self) {
-        if let Ok(text) = fs::read_to_string(&self.path) {
-            if toml::from_str::<Owner>(&text).is_ok_and(|owner| owner.token == self.token) {
-                let _ = fs::remove_file(&self.path);
-            }
-        }
-    }
+    _file: File,
 }
 
 pub fn acquire(path: &Path, retries: usize) -> io::Result<OwnedFileLock> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
     for _ in 0..retries {
-        let token = Uuid::new_v4().to_string();
-        let owner = Owner {
-            pid: std::process::id(),
-            token: token.clone(),
-        };
-        let temporary = path.with_extension(format!("{token}.tmp"));
-        let write_result = (|| {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            file.write_all(
-                toml::to_string(&owner)
-                    .map_err(io::Error::other)?
-                    .as_bytes(),
-            )?;
-            file.sync_all()
-        })();
-        if let Err(error) = write_result {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
-        }
-        let link_result = fs::hard_link(&temporary, path);
-        let _ = fs::remove_file(&temporary);
-        match link_result {
-            Ok(()) => {
-                return Ok(OwnedFileLock {
-                    path: path.to_path_buf(),
-                    token,
-                });
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let owner = fs::read_to_string(path)
-                    .ok()
-                    .and_then(|text| toml::from_str::<Owner>(&text).ok());
-                // Never evict a live owner based solely on an elapsed timestamp.
-                if owner.is_some_and(|owner| !crate::workspace_router::process_is_alive(owner.pid))
-                {
-                    let _ = fs::remove_file(path);
-                    continue;
-                }
+        match file.try_lock_exclusive() {
+            Ok(true) => return Ok(OwnedFileLock { _file: file }),
+            Ok(false) => {
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => return Err(error),
         }
     }
     Err(io::Error::other(format!(
-        "timed out waiting for owned file lock: {}",
+        "timed out waiting for file lock: {}",
         path.display()
     )))
 }
@@ -87,14 +39,18 @@ pub fn acquire(path: &Path, retries: usize) -> io::Result<OwnedFileLock> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
     #[test]
-    fn live_owner_is_not_stolen_and_drop_removes_only_own_lock() {
+    fn live_owner_is_not_stolen_and_file_remains_after_unlock() {
         let path = std::env::temp_dir().join(format!("catdesk-lock-{}.toml", Uuid::new_v4()));
         let guard = acquire(&path, 1).unwrap();
         assert!(acquire(&path, 2).is_err());
         assert!(path.exists());
         drop(guard);
-        assert!(!path.exists());
-        let _second = acquire(&path, 1).unwrap();
+        assert!(path.exists());
+        let second = acquire(&path, 1).unwrap();
+        drop(second);
+        fs::remove_file(path).unwrap();
     }
 }

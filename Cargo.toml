@@ -23,6 +23,7 @@ rand = "0.8"
 rand_mt = "4"
 ngrok = "0.18.0"
 toml = "0.8"
+fs4 = "0.13"
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 tree-sitter = "0.25"
