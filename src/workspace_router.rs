@@ -18,6 +18,8 @@ const LOCK_RETRY_COUNT: usize = 100;
 const ROUTER_START_LOCK_RETRY_COUNT: usize = 3_000;
 const PORT_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const ROUTER_CLIENT_TTL: Duration = Duration::from_secs(30);
+const SESSION_SELECTION_TIMEOUT: Duration = Duration::from_secs(60);
+const SESSION_SELECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +29,22 @@ pub struct WorkspaceRegistration {
     pub pid: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingSessionSelection {
+    pub session_id: String,
+    pub generation: u64,
+    pub workspaces: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PendingSession {
+    session_id: String,
+    generation: u64,
+    workspaces: Vec<String>,
+    active_since_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceRegistry {
@@ -34,6 +52,10 @@ struct WorkspaceRegistry {
     workspaces: Vec<WorkspaceRegistration>,
     #[serde(default)]
     sessions: BTreeMap<String, String>,
+    #[serde(default)]
+    pending_sessions: Vec<PendingSession>,
+    #[serde(default)]
+    next_pending_generation: u64,
     #[serde(default)]
     router_clients: Vec<RouterClient>,
     #[serde(default)]
@@ -216,6 +238,28 @@ fn now_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn activate_front_pending(registry: &mut WorkspaceRegistry) {
+    if let Some(front) = registry.pending_sessions.first_mut()
+        && front.active_since_ms.is_none()
+    {
+        front.active_since_ms = Some(now_millis());
+    }
+}
+
+fn remove_pending_session(registry: &mut WorkspaceRegistry, session_id: &str) {
+    registry
+        .pending_sessions
+        .retain(|pending| pending.session_id != session_id);
+    activate_front_pending(registry);
+}
+
+fn remove_pending_generation(registry: &mut WorkspaceRegistry, session_id: &str, generation: u64) {
+    registry
+        .pending_sessions
+        .retain(|pending| pending.session_id != session_id || pending.generation != generation);
+    activate_front_pending(registry);
+}
+
 fn prune_stale_router_clients(registry: &mut WorkspaceRegistry) {
     let ttl_ms: u64 = ROUTER_CLIENT_TTL.as_millis().try_into().unwrap_or(u64::MAX);
     let oldest_live = now_millis().saturating_sub(ttl_ms);
@@ -249,6 +293,18 @@ fn prune_stale(registry: &mut WorkspaceRegistry) -> BTreeMap<String, Registratio
             .iter()
             .any(|registration| &registration.workspace == workspace)
     });
+    for pending in &mut registry.pending_sessions {
+        pending.workspaces.retain(|workspace| {
+            registry
+                .workspaces
+                .iter()
+                .any(|registration| &registration.workspace == workspace)
+        });
+    }
+    registry
+        .pending_sessions
+        .retain(|pending| !pending.workspaces.is_empty());
+    activate_front_pending(registry);
     statuses
 }
 
@@ -276,8 +332,8 @@ pub fn register_workspace(workspace_root: &str, port: u16) -> io::Result<Workspa
         registry.workspaces.push(registration.clone());
     }
 
-    // Restarting CatDesk in a workspace explicitly makes that workspace available
-    // for the next unbound ChatGPT conversation.
+    // Restarting CatDesk in a workspace releases its existing session bindings so
+    // those conversations resolve the workspace again on their next tool call.
     registry.sessions.retain(|_, bound| bound != &workspace);
     registry.worker_port_reservations.retain(|reservation| {
         !(reservation.workspace == workspace
@@ -347,9 +403,19 @@ pub fn unregister_workspace(workspace_root: &str, port: u16) -> io::Result<()> {
         .workspaces
         .retain(|entry| !(entry.workspace == workspace && entry.port == port));
     registry.sessions.retain(|_, bound| bound != &workspace);
+    for pending in &mut registry.pending_sessions {
+        pending
+            .workspaces
+            .retain(|candidate| candidate != &workspace);
+    }
+    registry
+        .pending_sessions
+        .retain(|pending| !pending.workspaces.is_empty());
+    activate_front_pending(&mut registry);
 
     if registry.workspaces.is_empty()
         && registry.sessions.is_empty()
+        && registry.pending_sessions.is_empty()
         && registry.router_clients.is_empty()
         && registry.worker_port_reservations.is_empty()
     {
@@ -406,6 +472,7 @@ pub fn unregister_router_client(workspace_root: &str) -> io::Result<()> {
         .retain(|reservation| !(reservation.workspace == workspace && reservation.pid == pid));
     if registry.workspaces.is_empty()
         && registry.sessions.is_empty()
+        && registry.pending_sessions.is_empty()
         && registry.router_clients.is_empty()
         && registry.worker_port_reservations.is_empty()
     {
@@ -441,6 +508,7 @@ fn has_live_router_clients_at(path: &Path) -> io::Result<bool> {
     let has_clients = !registry.router_clients.is_empty();
     if registry.workspaces.is_empty()
         && registry.sessions.is_empty()
+        && registry.pending_sessions.is_empty()
         && registry.worker_port_reservations.is_empty()
         && !has_clients
     {
@@ -451,13 +519,28 @@ fn has_live_router_clients_at(path: &Path) -> io::Result<bool> {
     Ok(has_clients)
 }
 
-/// Return live workspace endpoints for session-independent tool discovery.
+enum SessionResolution {
+    Resolved(WorkspaceRegistration),
+    AwaitSelection { generation: u64 },
+}
+
+/// Resolve a ChatGPT session to a workspace. A single live workspace binds
+/// immediately; multiple live workspaces wait for the user to choose in TUI.
 pub fn resolve_session(session_id: &str) -> Result<WorkspaceRegistration, String> {
     let path = registry_path().map_err(|error| error.to_string())?;
     resolve_session_at(&path, session_id)
 }
 
 fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistration, String> {
+    match begin_session_resolution_at(path, session_id)? {
+        SessionResolution::Resolved(registration) => Ok(registration),
+        SessionResolution::AwaitSelection { generation } => {
+            wait_for_session_selection_at(path, session_id, generation)
+        }
+    }
+}
+
+fn begin_session_resolution_at(path: &Path, session_id: &str) -> Result<SessionResolution, String> {
     let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
     let mut registry = load_registry(path).map_err(|error| error.to_string())?;
     let statuses = prune_stale(&mut registry);
@@ -469,34 +552,189 @@ fn resolve_session_at(path: &Path, session_id: &str) -> Result<WorkspaceRegistra
             .find(|entry| entry.workspace == workspace)
             .cloned()
         {
+            remove_pending_session(&mut registry, session_id);
             save_registry(path, &registry).map_err(|error| error.to_string())?;
-            return Ok(registration);
+            return Ok(SessionResolution::Resolved(registration));
         }
         registry.sessions.remove(session_id);
     }
 
-    let next = registry
+    let live = registry
         .workspaces
         .iter()
-        .find(|entry| {
-            statuses.get(&entry.workspace) == Some(&RegistrationStatus::Live)
-                && !registry
-                    .sessions
-                    .values()
-                    .any(|workspace| workspace == &entry.workspace)
-        })
-        .cloned();
-    let Some(next) = next else {
-        // Persist stale-entry pruning even when no workspace can be assigned.
+        .filter(|entry| statuses.get(&entry.workspace) == Some(&RegistrationStatus::Live))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    match live.as_slice() {
+        [] => {
+            remove_pending_session(&mut registry, session_id);
+            save_registry(path, &registry).map_err(|error| error.to_string())?;
+            Err("No live CatDesk workspace is available for this ChatGPT session. Start CatDesk in the workspace you want to use, then retry the tool call.".to_string())
+        }
+        [only] => {
+            registry
+                .sessions
+                .insert(session_id.to_string(), only.workspace.clone());
+            remove_pending_session(&mut registry, session_id);
+            save_registry(path, &registry).map_err(|error| error.to_string())?;
+            Ok(SessionResolution::Resolved(only.clone()))
+        }
+        _ => {
+            let workspaces = live
+                .iter()
+                .map(|entry| entry.workspace.clone())
+                .collect::<Vec<_>>();
+            let generation = if let Some(existing) = registry
+                .pending_sessions
+                .iter_mut()
+                .find(|pending| pending.session_id == session_id)
+            {
+                existing.workspaces = workspaces;
+                if existing.active_since_ms.is_some() {
+                    existing.active_since_ms = Some(now_millis());
+                }
+                existing.generation
+            } else {
+                registry.next_pending_generation =
+                    registry.next_pending_generation.saturating_add(1);
+                let generation = registry.next_pending_generation;
+                registry.pending_sessions.push(PendingSession {
+                    session_id: session_id.to_string(),
+                    generation,
+                    workspaces,
+                    active_since_ms: None,
+                });
+                activate_front_pending(&mut registry);
+                generation
+            };
+            save_registry(path, &registry).map_err(|error| error.to_string())?;
+            Ok(SessionResolution::AwaitSelection { generation })
+        }
+    }
+}
+
+fn wait_for_session_selection_at(
+    path: &Path,
+    session_id: &str,
+    generation: u64,
+) -> Result<WorkspaceRegistration, String> {
+    let timeout_ms: u64 = SESSION_SELECTION_TIMEOUT
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    loop {
+        std::thread::sleep(SESSION_SELECTION_POLL_INTERVAL);
+        let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
+        let mut registry = load_registry(path).map_err(|error| error.to_string())?;
+        if let Some(workspace) = registry.sessions.get(session_id)
+            && let Some(registration) = registry
+                .workspaces
+                .iter()
+                .find(|entry| &entry.workspace == workspace)
+                .cloned()
+        {
+            return Ok(registration);
+        }
+        let Some(pending) = registry
+            .pending_sessions
+            .iter()
+            .find(|pending| pending.session_id == session_id && pending.generation == generation)
+        else {
+            return Err("The CatDesk workspace selection is no longer pending.".to_string());
+        };
+        let timed_out = pending
+            .active_since_ms
+            .is_some_and(|started| now_millis().saturating_sub(started) >= timeout_ms);
+        if timed_out {
+            remove_pending_generation(&mut registry, session_id, generation);
+            save_registry(path, &registry).map_err(|error| error.to_string())?;
+            return Err("Timed out waiting for a CatDesk workspace selection in TUI.".to_string());
+        }
+    }
+}
+
+pub fn pending_session_selection() -> Result<Option<PendingSessionSelection>, String> {
+    let path = registry_path().map_err(|error| error.to_string())?;
+    pending_session_selection_at(&path)
+}
+
+fn pending_session_selection_at(path: &Path) -> Result<Option<PendingSessionSelection>, String> {
+    let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
+    let registry = load_registry(path).map_err(|error| error.to_string())?;
+    Ok(registry
+        .pending_sessions
+        .first()
+        .map(|pending| PendingSessionSelection {
+            session_id: pending.session_id.clone(),
+            generation: pending.generation,
+            workspaces: pending.workspaces.clone(),
+        }))
+}
+
+pub fn bind_pending_session(
+    session_id: &str,
+    generation: u64,
+    workspace: &str,
+) -> Result<WorkspaceRegistration, String> {
+    let path = registry_path().map_err(|error| error.to_string())?;
+    bind_pending_session_at(&path, session_id, generation, workspace)
+}
+
+fn bind_pending_session_at(
+    path: &Path,
+    session_id: &str,
+    generation: u64,
+    workspace: &str,
+) -> Result<WorkspaceRegistration, String> {
+    let _lock = acquire_registry_lock(path).map_err(|error| error.to_string())?;
+    let mut registry = load_registry(path).map_err(|error| error.to_string())?;
+
+    if let Some(bound_workspace) = registry.sessions.get(session_id) {
+        let registration = registry
+            .workspaces
+            .iter()
+            .find(|entry| &entry.workspace == bound_workspace)
+            .cloned()
+            .ok_or_else(|| "The selected CatDesk workspace is no longer registered.".to_string())?;
+        remove_pending_session(&mut registry, session_id);
         save_registry(path, &registry).map_err(|error| error.to_string())?;
-        return Err("No unbound CatDesk workspace is available for this ChatGPT session. Start or restart CatDesk in the workspace you want to use, then retry the tool call.".to_string());
-    };
+        return Ok(registration);
+    }
+
+    let pending = registry
+        .pending_sessions
+        .iter()
+        .find(|pending| pending.session_id == session_id && pending.generation == generation)
+        .ok_or_else(|| {
+            "This ChatGPT session is no longer waiting for this workspace selection.".to_string()
+        })?;
+    if !pending
+        .workspaces
+        .iter()
+        .any(|candidate| candidate == workspace)
+    {
+        return Err(
+            "The selected workspace is not available for this ChatGPT session.".to_string(),
+        );
+    }
+
+    let registration = registry
+        .workspaces
+        .iter()
+        .find(|entry| entry.workspace == workspace)
+        .cloned()
+        .ok_or_else(|| "The selected CatDesk workspace is no longer registered.".to_string())?;
+    if registration_status(&registration) != RegistrationStatus::Live {
+        return Err("The selected CatDesk workspace is not currently available.".to_string());
+    }
 
     registry
         .sessions
-        .insert(session_id.to_string(), next.workspace.clone());
+        .insert(session_id.to_string(), workspace.to_string());
+    remove_pending_generation(&mut registry, session_id, generation);
     save_registry(path, &registry).map_err(|error| error.to_string())?;
-    Ok(next)
+    Ok(registration)
 }
 
 pub fn bound_registration(session_id: &str) -> Result<Option<WorkspaceRegistration>, String> {
@@ -647,40 +885,228 @@ mod tests {
     }
 
     #[test]
-    fn sessions_bind_to_distinct_live_workspaces_and_stay_stable() {
-        let path = test_registry_path("bindings");
+    fn multiple_sessions_share_single_live_workspace() {
+        let path = test_registry_path("shared-binding");
+        let worker = MockHealthWorker::new("/tmp/project-a");
+        save_test_registry(
+            &path,
+            &WorkspaceRegistry {
+                workspaces: vec![WorkspaceRegistration {
+                    workspace: "/tmp/project-a".into(),
+                    port: worker.port,
+                    pid: std::process::id(),
+                }],
+                ..WorkspaceRegistry::default()
+            },
+        );
+
+        let first = resolve_session_at(&path, "session-a").expect("bind first session");
+        let second = resolve_session_at(&path, "session-b").expect("bind second session");
+
+        assert_eq!(first.workspace, "/tmp/project-a");
+        assert_eq!(second, first);
+        let registry = load_registry(&path).unwrap();
+        assert_eq!(registry.sessions.len(), 2);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn multiple_live_workspaces_wait_for_explicit_selection() {
+        let path = test_registry_path("workspace-selection");
         let worker_a = MockHealthWorker::new("/tmp/project-a");
         let worker_b = MockHealthWorker::new("/tmp/project-b");
-        let port_a = worker_a.port;
-        let port_b = worker_b.port;
-
         save_test_registry(
             &path,
             &WorkspaceRegistry {
                 workspaces: vec![
                     WorkspaceRegistration {
                         workspace: "/tmp/project-a".into(),
-                        port: port_a,
+                        port: worker_a.port,
                         pid: std::process::id(),
                     },
                     WorkspaceRegistration {
                         workspace: "/tmp/project-b".into(),
-                        port: port_b,
+                        port: worker_b.port,
                         pid: std::process::id(),
                     },
                 ],
-                sessions: BTreeMap::new(),
                 ..WorkspaceRegistry::default()
             },
         );
 
-        let first = resolve_session_at(&path, "session-a").expect("bind A");
-        let second = resolve_session_at(&path, "session-b").expect("bind B");
-        let first_again = resolve_session_at(&path, "session-a").expect("rebind A");
+        let generation = match begin_session_resolution_at(&path, "session-a")
+            .expect("start selection")
+        {
+            SessionResolution::AwaitSelection { generation } => generation,
+            SessionResolution::Resolved(_) => panic!("multiple workspaces must require selection"),
+        };
+        let pending = pending_session_selection_at(&path)
+            .expect("read pending selection")
+            .expect("selection exists");
+        assert_eq!(pending.generation, generation);
+        assert_eq!(
+            pending.workspaces,
+            vec!["/tmp/project-a".to_string(), "/tmp/project-b".to_string()]
+        );
 
-        assert_eq!(first.workspace, "/tmp/project-a");
-        assert_eq!(second.workspace, "/tmp/project-b");
-        assert_eq!(first_again, first);
+        let selected = bind_pending_session_at(&path, "session-a", generation, "/tmp/project-b")
+            .expect("bind selected workspace");
+        assert_eq!(selected.workspace, "/tmp/project-b");
+        let resolved = resolve_session_at(&path, "session-a").expect("reuse binding");
+        assert_eq!(resolved.workspace, "/tmp/project-b");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_sessions_are_fifo_and_timeout_starts_when_front_becomes_active() {
+        let path = test_registry_path("workspace-selection-queue");
+        let worker_a = MockHealthWorker::new("/tmp/project-a");
+        let worker_b = MockHealthWorker::new("/tmp/project-b");
+        save_test_registry(
+            &path,
+            &WorkspaceRegistry {
+                workspaces: vec![
+                    WorkspaceRegistration {
+                        workspace: "/tmp/project-a".into(),
+                        port: worker_a.port,
+                        pid: std::process::id(),
+                    },
+                    WorkspaceRegistration {
+                        workspace: "/tmp/project-b".into(),
+                        port: worker_b.port,
+                        pid: std::process::id(),
+                    },
+                ],
+                ..WorkspaceRegistry::default()
+            },
+        );
+
+        let first_generation = match begin_session_resolution_at(&path, "session-z")
+            .expect("queue first session")
+        {
+            SessionResolution::AwaitSelection { generation } => generation,
+            SessionResolution::Resolved(_) => panic!("multiple workspaces must require selection"),
+        };
+        let second_generation = match begin_session_resolution_at(&path, "session-a")
+            .expect("queue second session")
+        {
+            SessionResolution::AwaitSelection { generation } => generation,
+            SessionResolution::Resolved(_) => panic!("multiple workspaces must require selection"),
+        };
+
+        let queued = load_registry(&path).unwrap();
+        assert_eq!(queued.pending_sessions.len(), 2);
+        assert_eq!(queued.pending_sessions[0].session_id, "session-z");
+        assert!(queued.pending_sessions[0].active_since_ms.is_some());
+        assert_eq!(queued.pending_sessions[1].session_id, "session-a");
+        assert!(queued.pending_sessions[1].active_since_ms.is_none());
+        drop(queued);
+
+        let retried_generation = match begin_session_resolution_at(&path, "session-a")
+            .expect("retry queued session")
+        {
+            SessionResolution::AwaitSelection { generation } => generation,
+            SessionResolution::Resolved(_) => panic!("multiple workspaces must require selection"),
+        };
+        assert_eq!(retried_generation, second_generation);
+        let still_queued = load_registry(&path).unwrap();
+        assert!(still_queued.pending_sessions[1].active_since_ms.is_none());
+        drop(still_queued);
+
+        let visible = pending_session_selection_at(&path)
+            .expect("read first queued selection")
+            .expect("selection exists");
+        assert_eq!(visible.session_id, "session-z");
+
+        bind_pending_session_at(&path, "session-z", first_generation, "/tmp/project-a")
+            .expect("bind first queued session");
+
+        let promoted = load_registry(&path).unwrap();
+        assert_eq!(promoted.pending_sessions.len(), 1);
+        assert_eq!(promoted.pending_sessions[0].session_id, "session-a");
+        assert_eq!(promoted.pending_sessions[0].generation, second_generation);
+        assert!(promoted.pending_sessions[0].active_since_ms.is_some());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn repeated_resolution_for_same_session_joins_existing_pending_generation() {
+        let path = test_registry_path("workspace-selection-retry");
+        let worker_a = MockHealthWorker::new("/tmp/project-a");
+        let worker_b = MockHealthWorker::new("/tmp/project-b");
+        save_test_registry(
+            &path,
+            &WorkspaceRegistry {
+                workspaces: vec![
+                    WorkspaceRegistration {
+                        workspace: "/tmp/project-a".into(),
+                        port: worker_a.port,
+                        pid: std::process::id(),
+                    },
+                    WorkspaceRegistration {
+                        workspace: "/tmp/project-b".into(),
+                        port: worker_b.port,
+                        pid: std::process::id(),
+                    },
+                ],
+                ..WorkspaceRegistry::default()
+            },
+        );
+
+        let first_generation = match begin_session_resolution_at(&path, "session-a")
+            .expect("start first request")
+        {
+            SessionResolution::AwaitSelection { generation } => generation,
+            SessionResolution::Resolved(_) => panic!("multiple workspaces must require selection"),
+        };
+        let old_active_since = now_millis().saturating_sub(10_000);
+        let mut registry = load_registry(&path).unwrap();
+        registry.pending_sessions[0].active_since_ms = Some(old_active_since);
+        save_test_registry(&path, &registry);
+
+        let second_generation = match begin_session_resolution_at(&path, "session-a")
+            .expect("join second request")
+        {
+            SessionResolution::AwaitSelection { generation } => generation,
+            SessionResolution::Resolved(_) => panic!("multiple workspaces must require selection"),
+        };
+
+        assert_eq!(second_generation, first_generation);
+        let registry = load_registry(&path).unwrap();
+        assert_eq!(registry.pending_sessions.len(), 1);
+        assert_eq!(registry.pending_sessions[0].generation, first_generation);
+        assert!(
+            registry.pending_sessions[0]
+                .active_since_ms
+                .is_some_and(|refreshed| refreshed > old_active_since)
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn stale_waiter_generation_cannot_remove_new_pending_selection() {
+        let path = test_registry_path("workspace-selection-generation");
+        let mut registry = WorkspaceRegistry {
+            next_pending_generation: 2,
+            pending_sessions: vec![PendingSession {
+                session_id: "session-a".into(),
+                generation: 2,
+                workspaces: vec!["/tmp/project-a".into(), "/tmp/project-b".into()],
+                active_since_ms: Some(now_millis()),
+            }],
+            ..WorkspaceRegistry::default()
+        };
+        activate_front_pending(&mut registry);
+        save_test_registry(&path, &registry);
+
+        assert!(wait_for_session_selection_at(&path, "session-a", 1).is_err());
+        let remaining = load_registry(&path).unwrap();
+        assert_eq!(remaining.pending_sessions.len(), 1);
+        assert_eq!(remaining.pending_sessions[0].generation, 2);
 
         let _ = fs::remove_file(path);
     }
@@ -791,10 +1217,9 @@ mod tests {
     }
 
     #[test]
-    fn no_unbound_workspace_is_reported() {
-        let path = test_registry_path("exhausted");
+    fn occupied_workspace_can_bind_another_session() {
+        let path = test_registry_path("shared-workspace");
         let worker = MockHealthWorker::new("/tmp/project-a");
-        let port = worker.port;
         let mut sessions = BTreeMap::new();
         sessions.insert("existing".into(), "/tmp/project-a".into());
         save_test_registry(
@@ -802,7 +1227,7 @@ mod tests {
             &WorkspaceRegistry {
                 workspaces: vec![WorkspaceRegistration {
                     workspace: "/tmp/project-a".into(),
-                    port,
+                    port: worker.port,
                     pid: std::process::id(),
                 }],
                 sessions,
@@ -810,7 +1235,10 @@ mod tests {
             },
         );
 
-        assert!(resolve_session_at(&path, "new-session").is_err());
+        let resolved = resolve_session_at(&path, "new-session").expect("share workspace");
+        assert_eq!(resolved.workspace, "/tmp/project-a");
+        let registry = load_registry(&path).unwrap();
+        assert_eq!(registry.sessions.len(), 2);
         let _ = fs::remove_file(path);
     }
 

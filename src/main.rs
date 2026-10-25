@@ -56,6 +56,7 @@ const FLOW_ROW_CELLS: usize = FLOW_ANIM_CELLS;
 const FLOW_LANE_LEFT_LABEL: &str = "Your computer ";
 const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
 const UI_POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
+const WORKSPACE_SELECTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const MCP_URL_REVEAL_DURATION: Duration = Duration::from_secs(10);
 const MCP_URL_MASK: &str = "https://▓▓▓▓▓▓▓▓/▓▓▓▓▓▓▓▓/mcp";
 const MCP_PATH_MASK: &str = "/▓▓▓▓▓▓▓▓/mcp";
@@ -4094,6 +4095,80 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width, popup_height)
 }
 
+fn draw_workspace_selection_modal(
+    f: &mut Frame,
+    app: &AppState,
+    pending: &workspace_router::PendingSessionSelection,
+    selected: usize,
+) {
+    let palette = app.current_theme().palette;
+    let modal_bg = Color::Rgb(34, 38, 47);
+    let modal_fg = Color::Rgb(232, 236, 242);
+    let height = (pending.workspaces.len() as u16 + 7).clamp(9, 22);
+    let area = centered_rect(88, height, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Block::default()
+            .title(
+                app.ui_language
+                    .text(" Choose workspace for ChatGPT ", " 選擇 ChatGPT Workspace "),
+            )
+            .borders(Borders::ALL)
+            .border_type(palette.border_type)
+            .border_style(Style::default().fg(palette.border_fg))
+            .style(Style::default().bg(modal_bg)),
+        area,
+    );
+
+    let inner = area.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let message = Paragraph::new(app.ui_language.text(
+        "Multiple CatDesk workspaces are running. Choose where this new ChatGPT session should run.",
+        "目前有多個 CatDesk Workspace。請選擇這個新 ChatGPT Session 要使用哪一個。",
+    ))
+    .style(Style::default().fg(modal_fg).bg(modal_bg))
+    .wrap(Wrap { trim: true });
+    f.render_widget(message, chunks[0]);
+
+    let items = pending
+        .workspaces
+        .iter()
+        .map(|workspace| ListItem::new(workspace.clone()))
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .style(Style::default().fg(modal_fg).bg(modal_bg))
+        .highlight_symbol("› ")
+        .highlight_style(
+            Style::default()
+                .fg(palette.selection_fg)
+                .bg(palette.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut list_state = ratatui::widgets::ListState::default();
+    if !pending.workspaces.is_empty() {
+        list_state.select(Some(selected.min(pending.workspaces.len() - 1)));
+    }
+    f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    let footer = Paragraph::new(app.ui_language.text(
+        "[↑/↓] Select  [Enter] Bind  [q] Quit CatDesk",
+        "[↑/↓] 選擇  [Enter] 綁定  [q] 離開 CatDesk",
+    ))
+    .style(Style::default().fg(palette.muted_fg).bg(modal_bg));
+    f.render_widget(footer, chunks[2]);
+}
+
 async fn run_prompt(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     prompt_title: &str,
@@ -5811,12 +5886,34 @@ async fn run_tui(
     let mut mcp_reveal_button_hovered = false;
     let mut log_secret_revealed_until: HashMap<u64, Instant> = HashMap::new();
     let mut usage_animation = UsageAnimationState::default();
+    let mut pending_workspace_selection: Option<workspace_router::PendingSessionSelection> = None;
+    let mut workspace_selection_index = 0usize;
+    let mut last_workspace_selection_poll = Instant::now() - WORKSPACE_SELECTION_POLL_INTERVAL;
 
     loop {
         {
             let mut app = state.lock().await;
             drain_server_ui_events(&mut app, &mut ui_events);
             app.prune_closed_flows();
+        }
+        if last_workspace_selection_poll.elapsed() >= WORKSPACE_SELECTION_POLL_INTERVAL {
+            if let Ok(Ok(pending)) =
+                tokio::task::spawn_blocking(workspace_router::pending_session_selection).await
+            {
+                let changed = pending_workspace_selection
+                    .as_ref()
+                    .map(|current| current.session_id.as_str())
+                    != pending.as_ref().map(|current| current.session_id.as_str());
+                if changed {
+                    workspace_selection_index = 0;
+                }
+                if let Some(selection) = pending.as_ref() {
+                    workspace_selection_index =
+                        workspace_selection_index.min(selection.workspaces.len().saturating_sub(1));
+                }
+                pending_workspace_selection = pending;
+            }
+            last_workspace_selection_poll = Instant::now();
         }
         {
             let reveal_remaining = mcp_url_revealed_until
@@ -5848,6 +5945,9 @@ async fn run_tui(
                     &log_secret_revealed_until,
                     &mut usage_animation,
                 );
+                if let Some(pending) = pending_workspace_selection.as_ref() {
+                    draw_workspace_selection_modal(f, &app, pending, workspace_selection_index);
+                }
 
                 if let Some(((c0, r0), (c1, r1))) = selection.range() {
                     let palette = app.current_theme().palette;
@@ -5922,6 +6022,78 @@ async fn run_tui(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+                    if let Some(pending) = pending_workspace_selection.clone() {
+                        match key.code {
+                            KeyCode::Up => {
+                                workspace_selection_index =
+                                    workspace_selection_index.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                workspace_selection_index = (workspace_selection_index + 1)
+                                    .min(pending.workspaces.len().saturating_sub(1));
+                            }
+                            KeyCode::Enter => {
+                                if let Some(workspace) =
+                                    pending.workspaces.get(workspace_selection_index).cloned()
+                                {
+                                    let session_id = pending.session_id.clone();
+                                    let selected_workspace = workspace.clone();
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        workspace_router::bind_pending_session(
+                                            &session_id,
+                                            pending.generation,
+                                            &selected_workspace,
+                                        )
+                                    })
+                                    .await;
+                                    match result {
+                                        Ok(Ok(registration)) => {
+                                            pending_workspace_selection = None;
+                                            workspace_selection_index = 0;
+                                            state.lock().await.log(
+                                                "INFO",
+                                                format!(
+                                                    "Bound ChatGPT session to workspace {}",
+                                                    registration.workspace
+                                                ),
+                                            );
+                                            toast = Some((
+                                                current_ui_language
+                                                    .text("Workspace selected", "已選擇 Workspace"),
+                                                (2, 2),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                        Ok(Err(error)) => {
+                                            state.lock().await.log(
+                                                "ERROR",
+                                                format!(
+                                                    "Failed to bind ChatGPT session to workspace: {error}"
+                                                ),
+                                            );
+                                            toast = Some((
+                                                current_ui_language.text(
+                                                    "Workspace selection failed",
+                                                    "Workspace 選擇失敗",
+                                                ),
+                                                (2, 2),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            state.lock().await.log(
+                                                "ERROR",
+                                                format!("Workspace selection task failed: {error}"),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('q') => break,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     selection.clear();
                     match key.code {
                         KeyCode::Char('q') => break,
@@ -5977,6 +6149,7 @@ async fn run_tui(
                         _ => {}
                     }
                 }
+                Event::Mouse(_) if pending_workspace_selection.is_some() => continue,
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         selection.start = Some((mouse.column, mouse.row));
