@@ -5522,6 +5522,21 @@ async fn run_tui(
                     selection.clear();
                     match key.code {
                         KeyCode::Char('q') => break,
+                        KeyCode::Char('p') => {
+                            let pending = server::toggle_yield_next_tool_call();
+                            toast = Some((
+                                if pending {
+                                    current_ui_language.text(
+                                        "Pause pending: next tool call will be skipped",
+                                        "已排程暫停：下次工具呼叫將被攔截",
+                                    )
+                                } else {
+                                    current_ui_language.text("Pause cancelled", "已取消暫停")
+                                },
+                                (2, 2),
+                                Instant::now(),
+                            ));
+                        }
                         KeyCode::Char('e') => {
                             let export_result = {
                                 let app = state.lock().await;

@@ -34,6 +34,30 @@ use crate::workspace_router;
 
 const STATELESS_FLOW_ID: &str = "stateless";
 
+// Each Worker is a separate process, so interruption never affects other workspaces.
+static YIELD_NEXT_TOOL_CALL: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn toggle_yield_next_tool_call() -> bool {
+    !YIELD_NEXT_TOOL_CALL.fetch_xor(true, Ordering::AcqRel)
+}
+
+fn take_yield_next_tool_call(method: &str) -> bool {
+    method == "tools/call" && YIELD_NEXT_TOOL_CALL.swap(false, Ordering::AcqRel)
+}
+
+#[cfg(test)]
+#[test]
+fn user_yield_is_one_shot_and_ignores_discovery() {
+    YIELD_NEXT_TOOL_CALL.store(false, Ordering::Release);
+    assert!(toggle_yield_next_tool_call());
+    assert!(!take_yield_next_tool_call("tools/list"));
+    assert!(take_yield_next_tool_call("tools/call"));
+    assert!(!take_yield_next_tool_call("tools/call"));
+    assert!(toggle_yield_next_tool_call());
+    assert!(!toggle_yield_next_tool_call());
+    assert!(!take_yield_next_tool_call("tools/call"));
+}
+
 fn write_tools_list_diagnostic(has_session: bool) -> std::io::Result<()> {
     let path = crate::state::user_home_dir()?
         .join(".catdesk")
@@ -4115,6 +4139,27 @@ async fn post_mcp_inner(
             message: format!("← POST {mcp_path} {request_summary} validation-error"),
         });
         return response;
+    }
+
+    // The router forwards requests unchanged. Only a Worker consumes its own pause flag.
+    let is_worker = s.app.lock().await.workspace_worker;
+    if is_worker && take_yield_next_tool_call(&req.method) {
+        let _ = s.ui_events.send(ServerUiEvent::Log {
+            level: "WARN",
+            message: "User requested control: skipped the next tool call".into(),
+        });
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({
+                "jsonrpc": "2.0",
+                "id": req.id,
+                "result": {
+                    "content": [{"type": "text", "text": "USER_INTERRUPTION_REQUESTED: The user needs your attention. The requested tool was NOT executed. Stop calling tools, end the current turn, and return control to the user."}],
+                    "isError": true
+                }
+            }).to_string()))
+            .unwrap();
     }
 
     if let Some(response) = route_workspace_tool_call(&s, &body, &body_bytes, headers).await {
