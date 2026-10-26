@@ -4141,12 +4141,17 @@ async fn post_mcp_inner(
         return response;
     }
 
-    // The router forwards requests unchanged. Only a Worker consumes its own pause flag.
-    let is_worker = s.app.lock().await.workspace_worker;
-    if is_worker && take_yield_next_tool_call(&req.method) {
+    // The router forwards requests unchanged; Workers and local servers can yield.
+    let is_router = s.app.lock().await.workspace_router;
+    if !is_router && take_yield_next_tool_call(&req.method) {
         let _ = s.ui_events.send(ServerUiEvent::Log {
             level: "WARN",
             message: "User requested control: skipped the next tool call".into(),
+        });
+        let _ = s.ui_events.send(ServerUiEvent::RecordFlow {
+            flow_id: STATELESS_FLOW_ID.to_string(),
+            events: vec![request_flow_event.clone()],
+            direction: FlowDirection::Backward,
         });
         return Response::builder()
             .status(StatusCode::OK)

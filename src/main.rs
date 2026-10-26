@@ -6426,7 +6426,9 @@ fn draw_ui(
         Span::styled("[End]", Style::default().fg(palette.key_fg)),
         Span::raw(ui_language.text(" Latest  ", " 最新  ")),
         Span::styled("[e]", Style::default().fg(palette.key_fg)),
-        Span::raw(ui_language.text(" Export logs", " 匯出紀錄")),
+        Span::raw(ui_language.text(" Export logs  ", " 匯出紀錄  ")),
+        Span::styled("[p]", Style::default().fg(palette.key_fg)),
+        Span::raw(ui_language.text(" Yield/cancel next tool call", " 攔截／取消下次工具呼叫")),
     ];
     let keys = Paragraph::new(Line::from(key_spans)).block(
         Block::default()
