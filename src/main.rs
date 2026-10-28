@@ -6097,6 +6097,21 @@ async fn run_tui(
                     selection.clear();
                     match key.code {
                         KeyCode::Char('q') => break,
+                        KeyCode::Char('p') => {
+                            let pending = server::toggle_yield_next_tool_call();
+                            toast = Some((
+                                if pending {
+                                    current_ui_language.text(
+                                        "Pause pending: next tool call will be skipped",
+                                        "已排程暫停：下次工具呼叫將被攔截",
+                                    )
+                                } else {
+                                    current_ui_language.text("Pause cancelled", "已取消暫停")
+                                },
+                                (2, 2),
+                                Instant::now(),
+                            ));
+                        }
                         KeyCode::Char('e') => {
                             let export_result = {
                                 let app = state.lock().await;
@@ -7011,7 +7026,9 @@ fn draw_ui(
         Span::styled("[End]", Style::default().fg(palette.key_fg)),
         Span::raw(ui_language.text(" Latest  ", " 最新  ")),
         Span::styled("[e]", Style::default().fg(palette.key_fg)),
-        Span::raw(ui_language.text(" Export logs", " 匯出紀錄")),
+        Span::raw(ui_language.text(" Export logs  ", " 匯出紀錄  ")),
+        Span::styled("[p]", Style::default().fg(palette.key_fg)),
+        Span::raw(ui_language.text(" Yield/cancel next tool call", " 攔截／取消下次工具呼叫")),
     ];
     let keys = Paragraph::new(Line::from(key_spans)).block(
         Block::default()
