@@ -225,7 +225,7 @@ CatDesk 要求 `tools/call` 帶有 `_meta["openai/session"]`，作為匿名對�
 
 # 工具
 
-CatDesk 有兩種本機工具模式：`multi-tools` 預設有 10 個工具（開啟 Library handoff 後是 11 個）；`read-only` 預設有 3 個（開啟後是 4 個）。
+CatDesk 有兩種本機工具模式：`multi-tools` 預設有 10 個工具，開啟 Library handoff 時可再加入 `create_handoff`，啟用 Widget 時可再加入 `open_terminal`（最多 12 個）；`read-only` 預設有 3 個（開啟 Library handoff 後是 4 個）。
 
 `multi-tools` 模式提供以下工具：
 
@@ -239,11 +239,14 @@ CatDesk 有兩種本機工具模式：`multi-tools` 預設有 10 個工具（開
 | `create_handoff`        | 讀取  | 選用：產生這個 workspace 專用的 Library handoff，不會修改 workspace        |
 | `delete`                | 寫入  | 刪除檔案或目錄                                                           |
 | `run_command`           | Shell | 執行短時間的 Shell 指令並等待完成                                        |
+| `open_terminal`         | Shell | 在 ChatGPT Widget 中開啟持續存在的互動式 PTY 終端機                       |
 | `start_command`         | Job   | 啟動長時間執行的指令，立即回傳 job ID                                    |
 | `poll_command`          | Job   | 讀取背景指令的新輸出與目前狀態                                           |
 | `cancel_command`        | Job   | 停止背景指令以及它啟動的子程序                                           |
 
 長時間執行的指令不會綁在單次 MCP HTTP request 上。像是 build、編譯、安裝 dependency、跑大型 test suite 或啟動 development server，都應該用 `start_command`，再拿回傳的 cursor 呼叫 `poll_command`。每次 poll 回傳的內容有大小上限；如果 `hasMoreOutput` 是 true，就算 job 已經結束，也要繼續用 `nextCursor` 往後讀，直到剩餘輸出全部讀完。`run_command` 則適合很快就會跑完的指令，timeout 上限是 120 秒。
+
+`open_terminal` 會在 CatDesk workspace 中啟動使用者的預設 Shell，支援鍵盤輸入、貼上、Ctrl+C、方向鍵、調整尺寸與全螢幕。終端機後端是真正的 PTY；畫面更新會直接在 Widget 與 CatDesk 之間傳遞，不會把每一幀終端機輸出塞進模型 transcript。它只會在 `multi-tools` 且 Widget 啟用時提供。和 `run_command` 一樣，它擁有 CatDesk process 的權限；workspace 只是初始工作目錄，不是作業系統層級的 filesystem sandbox。閒置超過 10 分鐘的終端機 session 會自動終止，同時最多可開啟 4 個 session。
 
 如果有開啟瀏覽器模式，CatDesk 還會提供額外的 browser/devtools 工具。這些工具是由 browser bridge 提供，所以實際有哪些工具會依你的環境而定。
 

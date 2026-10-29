@@ -30,6 +30,7 @@ use crate::state::{
     TokenStatsLayout, UsageTotals, parse_seed_hex, save_agents_path_mode, save_show_detail_mode,
     save_token_stats_layout,
 };
+use crate::terminal_session::TerminalSessionManager;
 use crate::workspace_router;
 
 const STATELESS_FLOW_ID: &str = "stateless";
@@ -71,6 +72,7 @@ struct ServerState {
     app: SharedState,
     devtools: Option<Arc<Mutex<DevtoolsBridge>>>,
     command_jobs: CommandJobManager,
+    terminal_sessions: TerminalSessionManager,
     ui_events: UnboundedSender<ServerUiEvent>,
     catdesk_instruction_called: Arc<AtomicBool>,
     workspace_action_secret: Arc<[u8; 32]>,
@@ -161,6 +163,7 @@ pub fn router(
         app: app_state,
         devtools,
         command_jobs,
+        terminal_sessions: TerminalSessionManager::default(),
         ui_events,
         catdesk_instruction_called: Arc::new(AtomicBool::new(false)),
         workspace_action_secret: new_workspace_action_secret(),
@@ -175,6 +178,11 @@ pub fn router(
     let agents_path_state = format!("{secret_prefix}/agents/path-state");
     let token_stats_layout = format!("{secret_prefix}/layout/token-stats");
     let show_detail_mode = format!("{secret_prefix}/layout/show-detail");
+    let terminal_open_path = format!("{secret_prefix}/terminal/open");
+    let terminal_input_path = format!("{secret_prefix}/terminal/{{session_id}}/input");
+    let terminal_screen_path = format!("{secret_prefix}/terminal/{{session_id}}/screen");
+    let terminal_resize_path = format!("{secret_prefix}/terminal/{{session_id}}/resize");
+    let terminal_session_path = format!("{secret_prefix}/terminal/{{session_id}}");
     let workspace_action_path = format!("{secret_prefix}/workspace/{{port}}/{{*path}}");
 
     Router::new()
@@ -200,6 +208,26 @@ pub fn router(
         .route(
             &token_stats_layout,
             post(post_token_stats_layout).options(options_token_stats_layout),
+        )
+        .route(
+            &terminal_open_path,
+            post(post_terminal_open).options(options_terminal),
+        )
+        .route(
+            &terminal_input_path,
+            post(post_terminal_input).options(options_terminal),
+        )
+        .route(
+            &terminal_screen_path,
+            get(get_terminal_screen).options(options_terminal),
+        )
+        .route(
+            &terminal_resize_path,
+            post(post_terminal_resize).options(options_terminal),
+        )
+        .route(
+            &terminal_session_path,
+            delete(delete_terminal_session).options(options_terminal),
         )
         .route(
             &show_detail_mode,
@@ -1020,6 +1048,44 @@ fn attach_history_usage(result: &mut Option<Value>, usage_totals: &UsageTotals) 
     }
 }
 
+fn attach_terminal_actions(
+    result: &mut Option<Value>,
+    public_base_url: Option<&str>,
+    mcp_path: &str,
+) {
+    let Some(result_obj) = result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(structured) = result_obj
+        .get("structuredContent")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    let is_successful_open_terminal = structured.get("toolName").and_then(Value::as_str)
+        == Some("open_terminal")
+        && structured.get("success").and_then(Value::as_bool) == Some(true);
+    if !is_successful_open_terminal {
+        return;
+    }
+    let Some(widget_payload) = result_obj
+        .get_mut("_meta")
+        .and_then(Value::as_object_mut)
+        .and_then(|meta| meta.get_mut(WIDGET_PAYLOAD_META_KEY))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let terminal_api_base_url = public_base_url
+        .zip(mcp_path.strip_suffix("/mcp"))
+        .map(|(base, secret_prefix)| format!("{base}{secret_prefix}/terminal"))
+        .unwrap_or_default();
+    widget_payload.insert(
+        "terminalApiBaseUrl".to_string(),
+        json!(terminal_api_base_url),
+    );
+}
+
 // ── GET /<slug> — health ───────────────────────────────────
 
 async fn health(State(s): State<ServerState>) -> Json<Value> {
@@ -1464,6 +1530,173 @@ async fn options_show_detail_mode(State(_s): State<ServerState>) -> Response<Bod
         .unwrap()
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TerminalOpenRequest {
+    rows: Option<u16>,
+    cols: Option<u16>,
+}
+
+#[derive(Deserialize)]
+struct TerminalInputRequest {
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct TerminalResizeRequest {
+    rows: u16,
+    cols: u16,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TerminalScreenQuery {
+    after: Option<u64>,
+    wait_ms: Option<u64>,
+}
+
+fn terminal_json_response(status: StatusCode, body: Value) -> Response<Body> {
+    with_widget_action_cors(Response::builder())
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn options_terminal(State(_s): State<ServerState>) -> Response<Body> {
+    with_widget_action_cors(Response::builder())
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn post_terminal_open(
+    State(s): State<ServerState>,
+    Json(request): Json<TerminalOpenRequest>,
+) -> Response<Body> {
+    if !s.catdesk_instruction_called.load(Ordering::Acquire) {
+        return terminal_json_response(
+            StatusCode::FORBIDDEN,
+            json!({ "ok": false, "error": "call catdesk_instruction before opening an interactive terminal" }),
+        );
+    }
+    let workspace_root = {
+        let app = s.app.lock().await;
+        if !app.mode.computer_enabled()
+            || !app.tool_mode.run_command_enabled()
+            || app.show_detail_mode == ShowDetailMode::Disable
+        {
+            return terminal_json_response(
+                StatusCode::FORBIDDEN,
+                json!({ "ok": false, "error": "interactive terminal is disabled by the current CatDesk mode" }),
+            );
+        }
+        app.workspace_root.clone()
+    };
+
+    match s.terminal_sessions.open(
+        std::path::Path::new(&workspace_root),
+        request.rows,
+        request.cols,
+    ) {
+        Ok(session) => terminal_json_response(
+            StatusCode::CREATED,
+            json!({ "ok": true, "session": session }),
+        ),
+        Err(error) => terminal_json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "ok": false, "error": error }),
+        ),
+    }
+}
+
+async fn post_terminal_input(
+    Path(session_id): Path<String>,
+    State(s): State<ServerState>,
+    Json(request): Json<TerminalInputRequest>,
+) -> Response<Body> {
+    const MAX_TERMINAL_INPUT_BYTES: usize = 64 * 1024;
+    if request.data.len() > MAX_TERMINAL_INPUT_BYTES {
+        return terminal_json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({ "ok": false, "error": "terminal input is too large" }),
+        );
+    }
+    match s.terminal_sessions.write_input(&session_id, &request.data) {
+        Ok(session) => {
+            terminal_json_response(StatusCode::OK, json!({ "ok": true, "session": session }))
+        }
+        Err(error) => terminal_json_response(
+            StatusCode::NOT_FOUND,
+            json!({ "ok": false, "error": error }),
+        ),
+    }
+}
+
+async fn get_terminal_screen(
+    Path(session_id): Path<String>,
+    State(s): State<ServerState>,
+    Query(query): Query<TerminalScreenQuery>,
+) -> Response<Body> {
+    const MAX_TERMINAL_SCREEN_WAIT_MS: u64 = 2_000;
+    let wait_ms = query.wait_ms.unwrap_or(0).min(MAX_TERMINAL_SCREEN_WAIT_MS);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+
+    loop {
+        match s.terminal_sessions.snapshot(&session_id) {
+            Ok(session) => {
+                let changed =
+                    query.after.is_none_or(|after| session.version != after) || !session.alive;
+                if changed || wait_ms == 0 || tokio::time::Instant::now() >= deadline {
+                    return terminal_json_response(
+                        StatusCode::OK,
+                        json!({ "ok": true, "session": session }),
+                    );
+                }
+            }
+            Err(error) => {
+                return terminal_json_response(
+                    StatusCode::NOT_FOUND,
+                    json!({ "ok": false, "error": error }),
+                );
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+}
+
+async fn post_terminal_resize(
+    Path(session_id): Path<String>,
+    State(s): State<ServerState>,
+    Json(request): Json<TerminalResizeRequest>,
+) -> Response<Body> {
+    match s
+        .terminal_sessions
+        .resize(&session_id, request.rows, request.cols)
+    {
+        Ok(session) => {
+            terminal_json_response(StatusCode::OK, json!({ "ok": true, "session": session }))
+        }
+        Err(error) => terminal_json_response(
+            StatusCode::NOT_FOUND,
+            json!({ "ok": false, "error": error }),
+        ),
+    }
+}
+
+async fn delete_terminal_session(
+    Path(session_id): Path<String>,
+    State(s): State<ServerState>,
+) -> Response<Body> {
+    match s.terminal_sessions.close(&session_id) {
+        Ok(()) => terminal_json_response(StatusCode::OK, json!({ "ok": true })),
+        Err(error) => terminal_json_response(
+            StatusCode::NOT_FOUND,
+            json!({ "ok": false, "error": error }),
+        ),
+    }
+}
+
 async fn get_agents_path_state(State(s): State<ServerState>) -> Response<Body> {
     let workspace_root = {
         let app = s.app.lock().await;
@@ -1670,6 +1903,7 @@ mod tests {
             app: Arc::new(Mutex::new(app)),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: events,
             catdesk_instruction_called: Arc::new(AtomicBool::new(false)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -1908,6 +2142,7 @@ mod tests {
             app: app_state.clone(),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -1945,6 +2180,7 @@ mod tests {
             app: app_state,
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -1996,6 +2232,7 @@ mod tests {
             app: app_state,
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -2055,6 +2292,7 @@ mod tests {
             app: app_state,
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -2078,7 +2316,7 @@ mod tests {
         }
         let (success, widgets) = tracked.expect("missing bootstrap tools/list event");
         assert!(success);
-        assert_eq!(widgets.len(), 10);
+        assert_eq!(widgets.len(), 11);
         assert_eq!(
             widgets
                 .iter()
@@ -2089,6 +2327,7 @@ mod tests {
                 "start_command",
                 "poll_command",
                 "cancel_command",
+                "open_terminal",
                 "catdesk_instruction",
                 "read",
                 "search",
@@ -2098,7 +2337,12 @@ mod tests {
             ]
         );
         assert!(widgets.iter().all(|widget| {
-            widget.uri.contains("ui://widget/catdesk-dashboard.html")
+            let expected_template = if widget.tool_name == "open_terminal" {
+                "ui://widget/catdesk-terminal.html"
+            } else {
+                "ui://widget/catdesk-dashboard.html"
+            };
+            widget.uri.contains(expected_template)
                 && widget
                     .uri
                     .contains(&format!("toolName={}", widget.tool_name))
@@ -2129,6 +2373,7 @@ mod tests {
             app: app_state,
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -2272,6 +2517,7 @@ mod tests {
             app: app_state,
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -2449,6 +2695,7 @@ mod tests {
             app: Arc::new(Mutex::new(app)),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(false)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -2550,6 +2797,7 @@ mod tests {
             app: app_state,
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -2673,6 +2921,8 @@ mod tests {
             ("POST", "/agents/path-mode"),
             ("POST", "/layout/token-stats"),
             ("POST", "/layout/show-detail"),
+            ("POST", "/terminal/open"),
+            ("GET", "/terminal/unknown/screen"),
             ("POST", "/binagotchy/partner"),
         ];
         for (method, path) in unprefixed {
@@ -2695,6 +2945,131 @@ mod tests {
             .await
             .expect("send prefixed request");
         assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        server.abort();
+        let _ = server.await;
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace_root);
+        let _ = std::fs::remove_dir_all(config_root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_routes_open_write_resize_and_close_session() {
+        let workspace_root = unique_temp_path("catdesk-terminal-route-workspace");
+        let config_root = unique_temp_path("catdesk-terminal-route-config");
+        let config_path = config_root.join("config.toml");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace");
+        std::fs::create_dir_all(&config_root).expect("create config dir");
+
+        let app = AppState::new_for_test(
+            8787,
+            workspace_root.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create app state");
+        let app_state = Arc::new(Mutex::new(app));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+        let router = router(
+            app_state,
+            None,
+            CommandJobManager::new(),
+            "/secret-slug/mcp".to_string(),
+            ui_tx,
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test router");
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}/secret-slug/terminal");
+        let instruction = client
+            .post(format!("http://{addr}/secret-slug/mcp"))
+            .header("mcp-protocol-version", mcp::MODERN_MCP_PROTOCOL_VERSION)
+            .header("mcp-method", "tools/call")
+            .header("mcp-name", "catdesk_instruction")
+            .header("content-type", "application/json")
+            .body(tool_call_body("catdesk_instruction", json!({})))
+            .send()
+            .await
+            .expect("call catdesk_instruction");
+        assert_eq!(instruction.status(), reqwest::StatusCode::OK);
+        let opened = client
+            .post(format!("{base}/open"))
+            .json(&json!({ "rows": 20, "cols": 80 }))
+            .send()
+            .await
+            .expect("open terminal route");
+        assert_eq!(opened.status(), reqwest::StatusCode::CREATED);
+        let opened_json: Value = opened.json().await.expect("parse open response");
+        let session_id = opened_json
+            .get("session")
+            .and_then(|session| session.get("sessionId"))
+            .and_then(Value::as_str)
+            .expect("missing terminal session id")
+            .to_string();
+
+        let input = client
+            .post(format!("{base}/{session_id}/input"))
+            .json(&json!({ "data": "printf 'catdesk-http-pty-ok\\n'\r" }))
+            .send()
+            .await
+            .expect("write terminal input");
+        assert_eq!(input.status(), reqwest::StatusCode::OK);
+
+        let screen = client
+            .get(format!("{base}/{session_id}/screen?after=0&waitMs=1000"))
+            .send()
+            .await
+            .expect("poll terminal screen");
+        assert_eq!(screen.status(), reqwest::StatusCode::OK);
+        let screen_json: Value = screen.json().await.expect("parse screen response");
+        let lines = screen_json
+            .get("session")
+            .and_then(|session| session.get("lines"))
+            .and_then(Value::as_array)
+            .expect("missing terminal lines");
+        assert!(lines.iter().any(|line| {
+            line.as_str()
+                .is_some_and(|line| line.contains("catdesk-http-pty-ok"))
+        }));
+
+        let resized = client
+            .post(format!("{base}/{session_id}/resize"))
+            .json(&json!({ "rows": 30, "cols": 120 }))
+            .send()
+            .await
+            .expect("resize terminal route");
+        assert_eq!(resized.status(), reqwest::StatusCode::OK);
+        let resized_json: Value = resized.json().await.expect("parse resize response");
+        assert_eq!(
+            resized_json
+                .get("session")
+                .and_then(|session| session.get("rows"))
+                .and_then(Value::as_u64),
+            Some(30)
+        );
+        assert_eq!(
+            resized_json
+                .get("session")
+                .and_then(|session| session.get("cols"))
+                .and_then(Value::as_u64),
+            Some(120)
+        );
+
+        let closed = client
+            .delete(format!("{base}/{session_id}"))
+            .send()
+            .await
+            .expect("close terminal route");
+        assert_eq!(closed.status(), reqwest::StatusCode::OK);
 
         server.abort();
         let _ = server.await;
@@ -2802,6 +3177,77 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(7)
         );
+    }
+
+    #[test]
+    fn attach_terminal_actions_keeps_terminal_url_in_widget_meta_only() {
+        let mut result = Some(json!({
+            "structuredContent": {
+                "schema": "catdesk.review.v1",
+                "toolName": "open_terminal",
+                "success": true
+            },
+            "_meta": {
+                WIDGET_PAYLOAD_META_KEY: {
+                    "schema": "catdesk.review.v1",
+                    "toolName": "open_terminal"
+                }
+            }
+        }));
+
+        attach_terminal_actions(
+            &mut result,
+            Some("https://example.ngrok.app"),
+            "/secret-slug/mcp",
+        );
+
+        let structured = result
+            .as_ref()
+            .and_then(|value| value.get("structuredContent"))
+            .expect("missing structuredContent");
+        let widget_payload = result
+            .as_ref()
+            .and_then(|value| value.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        assert!(structured.get("terminalApiBaseUrl").is_none());
+        assert_eq!(
+            widget_payload
+                .get("terminalApiBaseUrl")
+                .and_then(Value::as_str),
+            Some("https://example.ngrok.app/secret-slug/terminal")
+        );
+    }
+
+    #[test]
+    fn attach_terminal_actions_skips_denied_open_terminal_results() {
+        let mut result = Some(json!({
+            "structuredContent": {
+                "schema": "catdesk.review.v1",
+                "toolName": "open_terminal",
+                "success": false,
+                "errorCode": "CATDESK_INSTRUCTION_REQUIRED"
+            },
+            "_meta": {
+                WIDGET_PAYLOAD_META_KEY: {
+                    "schema": "catdesk.review.v1",
+                    "toolName": "open_terminal"
+                }
+            }
+        }));
+
+        attach_terminal_actions(
+            &mut result,
+            Some("https://example.ngrok.app"),
+            "/secret-slug/mcp",
+        );
+
+        let widget_payload = result
+            .as_ref()
+            .and_then(|value| value.get("_meta"))
+            .and_then(|meta| meta.get(WIDGET_PAYLOAD_META_KEY))
+            .expect("missing widget payload");
+        assert!(widget_payload.get("terminalApiBaseUrl").is_none());
     }
 
     #[test]
@@ -2921,6 +3367,7 @@ mod tests {
             app: app_state,
             devtools: None,
             command_jobs: command_jobs.clone(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -3040,6 +3487,7 @@ mod tests {
             app: app_state,
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: instruction_called.clone(),
             workspace_action_secret: new_workspace_action_secret(),
@@ -3081,6 +3529,13 @@ mod tests {
         );
         assert!(!instruction_called.load(Ordering::Acquire));
 
+        let terminal_blocked = post_terminal_open(
+            State(server_state.clone()),
+            Json(TerminalOpenRequest::default()),
+        )
+        .await;
+        assert_eq!(terminal_blocked.status(), StatusCode::FORBIDDEN);
+
         let instruction_response = post_mcp(
             State(server_state.clone()),
             tool_call_body("catdesk_instruction", json!({})),
@@ -3101,8 +3556,15 @@ mod tests {
         );
         assert!(instruction_called.load(Ordering::Acquire));
 
+        let terminal_allowed = post_terminal_open(
+            State(server_state.clone()),
+            Json(TerminalOpenRequest::default()),
+        )
+        .await;
+        assert_eq!(terminal_allowed.status(), StatusCode::CREATED);
+
         let allowed_response = post_mcp(
-            State(server_state),
+            State(server_state.clone()),
             tool_call_body("read", json!({ "paths": ["hello.txt"] })),
         )
         .await;
@@ -3121,6 +3583,7 @@ mod tests {
             Some("hello world\n")
         );
 
+        server_state.terminal_sessions.close_all();
         let _ = std::fs::remove_file(workspace_root.join("hello.txt"));
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir_all(workspace_root);
@@ -3150,6 +3613,7 @@ mod tests {
             app: app_state.clone(),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: instruction_called.clone(),
             workspace_action_secret: new_workspace_action_secret(),
@@ -3325,6 +3789,7 @@ mod tests {
             app: app_state.clone(),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -3443,6 +3908,7 @@ mod tests {
             app: Arc::new(Mutex::new(app)),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -3552,6 +4018,7 @@ mod tests {
             app: Arc::new(Mutex::new(app)),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -3641,6 +4108,7 @@ mod tests {
             app: Arc::new(Mutex::new(app)),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -3765,6 +4233,7 @@ mod tests {
             app: Arc::new(Mutex::new(app)),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -3844,6 +4313,7 @@ mod tests {
             app: Arc::new(Mutex::new(app)),
             devtools: None,
             command_jobs: CommandJobManager::new(),
+            terminal_sessions: TerminalSessionManager::default(),
             ui_events: ui_tx,
             catdesk_instruction_called: Arc::new(AtomicBool::new(true)),
             workspace_action_secret: new_workspace_action_secret(),
@@ -4320,6 +4790,7 @@ async fn post_mcp_inner(
                 mascot_seed,
                 partner_binagotchy_seed.as_deref(),
             );
+            attach_terminal_actions(&mut resp.result, ngrok_url.as_deref(), &mcp_path);
         }
         if let Some(result) = resp.result.as_mut() {
             mcp::decorate_modern_result(&req.method, result);
