@@ -105,12 +105,76 @@ impl UsageTotals {
         );
     }
 
+    fn delta_since(&self, previous: &Self) -> Self {
+        Self {
+            tool_input_tokens: self
+                .tool_input_tokens
+                .saturating_sub(previous.tool_input_tokens),
+            tool_output_tokens: self
+                .tool_output_tokens
+                .saturating_sub(previous.tool_output_tokens),
+            total_tokens: 0,
+            tool_call_count: self
+                .tool_call_count
+                .saturating_sub(previous.tool_call_count),
+        }
+        .normalized()
+    }
+
     fn normalized(mut self) -> Self {
         self.total_tokens = self
             .tool_input_tokens
             .saturating_add(self.tool_output_tokens);
         self
     }
+}
+
+fn acquire_config_lock(path: &Path) -> std::io::Result<crate::file_lock::OwnedFileLock> {
+    crate::file_lock::acquire(&path.with_extension("lock"), 3_000)
+}
+
+fn update_app_config(update: impl FnOnce(&mut AppConfig)) -> std::io::Result<PathBuf> {
+    let path = app_config_path()?;
+    let _lock = acquire_config_lock(&path)?;
+    let mut config = AppConfig::load_from_path(&path)?;
+    update(&mut config);
+    config.save_to_path(&path)?;
+    Ok(path)
+}
+
+#[cfg(not(windows))]
+fn replace_config_file(temporary_path: &Path, path: &Path) -> std::io::Result<()> {
+    fs::rename(temporary_path, path)
+}
+
+#[cfg(windows)]
+fn replace_config_file(temporary_path: &Path, path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let temporary_path = temporary_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    if unsafe {
+        MoveFileExW(
+            temporary_path.as_ptr(),
+            path.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -316,11 +380,7 @@ pub fn app_config_path() -> std::io::Result<PathBuf> {
 }
 
 pub fn save_widget_corner_style(style: WidgetCornerStyle) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
-    let mut config = AppConfig::load_from_path(&path)?;
-    config.widget_corner_style = style;
-    config.save_to_path(&path)?;
-    Ok(path)
+    update_app_config(|config| config.widget_corner_style = style)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -358,6 +418,8 @@ pub struct AppConfig {
     pub tool_mode: ToolMode,
     #[serde(default)]
     pub usage_by_model: BTreeMap<String, UsageTotals>,
+    #[serde(default)]
+    pub usage_epoch: Option<String>,
     pub selected_browser: Option<DetectedBrowser>,
 }
 
@@ -387,6 +449,7 @@ impl Default for AppConfig {
             mode: Mode::Both,
             tool_mode: ToolMode::MultiTools,
             usage_by_model: BTreeMap::new(),
+            usage_epoch: None,
             selected_browser: None,
         }
     }
@@ -463,6 +526,7 @@ impl AppConfig {
         }
 
         let text = toml::to_string_pretty(&config).map_err(std::io::Error::other)?;
+        let temporary_path = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
         let mut options = OpenOptions::new();
         options.create(true).write(true).truncate(true);
         #[cfg(unix)]
@@ -470,15 +534,16 @@ impl AppConfig {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(path)?;
+        let mut file = options.open(&temporary_path)?;
         use std::io::Write as _;
         file.write_all(text.as_bytes())?;
         file.flush()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            fs::set_permissions(&temporary_path, fs::Permissions::from_mode(0o600))?;
         }
+        replace_config_file(&temporary_path, path)?;
         Ok(())
     }
 }
@@ -545,7 +610,7 @@ pub struct FlowAnimSegment {
 }
 
 /// Which MCP backends to enable.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
     Computer, // run_command only
@@ -661,6 +726,8 @@ pub struct AppState {
     pub devtools_running: bool,
     pub port: u16,
     pub workspace_root: String,
+    pub workspace_worker: bool,
+    pub workspace_router: bool,
     pub mascot_seed: u64,
     pub partner_binagotchy_seed: Option<String>,
     pub set_catdesk_as_co_author: bool,
@@ -676,6 +743,9 @@ pub struct AppState {
     pub request_count: u64,
     pub last_tool_call_ms: Option<u128>,
     pub usage_by_model: BTreeMap<String, UsageTotals>,
+    persisted_usage_by_model: BTreeMap<String, UsageTotals>,
+    usage_reset_requested: bool,
+    persisted_config: AppConfig,
     pub session_usage_totals: UsageTotals,
     pub command_jobs: CommandJobManager,
     config_path: PathBuf,
@@ -683,6 +753,8 @@ pub struct AppState {
     pub ngrok_task: Option<tokio::task::JoinHandle<()>>,
     pub remote_browser_child: Option<tokio::process::Child>,
     pub devtools_child: Option<tokio::process::Child>,
+    pub router_client_guard: Option<crate::workspace_router::RouterClientGuard>,
+    pub router_client_heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub type SharedState = Arc<Mutex<AppState>>;
@@ -744,11 +816,7 @@ pub fn load_ngrok_authtoken() -> std::io::Result<Option<String>> {
 }
 
 pub fn save_ngrok_authtoken(token: &str) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
-    let mut config = AppConfig::load_from_path(&path)?;
-    config.ngrok_authtoken = Some(token.to_string());
-    config.save_to_path(&path)?;
-    Ok(path)
+    update_app_config(|config| config.ngrok_authtoken = Some(token.to_string()))
 }
 
 pub fn load_ngrok_domain() -> std::io::Result<Option<String>> {
@@ -756,35 +824,19 @@ pub fn load_ngrok_domain() -> std::io::Result<Option<String>> {
 }
 
 pub fn save_ngrok_domain(domain: &str) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
-    let mut config = AppConfig::load_from_path(&path)?;
-    config.ngrok_domain = Some(domain.to_string());
-    config.save_to_path(&path)?;
-    Ok(path)
+    update_app_config(|config| config.ngrok_domain = Some(domain.to_string()))
 }
 
 pub fn save_agents_path_mode(mode: AgentsPathMode) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
-    let mut config = AppConfig::load_from_path(&path)?;
-    config.agents_path_mode = mode;
-    config.save_to_path(&path)?;
-    Ok(path)
+    update_app_config(|config| config.agents_path_mode = mode)
 }
 
 pub fn save_token_stats_layout(layout: TokenStatsLayout) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
-    let mut config = AppConfig::load_from_path(&path)?;
-    config.token_stats_layout = layout;
-    config.save_to_path(&path)?;
-    Ok(path)
+    update_app_config(|config| config.token_stats_layout = layout)
 }
 
 pub fn save_show_detail_mode(mode: ShowDetailMode) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
-    let mut config = AppConfig::load_from_path(&path)?;
-    config.show_detail_mode = mode;
-    config.save_to_path(&path)?;
-    Ok(path)
+    update_app_config(|config| config.show_detail_mode = mode)
 }
 
 pub fn load_macos_terminal_profile() -> std::io::Result<Option<bool>> {
@@ -792,11 +844,7 @@ pub fn load_macos_terminal_profile() -> std::io::Result<Option<bool>> {
 }
 
 pub fn save_macos_terminal_profile(enabled: bool) -> std::io::Result<PathBuf> {
-    let path = app_config_path()?;
-    let mut config = AppConfig::load_from_path(&path)?;
-    config.macos_terminal_profile = Some(enabled);
-    config.save_to_path(&path)?;
-    Ok(path)
+    update_app_config(|config| config.macos_terminal_profile = Some(enabled))
 }
 
 pub(crate) fn parse_seed_hex(seed: &str) -> std::io::Result<u64> {
@@ -988,7 +1036,9 @@ impl AppState {
         config_path: PathBuf,
     ) -> std::io::Result<Self> {
         let config = AppConfig::load_from_path(&config_path)?;
+        let persisted_config = config.clone();
         let partner_binagotchy_seed = config.partner_binagotchy_seed.clone();
+        let persisted_usage_by_model = config.usage_by_model.clone();
         let mascot_seed = if let Some(seed) = partner_binagotchy_seed.as_deref() {
             parse_seed_hex(seed)?
         } else {
@@ -1038,6 +1088,8 @@ impl AppState {
             sandbox_enabled: config.sandbox_enabled,
             mascot,
             workspace_root,
+            workspace_worker: false,
+            workspace_router: false,
             detected_browsers: Vec::new(),
             selected_browser: config.selected_browser,
             logs: Vec::new(),
@@ -1047,6 +1099,9 @@ impl AppState {
             request_count: 0,
             last_tool_call_ms: None,
             usage_by_model: config.usage_by_model,
+            persisted_usage_by_model,
+            usage_reset_requested: false,
+            persisted_config,
             session_usage_totals: UsageTotals::default(),
             command_jobs: CommandJobManager::new(),
             config_path,
@@ -1054,6 +1109,8 @@ impl AppState {
             ngrok_task: None,
             remote_browser_child: None,
             devtools_child: None,
+            router_client_guard: None,
+            router_client_heartbeat: None,
         })
     }
 
@@ -1088,21 +1145,75 @@ impl AppState {
 
     fn app_config(&self) -> std::io::Result<AppConfig> {
         let mut config = AppConfig::load_from_path(&self.config_path)?;
-        config.mcp_slug = Some(self.mcp_slug.clone());
-        config.ngrok_domain = self.ngrok_domain.clone();
+        if self.persisted_config.mcp_slug.as_deref() != Some(&self.mcp_slug) {
+            config.mcp_slug = Some(self.mcp_slug.clone());
+        }
+        if self.ngrok_domain != self.persisted_config.ngrok_domain {
+            config.ngrok_domain = self.ngrok_domain.clone();
+        }
         config.last_started_version = Some(env!("CARGO_PKG_VERSION").to_string());
-        config.chatgpt_connector_revision = self.chatgpt_connector_revision;
-        config.partner_binagotchy_seed = self.partner_binagotchy_seed.clone();
-        config.set_catdesk_as_co_author = self.set_catdesk_as_co_author;
-        config.handoff_enabled = self.handoff_enabled;
-        config.sandbox_enabled = self.sandbox_enabled;
-        config.theme = self.theme.clone();
-        config.mode = self.mode;
-        config.tool_mode = self.tool_mode;
-        config.show_detail_mode = self.show_detail_mode;
-        config.ui_language = self.ui_language;
-        config.usage_by_model = self.usage_by_model.clone();
-        config.selected_browser = self.selected_browser.clone();
+        if self.chatgpt_connector_revision != self.persisted_config.chatgpt_connector_revision {
+            config.chatgpt_connector_revision = self.chatgpt_connector_revision;
+        }
+        if self.partner_binagotchy_seed != self.persisted_config.partner_binagotchy_seed {
+            config.partner_binagotchy_seed = self.partner_binagotchy_seed.clone();
+        }
+        if self.set_catdesk_as_co_author != self.persisted_config.set_catdesk_as_co_author {
+            config.set_catdesk_as_co_author = self.set_catdesk_as_co_author;
+        }
+        if self.handoff_enabled != self.persisted_config.handoff_enabled {
+            config.handoff_enabled = self.handoff_enabled;
+        }
+        if self.sandbox_enabled != self.persisted_config.sandbox_enabled {
+            config.sandbox_enabled = self.sandbox_enabled;
+        }
+        if self.theme != self.persisted_config.theme {
+            config.theme = self.theme.clone();
+        }
+        // Mode and tool mode describe live server capabilities. A worker must
+        // never write stale in-memory values over another worker's settings.
+        // They are editable only before this worker starts serving requests.
+        if !self.server_running && self.mode != self.persisted_config.mode {
+            config.mode = self.mode;
+        }
+        if !self.server_running && self.tool_mode != self.persisted_config.tool_mode {
+            config.tool_mode = self.tool_mode;
+        }
+        if self.show_detail_mode != self.persisted_config.show_detail_mode {
+            config.show_detail_mode = self.show_detail_mode;
+        }
+        if self.ui_language != self.persisted_config.ui_language {
+            config.ui_language = self.ui_language;
+        }
+        if self.usage_reset_requested {
+            config.usage_epoch = Some(Uuid::new_v4().to_string());
+            config.usage_by_model.clear();
+        }
+        // Do not resurrect pre-reset usage from another process's stale snapshot.
+        let stale_epoch =
+            !self.usage_reset_requested && config.usage_epoch != self.persisted_config.usage_epoch;
+        for (bucket, usage) in &self.usage_by_model {
+            if stale_epoch {
+                break;
+            }
+            let previous = self
+                .persisted_usage_by_model
+                .get(bucket)
+                .cloned()
+                .unwrap_or_default();
+            let delta = usage.delta_since(&previous);
+            config
+                .usage_by_model
+                .entry(bucket.clone())
+                .or_default()
+                .merge(&delta);
+        }
+        if !self.server_running
+            && serde_json::to_value(&self.selected_browser).ok()
+                != serde_json::to_value(&self.persisted_config.selected_browser).ok()
+        {
+            config.selected_browser = self.selected_browser.clone();
+        }
         Ok(config.normalized())
     }
 
@@ -1115,8 +1226,42 @@ impl AppState {
         self.chatgpt_connector_refresh_required = false;
     }
 
-    pub fn persist_state(&self) -> std::io::Result<()> {
-        self.app_config()?.save_to_path(&self.config_path)
+    pub fn persist_state(&mut self) -> std::io::Result<()> {
+        // Config locks can wait for another process. On a multi-thread Tokio
+        // runtime, let the executor replace this blocked worker thread.
+        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        }) {
+            return tokio::task::block_in_place(|| self.persist_state_inner());
+        }
+        self.persist_state_inner()
+    }
+
+    fn persist_state_inner(&mut self) -> std::io::Result<()> {
+        let _lock = acquire_config_lock(&self.config_path)?;
+        let config = self.app_config()?;
+        config.save_to_path(&self.config_path)?;
+        self.theme = config.theme.clone();
+        if !self.server_running {
+            self.mode = config.mode;
+            self.tool_mode = config.tool_mode;
+        }
+        self.show_detail_mode = config.show_detail_mode;
+        self.ui_language = config.ui_language;
+        self.ngrok_domain = config.ngrok_domain.clone();
+        self.chatgpt_connector_revision = config.chatgpt_connector_revision;
+        self.partner_binagotchy_seed = config.partner_binagotchy_seed.clone();
+        self.set_catdesk_as_co_author = config.set_catdesk_as_co_author;
+        self.handoff_enabled = config.handoff_enabled;
+        self.sandbox_enabled = config.sandbox_enabled;
+        if !self.server_running {
+            self.selected_browser = config.selected_browser.clone();
+        }
+        self.usage_by_model = config.usage_by_model.clone();
+        self.persisted_usage_by_model = config.usage_by_model.clone();
+        self.persisted_config = config;
+        self.usage_reset_requested = false;
+        Ok(())
     }
 
     pub fn persist_state_with_log(&mut self) {
@@ -1133,7 +1278,22 @@ impl AppState {
         totals
     }
 
+    pub fn reset_token_billing(&mut self) {
+        self.usage_by_model.clear();
+        self.persisted_usage_by_model.clear();
+        self.usage_reset_requested = true;
+    }
+
     pub fn record_turn_usage(&mut self, tool_input_tokens: u64, tool_output_tokens: u64) {
+        if !self.usage_reset_requested {
+            if let Ok(config) = AppConfig::load_from_path(&self.config_path) {
+                if config.usage_epoch != self.persisted_config.usage_epoch {
+                    self.usage_by_model = config.usage_by_model.clone();
+                    self.persisted_usage_by_model = config.usage_by_model;
+                    self.persisted_config.usage_epoch = config.usage_epoch;
+                }
+            }
+        }
         self.usage_by_model
             .entry(CURRENT_USAGE_BUCKET.to_string())
             .or_default()
@@ -1729,6 +1889,232 @@ toolCallCount = 1
 
         let _ = std::fs::remove_file(config_path);
         let _ = std::fs::remove_dir(workspace);
+    }
+
+    #[test]
+    fn shared_config_merges_usage_from_multiple_workspace_processes() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-worker-config-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let router_config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        let mut router_config = AppConfig {
+            theme: "neon".into(),
+            ..AppConfig::default()
+        };
+        router_config
+            .usage_by_model
+            .entry(CURRENT_USAGE_BUCKET.to_string())
+            .or_default()
+            .accumulate(10, 5, 1);
+        router_config
+            .save_to_path(&router_config_path)
+            .expect("save router config");
+
+        let mut first_worker = AppState::from_config_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            router_config_path.clone(),
+        )
+        .expect("create first worker state");
+        let mut second_worker = AppState::from_config_path(
+            8788,
+            workspace.to_string_lossy().into_owned(),
+            router_config_path.clone(),
+        )
+        .expect("create second worker state");
+
+        first_worker.record_turn_usage(100, 50);
+        second_worker.record_turn_usage(40, 10);
+        first_worker.persist_state().expect("persist first worker");
+        second_worker
+            .persist_state()
+            .expect("persist second worker");
+
+        let shared_config =
+            AppConfig::load_from_path(&router_config_path).expect("reload shared config");
+        assert_eq!(shared_config.theme, "neon");
+        let usage = shared_config
+            .usage_by_model
+            .get(CURRENT_USAGE_BUCKET)
+            .expect("shared usage");
+        assert_eq!(usage.total_tokens, 215);
+        assert_eq!(usage.tool_call_count, 3);
+
+        let _ = std::fs::remove_file(router_config_path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn reset_token_billing_invalidates_other_workers_stale_usage() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("catdesk-reset-multi-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(APP_CONFIG_FILE_NAME);
+        let mut first =
+            AppState::from_config_path(8787, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        let mut second =
+            AppState::from_config_path(8788, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        first.record_turn_usage(100, 50);
+        first.persist_state().unwrap();
+        second.record_turn_usage(20, 10);
+        second.persist_state().unwrap();
+        first.reset_token_billing();
+        first.persist_state().unwrap();
+        assert!(
+            AppConfig::load_from_path(&path)
+                .unwrap()
+                .usage_by_model
+                .is_empty()
+        );
+        second.record_turn_usage(1, 2);
+        second.persist_state().unwrap();
+        let config = AppConfig::load_from_path(&path).unwrap();
+        assert_eq!(
+            config
+                .usage_by_model
+                .values()
+                .map(|u| u.total_tokens)
+                .sum::<u64>(),
+            3
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reset_token_billing_clears_persisted_usage_and_survives_reload() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("catdesk-reset-usage-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(APP_CONFIG_FILE_NAME);
+        let mut app =
+            AppState::from_config_path(8787, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        app.record_turn_usage(100, 70);
+        app.persist_state().unwrap();
+        assert!(app.all_time_usage_totals().total_tokens > 0);
+        app.reset_token_billing();
+        app.persist_state().unwrap();
+        assert_eq!(app.all_time_usage_totals().total_tokens, 0);
+        let mut reloaded =
+            AppState::from_config_path(8787, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        assert_eq!(reloaded.all_time_usage_totals().total_tokens, 0);
+        reloaded.record_turn_usage(2, 3);
+        reloaded.persist_state().unwrap();
+        assert_eq!(
+            AppConfig::load_from_path(&path)
+                .unwrap()
+                .usage_by_model
+                .values()
+                .map(|usage| usage.total_tokens)
+                .sum::<u64>(),
+            5
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_config_does_not_override_running_worker_mode() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("catdesk-shared-live-mode-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(APP_CONFIG_FILE_NAME);
+        let mut running =
+            AppState::from_config_path(8787, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        let mut settings =
+            AppState::from_config_path(8788, root.to_string_lossy().into_owned(), path.clone())
+                .unwrap();
+        running.server_running = true;
+        let original = running.mode;
+        settings.mode = if original == Mode::Browser {
+            Mode::Computer
+        } else {
+            Mode::Browser
+        };
+        settings.persist_state().unwrap();
+        running.record_turn_usage(3, 4);
+        running.persist_state().unwrap();
+        assert_eq!(running.mode, original);
+        assert_eq!(
+            AppConfig::load_from_path(&path).unwrap().mode,
+            settings.mode
+        );
+        running.record_turn_usage(1, 2);
+        running.persist_state().unwrap();
+        assert_eq!(
+            AppConfig::load_from_path(&path).unwrap().mode,
+            settings.mode
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_config_does_not_restore_stale_workspace_settings() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("catdesk-shared-settings-{unique}"));
+        std::fs::create_dir_all(&workspace).expect("create temp workspace");
+        let config_path = workspace.join(APP_CONFIG_FILE_NAME);
+
+        AppConfig {
+            theme: "dark".into(),
+            ..AppConfig::default()
+        }
+        .save_to_path(&config_path)
+        .expect("save initial config");
+
+        let mut workspace_a = AppState::from_config_path(
+            8787,
+            workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create workspace A");
+        let mut workspace_b = AppState::from_config_path(
+            8788,
+            workspace.to_string_lossy().into_owned(),
+            config_path.clone(),
+        )
+        .expect("create workspace B");
+
+        workspace_b.theme = "light".into();
+        workspace_b
+            .persist_state()
+            .expect("persist workspace B theme");
+
+        workspace_a.record_turn_usage(10, 5);
+        workspace_a
+            .persist_state()
+            .expect("persist workspace A usage");
+        assert_eq!(workspace_a.theme, "light");
+
+        workspace_a.record_turn_usage(3, 2);
+        workspace_a
+            .persist_state()
+            .expect("persist workspace A usage again");
+
+        let saved = AppConfig::load_from_path(&config_path).expect("reload shared config");
+        assert_eq!(saved.theme, "light");
+
+        let _ = std::fs::remove_file(config_path);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

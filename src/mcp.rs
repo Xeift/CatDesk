@@ -30,7 +30,7 @@ const SERVER_VERSION: &str = "4.0.0";
 pub(crate) const MODERN_MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const UI_TEMPLATE_URI: &str = "ui://widget/catdesk-dashboard.html";
-const WIDGET_RESOURCE_REVISION: u32 = 6;
+const WIDGET_RESOURCE_REVISION: u32 = 7;
 const UI_TEMPLATE_MIME_TYPE: &str = "text/html;profile=mcp-app";
 pub(crate) const WIDGET_PAYLOAD_META_KEY: &str = "catdesk/widgetPayload";
 const CATDESK_WIDGET_HTML: &str = include_str!("widget/catdesk_dashboard.html");
@@ -500,6 +500,7 @@ fn local_tool_output_schema(name: &str) -> Option<Value> {
     match name {
         "catdesk_instruction" => {
             properties.insert("instructionText".to_string(), json!({ "type": "string" }));
+            properties.insert("workspaceRoot".to_string(), json!({ "type": "string" }));
         }
         "read" => {
             properties.insert(
@@ -855,6 +856,83 @@ async fn handle_tools_list(
         current_show_detail_mode(),
     )
     .await
+}
+
+static ROUTER_DEVTOOLS_TOOLS: tokio::sync::OnceCell<Vec<Value>> =
+    tokio::sync::OnceCell::const_new();
+
+/// Seed a deterministic DevTools catalog in HTTP router tests without spawning Chrome.
+#[cfg(test)]
+pub(crate) fn seed_router_devtools_tools_for_tests() {
+    let _ = ROUTER_DEVTOOLS_TOOLS.set(vec![
+        json!({"name":"navigate_page","inputSchema":{"type":"object"}}),
+        json!({"name":"take_screenshot","inputSchema":{"type":"object"}}),
+    ]);
+}
+
+/// Query chrome-devtools-mcp directly and cache successful discovery only.
+async fn router_devtools_tools() -> Result<Vec<Value>, String> {
+    ROUTER_DEVTOOLS_TOOLS
+        .get_or_try_init(|| async {
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                let bridge = DevtoolsBridge::start(None).await?;
+                let tools = fetch_devtools_tools(&bridge).await.ok_or_else(|| {
+                    "chrome-devtools-mcp tools/list returned no tool definitions".to_string()
+                });
+                bridge.lock().await.stop().await;
+                tools
+            })
+            .await
+            .map_err(|_| "chrome-devtools-mcp tool discovery timed out".to_string())?
+        })
+        .await
+        .cloned()
+}
+
+/// Connector catalog independent of live Workers and session binding.
+pub async fn router_tool_catalog(
+    id: Option<Value>,
+    show_detail_mode: ShowDetailMode,
+) -> Result<JsonRpcResponse, String> {
+    let browser_tools = router_devtools_tools().await?;
+    Ok(router_tool_catalog_with_browser_tools(id, browser_tools, show_detail_mode).await)
+}
+
+async fn router_tool_catalog_with_browser_tools(
+    id: Option<Value>,
+    browser_tools: Vec<Value>,
+    show_detail_mode: ShowDetailMode,
+) -> JsonRpcResponse {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".into(),
+        id,
+        method: "tools/list".into(),
+        params: json!({}),
+    };
+    let mut response = handle_tools_list_with_show_detail_mode(
+        &req,
+        Mode::Both,
+        ToolMode::MultiTools,
+        true,
+        &None,
+        show_detail_mode,
+    )
+    .await;
+    if let Some(tools) = response
+        .result
+        .as_mut()
+        .and_then(|result| result.get_mut("tools"))
+        .and_then(Value::as_array_mut)
+    {
+        for mut tool in browser_tools {
+            ensure_tool_descriptor_widget_template_with_show_detail_mode(
+                &mut tool,
+                show_detail_mode,
+            );
+            tools.push(tool);
+        }
+    }
+    response
 }
 
 async fn handle_tools_list_with_show_detail_mode(
@@ -2349,6 +2427,10 @@ Always specify the branch explicitly when using `git push`."#
         .map(str::to_string)
         .collect();
 
+    lines.push(format!(
+        "This ChatGPT session is routed to CatDesk workspace `{workspace_root}`. Keep all workspace file and command operations inside this workspace."
+    ));
+
     if mode.computer_enabled() {
         lines.push("Use read to read files and search to search the workspace. Name every file you need in one read call.".to_string());
         if handoff_enabled {
@@ -2422,6 +2504,7 @@ fn catdesk_instruction_structured(
     Ok(json!({
         "toolName": "catdesk_instruction",
         "instructionText": instruction_text,
+        "workspaceRoot": workspace_root,
     }))
 }
 
@@ -2463,6 +2546,7 @@ fn catdesk_instruction_widget_payload_with_cards(
     }
     payload_obj.insert("tokenStatsLayoutUrl".to_string(), json!(""));
     payload_obj.insert("showDetailModeUrl".to_string(), json!(""));
+    payload_obj.insert("binagotchyPartnerUrl".to_string(), json!(""));
     payload_obj.insert("configPath".to_string(), json!(config_path));
     payload_obj.insert("configPathDisplay".to_string(), json!(config_path_display));
     payload_obj.insert("binagotchyPath".to_string(), json!(binagotchy_path));
@@ -4007,6 +4091,66 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    #[tokio::test]
+    async fn computer_only_worker_rejects_browser_tool() {
+        let req = tool_call_request("navigate_page", json!({"url":"https://example.com"}));
+        let response = handle_tools_call(
+            &req,
+            ".",
+            1,
+            Mode::Computer,
+            ToolMode::MultiTools,
+            false,
+            &CommandJobManager::new(),
+            &None,
+        )
+        .await;
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|r| r.get("isError"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn router_catalog_is_fixed_without_any_workers() {
+        let browser_tools = vec![
+            json!({"name":"navigate_page","inputSchema":{"type":"object"}}),
+            json!({"name":"take_screenshot","inputSchema":{"type":"object"}}),
+        ];
+        let response = router_tool_catalog_with_browser_tools(
+            Some(json!("catalog-test")),
+            browser_tools,
+            ShowDetailMode::Expanded,
+        )
+        .await;
+        let tools = response
+            .result
+            .as_ref()
+            .unwrap()
+            .get("tools")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        let names: std::collections::HashSet<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains("catdesk_instruction"));
+        assert!(names.contains("run_command"));
+        assert!(names.contains("navigate_page"));
+        assert!(names.contains("take_screenshot"));
+        assert_eq!(
+            names.len(),
+            tools.len(),
+            "catalog must not duplicate tool names"
+        );
+        assert!(tools.iter().all(|tool| tool.get("inputSchema").is_some()));
+    }
+
     fn resources_list_request() -> JsonRpcRequest {
         JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -4885,6 +5029,7 @@ mod tests {
         for (tool_name, field) in [
             ("run_command", "stdout"),
             ("catdesk_instruction", "instructionText"),
+            ("catdesk_instruction", "workspaceRoot"),
             ("read", "files"),
             ("search", "searchResults"),
             ("write", "bytesWritten"),
@@ -6395,6 +6540,10 @@ mod tests {
                 .is_some()
         );
         assert_eq!(
+            structured.get("workspaceRoot").and_then(Value::as_str),
+            Some(workspace_root_str.as_str())
+        );
+        assert_eq!(
             response
                 .result
                 .as_ref()
@@ -7254,7 +7403,7 @@ hello world"
     #[test]
     fn widget_resource_uri_includes_revision_for_cache_busting() {
         let uri = current_widget_resource_uri_for_tool("catdesk_instruction");
-        assert!(uri.contains("widgetRevision=6"));
+        assert!(uri.contains("widgetRevision=7"));
         assert!(uri.contains("toolName=catdesk_instruction"));
     }
 
@@ -7482,6 +7631,10 @@ hello world"
                 .get("instructionText")
                 .and_then(Value::as_str)
                 .is_some()
+        );
+        assert_eq!(
+            structured.get("workspaceRoot").and_then(Value::as_str),
+            Some("/tmp/workspace")
         );
         assert!(structured.get("workspacePath").is_none());
         assert!(structured.get("agentsPath").is_none());

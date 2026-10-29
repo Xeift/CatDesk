@@ -3371,6 +3371,7 @@
             binagotchyPath: "",
             binagotchyPathDisplay: "",
             binagotchyApiBaseUrl: "",
+            binagotchyPartnerUrl: "",
             partnerBinagotchySeed: "",
             binagotchyCards: [],
             mascotWidth: mascotState.mascotWidth,
@@ -3565,6 +3566,12 @@
               data.binagotchyPathDisplay,
             );
             var binagotchyApiBaseUrl = readString(data.binagotchyApiBaseUrl);
+            var binagotchyPartnerUrl = readString(data.binagotchyPartnerUrl);
+            if (binagotchyPartnerUrl === null && binagotchyApiBaseUrl !== null) {
+              binagotchyPartnerUrl = binagotchyApiBaseUrl
+                ? binagotchyApiBaseUrl + "/partner"
+                : "";
+            }
             var partnerBinagotchySeed = readString(data.partnerBinagotchySeed);
             var widgetMascot = validateMascotState(data.widgetMascot);
             var binagotchyCards = validateArrayEntries(
@@ -3595,6 +3602,7 @@
               binagotchyPath === null ||
               binagotchyPathDisplay === null ||
               binagotchyApiBaseUrl === null ||
+              binagotchyPartnerUrl === null ||
               partnerBinagotchySeed === null ||
               widgetMascot === null ||
               binagotchyCards === null
@@ -3626,6 +3634,7 @@
             next.binagotchyPath = binagotchyPath;
             next.binagotchyPathDisplay = binagotchyPathDisplay;
             next.binagotchyApiBaseUrl = binagotchyApiBaseUrl;
+            next.binagotchyPartnerUrl = binagotchyPartnerUrl;
             next.partnerBinagotchySeed = partnerBinagotchySeed;
             next.binagotchyCards = binagotchyCards;
             next.mascotWidth = widgetMascot.mascotWidth;
@@ -4990,9 +4999,10 @@
           var cards = Array.isArray(current.binagotchyCards)
             ? current.binagotchyCards
             : [];
-          var resetPartnerUrl = current.binagotchyApiBaseUrl
-            ? current.binagotchyApiBaseUrl + "/partner"
-            : "";
+          var resetPartnerUrl = current.binagotchyPartnerUrl ||
+            (current.binagotchyApiBaseUrl
+              ? current.binagotchyApiBaseUrl + "/partner"
+              : "");
           var resetPartnerDisabled =
             current.partnerBinagotchySeed && resetPartnerUrl ? "" : " disabled";
           var cardsHtml =

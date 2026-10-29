@@ -4,6 +4,7 @@ mod change_tracking;
 mod command;
 mod command_jobs;
 mod devtools;
+mod file_lock;
 mod handoff;
 #[cfg(target_os = "linux")]
 mod linux_sandbox;
@@ -17,6 +18,7 @@ mod startup;
 mod state;
 mod terminal_session;
 mod theme;
+mod workspace_router;
 mod workspace_tools;
 
 use crossterm::{
@@ -55,6 +57,7 @@ const FLOW_ROW_CELLS: usize = FLOW_ANIM_CELLS;
 const FLOW_LANE_LEFT_LABEL: &str = "Your computer ";
 const REMOTE_CONNECT_UI_GRACE_MS: u128 = 8_000;
 const UI_POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
+const WORKSPACE_SELECTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const MCP_URL_REVEAL_DURATION: Duration = Duration::from_secs(10);
 const MCP_URL_MASK: &str = "https://▓▓▓▓▓▓▓▓/▓▓▓▓▓▓▓▓/mcp";
 const MCP_PATH_MASK: &str = "/▓▓▓▓▓▓▓▓/mcp";
@@ -1680,6 +1683,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An error means a provider was already installed, which is equally fine.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    if std::env::args().any(|arg| arg == "--background-router") {
+        return run_background_router().await;
+    }
+
     let terminal_profile_enabled = macos_terminal_profile_enabled()?;
     match macos_terminal::maybe_relaunch_in_terminal_profile(terminal_profile_enabled) {
         Ok(macos_terminal::LaunchAction::Continue) => {}
@@ -1698,16 +1705,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let port: u16 = std::env::var("PORT")
+    let explicit_port = std::env::var("PORT")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3200);
+        .and_then(|v| v.parse::<u16>().ok());
     let workspace_root = match std::env::var("WORKSPACE_ROOT") {
         Ok(path) => path,
         Err(_) => std::env::current_dir()?.to_string_lossy().into_owned(),
     };
 
-    let state: SharedState = Arc::new(Mutex::new(AppState::new(port, workspace_root)?));
+    let app = AppState::new(
+        explicit_port.unwrap_or(workspace_router::ROUTER_PORT),
+        workspace_root.clone(),
+    )?;
+    let state: SharedState = Arc::new(Mutex::new(app));
     {
         let mut app = state.lock().await;
         app.persist_state_with_log();
@@ -1762,6 +1772,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cleanup after the TUI is gone so quit never appears frozen on screen.
     let command_jobs = { state.lock().await.command_jobs.clone() };
     command_jobs.cancel_all().await;
+    let (registered_workspace, registered_port) = {
+        let app = state.lock().await;
+        (app.workspace_root.clone(), app.port)
+    };
     {
         let mut app = state.lock().await;
         if let Some(handle) = app.server_handle.take() {
@@ -1782,8 +1796,258 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.remote_connected = false;
         app.last_remote_activity_ms = None;
     }
+    let _ = workspace_router::unregister_workspace(&registered_workspace, registered_port);
+    {
+        let mut app = state.lock().await;
+        if let Some(heartbeat) = app.router_client_heartbeat.take() {
+            heartbeat.abort();
+        }
+        app.router_client_guard.take();
+    }
 
     result
+}
+
+async fn prepare_shared_workspace_router(state: SharedState) -> std::io::Result<()> {
+    if std::env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let start_lock = tokio::task::spawn_blocking(workspace_router::acquire_router_start_lock)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))??;
+    let workspace_root = { state.lock().await.workspace_root.clone() };
+    let client = tokio::task::spawn_blocking({
+        let root = workspace_root.clone();
+        move || workspace_router::register_router_client(&root)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+
+    let mcp_slug = {
+        let mut app = state.lock().await;
+        if let Some(mcp_slug) = load_app_config()?.mcp_slug {
+            app.mcp_slug = mcp_slug;
+        }
+        app.persist_state_with_log();
+        app.mcp_slug.clone()
+    };
+
+    if let Err(error) = ensure_background_router(&mcp_slug).await {
+        drop(client);
+        drop(start_lock);
+        return Err(error);
+    }
+    let port = tokio::task::spawn_blocking({
+        let root = workspace_root.clone();
+        move || workspace_router::reserve_worker_port(&root)
+    })
+    .await
+    .map_err(std::io::Error::other)??;
+
+    let heartbeat_workspace = workspace_root.clone();
+    let heartbeat_mcp_slug = mcp_slug.clone();
+    let heartbeat_state = state.clone();
+    let heartbeat = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let root = heartbeat_workspace.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || workspace_router::touch_router_client(&root))
+                    .await;
+            let router_url = format!("http://127.0.0.1:3200/{}", heartbeat_mcp_slug);
+            let router_health = async {
+                reqwest::Client::new()
+                    .get(router_url)
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await
+                    .ok()?
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+            }
+            .await;
+            let (connected, ngrok_url) = router_health
+                .as_ref()
+                .map(|health| {
+                    (
+                        health.get("router").and_then(serde_json::Value::as_bool) == Some(true)
+                            && health
+                                .get("ngrokRunning")
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true),
+                        health
+                            .get("ngrokUrl")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                    )
+                })
+                .unwrap_or((false, None));
+            {
+                let mut app = heartbeat_state.lock().await;
+                app.ngrok_running = connected;
+                app.ngrok_url = if connected { ngrok_url } else { None };
+            }
+            if !connected
+                && let Some(start_lock) =
+                    tokio::task::spawn_blocking(workspace_router::acquire_router_start_lock)
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+            {
+                let _start_lock = start_lock;
+                let _ = ensure_background_router(&heartbeat_mcp_slug).await;
+            }
+        }
+    });
+
+    {
+        let mut app = state.lock().await;
+        app.port = port;
+        app.workspace_worker = true;
+        app.router_client_guard = Some(client);
+        app.router_client_heartbeat = Some(heartbeat);
+        app.log(
+            "INFO",
+            format!(
+                "Shared CatDesk router is ready; registered this process as a workspace worker on port {port}"
+            ),
+        );
+    }
+    drop(start_lock);
+    Ok(())
+}
+
+async fn ensure_background_router(mcp_slug: &str) -> std::io::Result<()> {
+    if workspace_router::router_is_running(mcp_slug).await {
+        return Ok(());
+    }
+
+    let executable = std::env::current_exe()?;
+    let mut child = std::process::Command::new(executable)
+        .arg("--background-router")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    // ngrok authentication and tunnel setup may take longer than five seconds.
+    for _ in 0..300 {
+        if workspace_router::router_is_running(mcp_slug).await {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(std::io::Error::other(format!(
+                "CatDesk background router exited during startup ({status}); check ngrok credentials and domain"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "timed out waiting for the CatDesk background router to start",
+    ))
+}
+
+async fn run_background_router() -> Result<(), Box<dyn std::error::Error>> {
+    let workspace_root = std::env::current_dir()?.to_string_lossy().into_owned();
+    let app = AppState::new(workspace_router::ROUTER_PORT, workspace_root)?;
+    let state: SharedState = Arc::new(Mutex::new(app));
+    {
+        let mut app = state.lock().await;
+        app.workspace_router = true;
+        app.persist_state_with_log();
+    }
+
+    let (ui_events, _ui_event_rx) = unbounded_channel();
+    let (mcp_path, command_jobs) = {
+        let app = state.lock().await;
+        (app.mcp_path(), app.command_jobs.clone())
+    };
+    let router = server::router(state.clone(), None, command_jobs, mcp_path, ui_events);
+    let listener =
+        tokio::net::TcpListener::bind(format!("127.0.0.1:{}", workspace_router::ROUTER_PORT))
+            .await?;
+
+    {
+        let mut app = state.lock().await;
+        app.server_running = true;
+        app.log("INFO", "Background workspace router started".into());
+    }
+    if let Err(error) = ngrok::start(state.clone()).await {
+        return Err(std::io::Error::other(format!(
+            "background router could not start ngrok: {error}"
+        ))
+        .into());
+    }
+
+    // Keep the startup lock from the final no-client check until axum has
+    // actually stopped accepting requests. A new workspace takes this lock
+    // before registering, so it either prevents shutdown or waits to spawn a
+    // replacement after this router is gone.
+    let shutdown_lock = Arc::new(std::sync::Mutex::new(
+        None::<workspace_router::RouterStartupLock>,
+    ));
+    let shutdown_lock_for_wait = shutdown_lock.clone();
+    let state_for_shutdown = state.clone();
+    let serve_result = axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if !state_for_shutdown.lock().await.ngrok_running {
+                    break;
+                }
+                let has_clients =
+                    tokio::task::spawn_blocking(workspace_router::has_live_router_clients)
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or(false);
+                if !has_clients {
+                    let startup_lock =
+                        tokio::task::spawn_blocking(workspace_router::acquire_router_start_lock)
+                            .await
+                            .ok()
+                            .and_then(Result::ok);
+                    let Some(startup_lock) = startup_lock else {
+                        continue;
+                    };
+                    let has_clients =
+                        tokio::task::spawn_blocking(workspace_router::has_live_router_clients)
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .unwrap_or(false);
+                    if !has_clients {
+                        *shutdown_lock_for_wait
+                            .lock()
+                            .expect("router shutdown lock poisoned") = Some(startup_lock);
+                        break;
+                    }
+                }
+            }
+        })
+        .await;
+    shutdown_lock
+        .lock()
+        .expect("router shutdown lock poisoned")
+        .take();
+    serve_result?;
+
+    let mut app = state.lock().await;
+    if let Some(handle) = app.ngrok_task.take() {
+        handle.abort();
+    }
+    app.server_running = false;
+    app.ngrok_running = false;
+    app.ngrok_url = None;
+    Ok(())
 }
 
 // ── Phase 1: Mode selection ─────────────────────────────────
@@ -1852,6 +2116,8 @@ async fn run_app(
     if !continue_run {
         return Ok(());
     }
+
+    prepare_shared_workspace_router(state.clone()).await?;
 
     // Start services
     let (ui_event_tx, mut ui_event_rx) = unbounded_channel();
@@ -3830,6 +4096,80 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width, popup_height)
 }
 
+fn draw_workspace_selection_modal(
+    f: &mut Frame,
+    app: &AppState,
+    pending: &workspace_router::PendingSessionSelection,
+    selected: usize,
+) {
+    let palette = app.current_theme().palette;
+    let modal_bg = Color::Rgb(34, 38, 47);
+    let modal_fg = Color::Rgb(232, 236, 242);
+    let height = (pending.workspaces.len() as u16 + 7).clamp(9, 22);
+    let area = centered_rect(88, height, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Block::default()
+            .title(
+                app.ui_language
+                    .text(" Choose workspace for ChatGPT ", " 選擇 ChatGPT Workspace "),
+            )
+            .borders(Borders::ALL)
+            .border_type(palette.border_type)
+            .border_style(Style::default().fg(palette.border_fg))
+            .style(Style::default().bg(modal_bg)),
+        area,
+    );
+
+    let inner = area.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let message = Paragraph::new(app.ui_language.text(
+        "Multiple CatDesk workspaces are running. Choose where this new ChatGPT session should run.",
+        "目前有多個 CatDesk Workspace。請選擇這個新 ChatGPT Session 要使用哪一個。",
+    ))
+    .style(Style::default().fg(modal_fg).bg(modal_bg))
+    .wrap(Wrap { trim: true });
+    f.render_widget(message, chunks[0]);
+
+    let items = pending
+        .workspaces
+        .iter()
+        .map(|workspace| ListItem::new(workspace.clone()))
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .style(Style::default().fg(modal_fg).bg(modal_bg))
+        .highlight_symbol("› ")
+        .highlight_style(
+            Style::default()
+                .fg(palette.selection_fg)
+                .bg(palette.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut list_state = ratatui::widgets::ListState::default();
+    if !pending.workspaces.is_empty() {
+        list_state.select(Some(selected.min(pending.workspaces.len() - 1)));
+    }
+    f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    let footer = Paragraph::new(app.ui_language.text(
+        "[↑/↓] Select  [Enter] Bind  [q] Quit CatDesk",
+        "[↑/↓] 選擇  [Enter] 綁定  [q] 離開 CatDesk",
+    ))
+    .style(Style::default().fg(palette.muted_fg).bg(modal_bg));
+    f.render_widget(footer, chunks[2]);
+}
+
 async fn run_prompt(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     prompt_title: &str,
@@ -3968,6 +4308,25 @@ async fn run_settings(
                     }
                     KeyCode::Enter => {
                         confirm_reset_token_billing = false;
+                        // Changing the connector identity while other workers
+                        // are live would desynchronize their URLs and the router.
+                        let config_identity_row = themes.len()
+                            + tool_modes.len()
+                            + show_detail_modes.len()
+                            + widget_corner_styles.len()
+                            + 4;
+                        let connector_change_blocked = if selected_row == config_identity_row
+                            || selected_row == config_identity_row + 1
+                        {
+                            let current_workspace = state.lock().await.workspace_root.clone();
+                            tokio::task::spawn_blocking(move || {
+                                workspace_router::has_other_live_router_clients(&current_workspace)
+                            })
+                            .await
+                            .map_err(std::io::Error::other)??
+                        } else {
+                            false
+                        };
                         let mut app = state.lock().await;
                         if selected_row < themes.len() {
                             let picked = themes[selected_row];
@@ -4067,10 +4426,18 @@ async fn run_settings(
                                 } else if selected_row == corner_end + 3 {
                                     // Keep existing slug, do nothing
                                 } else if selected_row == corner_end + 4 {
-                                    app.regenerate_mcp_slug();
-                                    app.log("INFO", "Generated new random MCP slug".into());
-                                    app.persist_state_with_log();
+                                    if connector_change_blocked {
+                                        app.log("WARN", "Stop all other CatDesk workspaces before changing the MCP slug or ngrok domain.".into());
+                                    } else {
+                                        app.regenerate_mcp_slug();
+                                        app.log("INFO", "Generated new random MCP slug".into());
+                                        app.persist_state_with_log();
+                                    }
                                 } else if selected_row == corner_end + 5 {
+                                    if connector_change_blocked {
+                                        app.log("WARN", "Stop all other CatDesk workspaces before changing the MCP slug or ngrok domain.".into());
+                                        continue;
+                                    }
                                     let current_domain =
                                         app.ngrok_domain.clone().unwrap_or_default();
                                     drop(app);
@@ -4107,7 +4474,7 @@ async fn run_settings(
                             continue;
                         }
                         let mut app = state.lock().await;
-                        app.usage_by_model.clear();
+                        app.reset_token_billing();
                         app.log("INFO", "Token billing totals reset".into());
                         app.persist_state_with_log();
                         confirm_reset_token_billing = false;
@@ -5201,8 +5568,9 @@ async fn ensure_selected_browser_remote_debugging(
         return Some(selected);
     };
 
+    let catdesk_port = state.lock().await.port;
     let user_data_dir = format!(
-        "/tmp/catdesk-remote-debug-{}",
+        "/tmp/catdesk-remote-debug-{}-{catdesk_port}",
         sanitize_for_filename(&selected.binary)
     );
     if let Err(e) = std::fs::create_dir_all(&user_data_dir) {
@@ -5450,19 +5818,44 @@ async fn start_services(
         }
     };
 
+    let (workspace_root, workspace_worker) = {
+        let app = state.lock().await;
+        (app.workspace_root.clone(), app.workspace_worker)
+    };
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
+
+    // Registration checks existing workers over HTTP. Keep the listener live
+    // while probing, and never block the Tokio executor on registry I/O.
+    let registration = tokio::task::spawn_blocking(move || {
+        workspace_router::register_workspace(&workspace_root, port)
+    })
+    .await;
+    if let Err(error) = registration.unwrap_or_else(|error| Err(std::io::Error::other(error))) {
+        handle.abort();
+        state.lock().await.log(
+            "ERROR",
+            format!("Failed to register workspace for session routing: {error}"),
+        );
+        return devtools_bridge;
+    }
 
     {
         let mut app = state.lock().await;
         app.server_running = true;
         app.server_handle = Some(handle);
         app.log("INFO", format!("MCP Server started on port {port}"));
+        if workspace_worker {
+            app.log(
+                "INFO",
+                "Workspace worker is ready; the existing CatDesk connector will route a ChatGPT session here when needed."
+                    .into(),
+            );
+        }
     }
 
-    // Start ngrok
-    if let Err(e) = ngrok::start(state.clone()).await {
+    if !workspace_worker && let Err(e) = ngrok::start(state.clone()).await {
         state.lock().await.log("ERROR", format!("ngrok: {e}"));
     }
 
@@ -5494,12 +5887,34 @@ async fn run_tui(
     let mut mcp_reveal_button_hovered = false;
     let mut log_secret_revealed_until: HashMap<u64, Instant> = HashMap::new();
     let mut usage_animation = UsageAnimationState::default();
+    let mut pending_workspace_selection: Option<workspace_router::PendingSessionSelection> = None;
+    let mut workspace_selection_index = 0usize;
+    let mut last_workspace_selection_poll = Instant::now() - WORKSPACE_SELECTION_POLL_INTERVAL;
 
     loop {
         {
             let mut app = state.lock().await;
             drain_server_ui_events(&mut app, &mut ui_events);
             app.prune_closed_flows();
+        }
+        if last_workspace_selection_poll.elapsed() >= WORKSPACE_SELECTION_POLL_INTERVAL {
+            if let Ok(Ok(pending)) =
+                tokio::task::spawn_blocking(workspace_router::pending_session_selection).await
+            {
+                let changed = pending_workspace_selection
+                    .as_ref()
+                    .map(|current| current.session_id.as_str())
+                    != pending.as_ref().map(|current| current.session_id.as_str());
+                if changed {
+                    workspace_selection_index = 0;
+                }
+                if let Some(selection) = pending.as_ref() {
+                    workspace_selection_index =
+                        workspace_selection_index.min(selection.workspaces.len().saturating_sub(1));
+                }
+                pending_workspace_selection = pending;
+            }
+            last_workspace_selection_poll = Instant::now();
         }
         {
             let reveal_remaining = mcp_url_revealed_until
@@ -5531,6 +5946,9 @@ async fn run_tui(
                     &log_secret_revealed_until,
                     &mut usage_animation,
                 );
+                if let Some(pending) = pending_workspace_selection.as_ref() {
+                    draw_workspace_selection_modal(f, &app, pending, workspace_selection_index);
+                }
 
                 if let Some(((c0, r0), (c1, r1))) = selection.range() {
                     let palette = app.current_theme().palette;
@@ -5605,6 +6023,78 @@ async fn run_tui(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+                    if let Some(pending) = pending_workspace_selection.clone() {
+                        match key.code {
+                            KeyCode::Up => {
+                                workspace_selection_index =
+                                    workspace_selection_index.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                workspace_selection_index = (workspace_selection_index + 1)
+                                    .min(pending.workspaces.len().saturating_sub(1));
+                            }
+                            KeyCode::Enter => {
+                                if let Some(workspace) =
+                                    pending.workspaces.get(workspace_selection_index).cloned()
+                                {
+                                    let session_id = pending.session_id.clone();
+                                    let selected_workspace = workspace.clone();
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        workspace_router::bind_pending_session(
+                                            &session_id,
+                                            pending.generation,
+                                            &selected_workspace,
+                                        )
+                                    })
+                                    .await;
+                                    match result {
+                                        Ok(Ok(registration)) => {
+                                            pending_workspace_selection = None;
+                                            workspace_selection_index = 0;
+                                            state.lock().await.log(
+                                                "INFO",
+                                                format!(
+                                                    "Bound ChatGPT session to workspace {}",
+                                                    registration.workspace
+                                                ),
+                                            );
+                                            toast = Some((
+                                                current_ui_language
+                                                    .text("Workspace selected", "已選擇 Workspace"),
+                                                (2, 2),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                        Ok(Err(error)) => {
+                                            state.lock().await.log(
+                                                "ERROR",
+                                                format!(
+                                                    "Failed to bind ChatGPT session to workspace: {error}"
+                                                ),
+                                            );
+                                            toast = Some((
+                                                current_ui_language.text(
+                                                    "Workspace selection failed",
+                                                    "Workspace 選擇失敗",
+                                                ),
+                                                (2, 2),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            state.lock().await.log(
+                                                "ERROR",
+                                                format!("Workspace selection task failed: {error}"),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('q') => break,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     selection.clear();
                     match key.code {
                         KeyCode::Char('q') => break,
@@ -5660,6 +6150,7 @@ async fn run_tui(
                         _ => {}
                     }
                 }
+                Event::Mouse(_) if pending_workspace_selection.is_some() => continue,
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         selection.start = Some((mouse.column, mouse.row));
