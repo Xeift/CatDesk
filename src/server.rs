@@ -3791,7 +3791,7 @@ mod tests {
             response_json
                 .pointer("/result/tools/0/name")
                 .and_then(Value::as_str),
-            Some("run_command")
+            Some("browser_worker_tool")
         );
 
         workspace_router::unregister_workspace(&worker_workspace.to_string_lossy(), worker_port)
@@ -3952,6 +3952,50 @@ async fn route_workspace_tool_call(
         return None;
     }
     if method == "tools/list" {
+        // Prefer the actual Worker catalog when discovery has an unambiguous target.
+        // Do not bind a new session just to discover tools.
+        let session = workspace_router::session_id_from_request(body).map(str::to_owned);
+        let discovery = tokio::task::spawn_blocking(move || {
+            workspace_router::discovery_registration(session.as_deref())
+        })
+        .await;
+        if let Ok(Ok(Some(target))) = discovery {
+            let url = format!("http://127.0.0.1:{}{}", target.port, mcp_path);
+            let client = reqwest::Client::new();
+            let mut request = client
+                .post(url)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body_bytes.to_vec());
+            for name in ["mcp-protocol-version", "mcp-method", "mcp-name"] {
+                if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+                    request = request.header(name, value);
+                }
+            }
+            if let Ok(response) = request.send().await {
+                if response.status().is_success() {
+                    if let Ok(bytes) = response.bytes().await {
+                        if let Ok(mut payload) = serde_json::from_slice::<Value>(&bytes) {
+                            if payload
+                                .pointer("/result/tools")
+                                .and_then(Value::as_array)
+                                .is_some()
+                            {
+                                if let Some(result) = payload.get_mut("result") {
+                                    mcp::decorate_modern_result(method, result);
+                                }
+                                return Some(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header(header::CONTENT_TYPE, "application/json")
+                                        .body(Body::from(payload.to_string()))
+                                        .unwrap(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let mut response =
             match mcp::router_tool_catalog(body.get("id").cloned(), show_detail_mode).await {
                 Ok(response) => response,

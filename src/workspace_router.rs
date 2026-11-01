@@ -737,6 +737,40 @@ fn bind_pending_session_at(
     Ok(registration)
 }
 
+/// Find a discovery target without binding a new session. When several Workers
+/// are available, only an existing session binding can select one safely.
+pub fn discovery_registration(
+    session_id: Option<&str>,
+) -> Result<Option<WorkspaceRegistration>, String> {
+    let path = registry_path().map_err(|error| error.to_string())?;
+    let _lock = acquire_registry_lock(&path).map_err(|error| error.to_string())?;
+    let mut registry = load_registry(&path).map_err(|error| error.to_string())?;
+    let statuses = prune_stale(&mut registry);
+    let bound = session_id
+        .and_then(|id| registry.sessions.get(id))
+        .and_then(|workspace| {
+            registry
+                .workspaces
+                .iter()
+                .find(|entry| &entry.workspace == workspace)
+                .cloned()
+        });
+    let live: Vec<_> = registry
+        .workspaces
+        .iter()
+        .filter(|entry| statuses.get(&entry.workspace) == Some(&RegistrationStatus::Live))
+        .cloned()
+        .collect();
+    save_registry(&path, &registry).map_err(|error| error.to_string())?;
+    Ok(bound.or_else(|| {
+        if live.len() == 1 {
+            live.into_iter().next()
+        } else {
+            None
+        }
+    }))
+}
+
 pub fn bound_registration(session_id: &str) -> Result<Option<WorkspaceRegistration>, String> {
     let path = registry_path().map_err(|error| error.to_string())?;
     bound_registration_at(&path, session_id)
